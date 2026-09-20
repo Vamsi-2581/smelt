@@ -1,5 +1,10 @@
 # 终端选区重构计划：跟随滚动 + 拖边缘自动滚动 + 跨屏复制
 
+> ### ⚠️ 状态：历史交接文档存档
+> 本计划描述的终端选区功能已**完整实现并合入**，本文作为历史交接文档存档。
+> 行号与实现细节已随重构漂移，实施请以 `crates/smelt/src/terminal.rs`、
+> `crates/smelt/src/terminal_view.rs` 为准，勿按本文档字面执行。
+
 > 交接文档。这个功能在原会话里工具输出污染严重（Edit 回执假成功、grep/输出被截断、
 > 还混入过一次 prompt injection），只做完了数据层就叫停，改到干净会话重做。仓库已恢复到
 > 未改动状态（HEAD = v0.5.0）。**新会话照本文档从头实施即可，别沿用任何半成品。**
@@ -163,5 +168,5 @@
 ## 七、本会话已验证的中间结论（可直接采信）
 
 - 数据层四处改动（Cell.selected、snapshot 的 sel_range + per-cell contains + push）改完后
-  `cargo check --bin workspace` **0 错误**，已验证可行。已回滚，按上表重做即可。
+  `cargo check --bin smelt` **0 错误**，已验证可行。已回滚，按上表重做即可。
 - `contains(indexed.point)` 的坐标同源判定成立（不用手动换算 Line↔usize）。

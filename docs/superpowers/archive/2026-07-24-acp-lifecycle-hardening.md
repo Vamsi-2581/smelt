@@ -1,10 +1,12 @@
 # ACP Lifecycle Hardening Implementation Plan
 
+> Status (2026-08-16): this plan is historical. Later detach-first kill + `SessionRetiring` sleep was removed. Current exit fact is `waitpid`. Do not execute remaining checkboxes that conflict with Recreate.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make daemon-hosted ACP sessions race-free across open, kill, restart, and upgrade while preserving structured workspace-profile launch settings and emitting one waiting notification.
 
-**Architecture:** Introduce a structured `AcpLaunchSpec` in `smelt-core`, a focused `AcpRegistry` in `smeltd`, and one shared spawn/upgrade gate used at the actual process-spawn boundary. Persist profile identity and launch specs through the GUI, daemon protocol, and handoff; centralize invalid-handoff cleanup and notification production.
+**Architecture:** Introduce a structured `ConversationLaunchSpec` in `smelt-core`, a focused `AcpRegistry` in `smeltd`, and one shared spawn/upgrade gate used at the actual process-spawn boundary. Persist profile identity and launch specs through the GUI, daemon protocol, and handoff; centralize invalid-handoff cleanup and notification production.
 
 **Tech Stack:** Rust 2024, std synchronization primitives, serde/serde_json, smol, Unix sockets and file descriptors, GPUI, Cargo test/check.
 
@@ -14,12 +16,12 @@
 
 - Create `crates/smeltd/src/acp_registry.rs`: atomic ACP ID reservation, per-ID lifecycle serialization, snapshots, removal, and shared spawn gate ownership.
 - Modify `crates/smeltd/src/main.rs`: use `AcpRegistry`, wire structured launches, gate upgrade collection, clean rejected handoff resources, and update daemon tests.
-- Modify `crates/smelt-core/src/agent_kind.rs`: define `AcpLaunchSpec` and generate profile launch specs.
-- Modify `crates/smelt-core/src/acp_conn.rs`: consume `AcpLaunchSpec` and acquire the shared gate at the real child-spawn boundary.
+- Modify `crates/smelt-core/src/agent_kind.rs`: define `ConversationLaunchSpec` and generate profile launch specs.
+- Modify `crates/smelt-core/src/acp_conn.rs`: consume `ConversationLaunchSpec` and acquire the shared gate at the real child-spawn boundary.
 - Modify `crates/smelt-core/src/acp_client.rs`: send structured launch specs over `acp_open`.
 - Modify `crates/smelt-core/src/workspace_override.rs`: read workspace overrides from structured launch specs while retaining legacy command-prefix compatibility.
 - Modify `crates/smelt-acp-view/src/acp_view.rs`: retain `profile_id` and launch spec, resolve restart configuration correctly, and stop producing duplicate notifications.
-- Modify `crates/smelt/src/main.rs`: persist/restore `profile_id` and `AcpLaunchSpec`, and pass them through session creation.
+- Modify `crates/smelt/src/main.rs`: persist/restore `profile_id` and `ConversationLaunchSpec`, and pass them through session creation.
 - Modify `crates/smelt/src/session_list.rs`: create profile sessions with structured launch specs and profile IDs.
 - Modify `crates/smelt/src/session_history.rs`: expand profile directories and resume history with structured launch specs.
 
@@ -50,7 +52,7 @@ mod tests {
 
         let spec = profile.launch_spec();
 
-        assert_eq!(spec.command, AcpAgentKind::Claude.default_cmd());
+        assert_eq!(spec.command, ConversationAgentKind::Claude.default_cmd());
         assert_eq!(
             spec.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
             Some("~/Claude Workspaces/quant")
@@ -59,7 +61,7 @@ mod tests {
 
     #[test]
     fn plain_launch_spec_has_no_environment_overrides() {
-        let spec = AcpLaunchSpec::from_command("claude --flag");
+        let spec = ConversationLaunchSpec::from_command("claude --flag");
         assert_eq!(spec.command, "claude --flag");
         assert!(spec.env.is_empty());
     }
@@ -71,7 +73,7 @@ Add this test to `crates/smelt-core/src/workspace_override.rs`:
 ```rust
 #[test]
 fn structured_override_wins_and_expands_tilde() {
-    let mut spec = crate::agent_kind::AcpLaunchSpec::from_command(
+    let mut spec = crate::agent_kind::ConversationLaunchSpec::from_command(
         "CLAUDE_CONFIG_DIR=/legacy claude",
     );
     spec.env
@@ -97,9 +99,9 @@ Run:
 cargo test -p smelt-core agent_kind::tests workspace_override::tests::structured_override_wins_and_expands_tilde
 ```
 
-Expected: compilation fails because `AcpLaunchSpec`, `launch_spec`, and `env_override_from_launch` do not exist.
+Expected: compilation fails because `ConversationLaunchSpec`, `launch_spec`, and `env_override_from_launch` do not exist.
 
-- [ ] **Step 3: Implement `AcpLaunchSpec` and profile generation**
+- [ ] **Step 3: Implement `ConversationLaunchSpec` and profile generation**
 
 Add to `crates/smelt-core/src/agent_kind.rs`:
 
@@ -107,13 +109,13 @@ Add to `crates/smelt-core/src/agent_kind.rs`:
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct AcpLaunchSpec {
+pub struct ConversationLaunchSpec {
     pub command: String,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
 }
 
-impl AcpLaunchSpec {
+impl ConversationLaunchSpec {
     pub fn from_command(command: impl Into<String>) -> Self {
         Self { command: command.into(), env: BTreeMap::new() }
     }
@@ -128,8 +130,8 @@ impl AcpLaunchSpec {
 Replace `AcpProfile::command` with:
 
 ```rust
-pub fn launch_spec(&self) -> AcpLaunchSpec {
-    AcpLaunchSpec::from_command(self.kind().default_cmd())
+pub fn launch_spec(&self) -> ConversationLaunchSpec {
+    ConversationLaunchSpec::from_command(self.kind().default_cmd())
         .with_env(self.env_var(), self.workspace_dir.clone())
 }
 ```
@@ -148,7 +150,7 @@ Add to `crates/smelt-core/src/workspace_override.rs`:
 
 ```rust
 pub fn env_override_from_launch(
-    launch: &crate::agent_kind::AcpLaunchSpec,
+    launch: &crate::agent_kind::ConversationLaunchSpec,
     var_name: &str,
 ) -> Option<String> {
     launch
@@ -161,11 +163,11 @@ pub fn env_override_from_launch(
 
 - [ ] **Step 5: Make the ACP connection consume the launch spec**
 
-Change `AcpLaunch` in `crates/smelt-core/src/acp_conn.rs`:
+Change `ConversationLaunch` in `crates/smelt-core/src/acp_conn.rs`:
 
 ```rust
-pub struct AcpLaunch {
-    pub launch: crate::agent_kind::AcpLaunchSpec,
+pub struct ConversationLaunch {
+    pub launch: crate::agent_kind::ConversationLaunchSpec,
     pub cwd: Option<String>,
     pub sid: String,
     pub resume_session_id: Option<SessionId>,
@@ -173,7 +175,7 @@ pub struct AcpLaunch {
 }
 ```
 
-Change `build_agent` to accept `&AcpLaunchSpec`. Keep the current
+Change `build_agent` to accept `&ConversationLaunchSpec`. Keep the current
 `extended_search_path`, `resolve_in_path`, and `resolved` executable/argument
 construction unchanged. Replace the current `user_env` collection and final
 argument-chain construction with the following code so legacy leading
@@ -181,7 +183,7 @@ argument-chain construction with the following code so legacy leading
 
 ```rust
 fn build_agent(
-    launch: &crate::agent_kind::AcpLaunchSpec,
+    launch: &crate::agent_kind::ConversationLaunchSpec,
 ) -> Result<AcpAgent, agent_client_protocol::Error> {
     let mut tokens = launch.command.split_whitespace();
     let mut env = std::collections::BTreeMap::<String, String>::new();
@@ -250,7 +252,7 @@ Extend the `AcpSaved` serde test in `crates/smelt/src/main.rs`:
 fn acp_saved_round_trip_preserves_profile_and_launch_spec() {
     let saved = AcpSaved {
         cwd: Some("/repo".into()),
-        launch: smelt_core::agent_kind::AcpLaunchSpec::from_command("claude")
+        launch: smelt_core::agent_kind::ConversationLaunchSpec::from_command("claude")
             .with_env("CLAUDE_CONFIG_DIR", "~/Claude Workspaces/quant"),
         profile_id: Some("quant".into()),
         agent: Some("claude".into()),
@@ -302,10 +304,10 @@ Expected: compilation fails because the persisted fields and constructors still 
 In `crates/smelt-core/src/acp_client.rs`:
 
 ```rust
-pub struct AcpClientLaunch {
+pub struct ConversationClientLaunch {
     pub id: String,
     pub cwd: Option<String>,
-    pub launch: crate::agent_kind::AcpLaunchSpec,
+    pub launch: crate::agent_kind::ConversationLaunchSpec,
     pub agent_id: String,
     pub resume_id: Option<String>,
 }
@@ -329,15 +331,15 @@ let req = serde_json::json!({
 Replace `cmd: String` with:
 
 ```rust
-launch: smelt_core::agent_kind::AcpLaunchSpec,
+launch: smelt_core::agent_kind::ConversationLaunchSpec,
 profile_id: Option<String>,
 ```
 
 Change `start` and `placeholder` to accept those fields, pass `launch.clone()`
-into `AcpClientLaunch`, and expose:
+into `ConversationClientLaunch`, and expose:
 
 ```rust
-pub fn launch_spec(&self) -> smelt_core::agent_kind::AcpLaunchSpec {
+pub fn launch_spec(&self) -> smelt_core::agent_kind::ConversationLaunchSpec {
     self.launch.clone()
 }
 
@@ -355,7 +357,7 @@ Use a custom legacy field:
 struct AcpSaved {
     cwd: Option<String>,
     #[serde(default)]
-    launch: smelt_core::agent_kind::AcpLaunchSpec,
+    launch: smelt_core::agent_kind::ConversationLaunchSpec,
     #[serde(default, skip_serializing)]
     cmd: Option<String>,
     #[serde(default)]
@@ -371,9 +373,9 @@ struct AcpSaved {
 }
 
 impl AcpSaved {
-    fn normalized_launch(&self) -> smelt_core::agent_kind::AcpLaunchSpec {
+    fn normalized_launch(&self) -> smelt_core::agent_kind::ConversationLaunchSpec {
         if self.launch.command.is_empty() {
-            smelt_core::agent_kind::AcpLaunchSpec::from_command(
+            smelt_core::agent_kind::ConversationLaunchSpec::from_command(
                 self.cmd.clone().unwrap_or_default(),
             )
         } else {
@@ -398,11 +400,11 @@ Change `Workspace::add_acp_session` and `resume_acp_session` in
 `crates/smelt/src/main.rs` to accept:
 
 ```rust
-launch_override: Option<smelt_core::agent_kind::AcpLaunchSpec>,
+launch_override: Option<smelt_core::agent_kind::ConversationLaunchSpec>,
 profile_id: Option<String>,
 ```
 
-Use `AcpLaunchSpec::from_command(settings::acp_cmd_for(agent, cx))` for ordinary
+Use `ConversationLaunchSpec::from_command(settings::acp_cmd_for(agent, cx))` for ordinary
 agent sessions.
 
 - [ ] **Step 7: Run tests and check affected GUI crates**
@@ -705,11 +707,11 @@ fn with_spawn_gate<R>(
 }
 
 pub fn spawn_acp(
-    launch: AcpLaunch,
+    launch: ConversationLaunch,
     spawn_gate: Option<Arc<std::sync::RwLock<()>>>,
-) -> AcpHandle {
-    let (cmd_tx, cmd_rx) = smol::channel::unbounded::<AcpCommand>();
-    let (event_tx, event_rx) = smol::channel::unbounded::<AcpEvent>();
+) -> ConversationHandle {
+    let (cmd_tx, cmd_rx) = smol::channel::unbounded::<ConversationCommand>();
+    let (event_tx, event_rx) = smol::channel::unbounded::<ConversationEvent>();
     let stdio: Arc<Mutex<Option<AcpStdio>>> = Arc::new(Mutex::new(None));
     let stdio_for_thread = Arc::clone(&stdio);
     let thread_name = format!("smelt-acp-{}", &launch.sid[..launch.sid.len().min(12)]);
@@ -720,17 +722,17 @@ pub fn spawn_acp(
             let cmd = {
                 let tx = event_tx.clone();
                 match resolve_runtime_command(&launch.launch.command, &|msg| {
-                    let _ = tx.try_send(AcpEvent::Status(msg.to_string()));
+                    let _ = tx.try_send(ConversationEvent::Status(msg.to_string()));
                 }) {
                     Ok(command) => command,
                     Err(error) => {
-                        let _ = event_tx.try_send(AcpEvent::Fatal(error));
+                        let _ = event_tx.try_send(ConversationEvent::Fatal(error));
                         return;
                     }
                 }
             };
-            let launch = AcpLaunch {
-                launch: crate::agent_kind::AcpLaunchSpec {
+            let launch = ConversationLaunch {
+                launch: crate::agent_kind::ConversationLaunchSpec {
                     command: cmd,
                     env: launch.launch.env,
                 },
@@ -751,11 +753,11 @@ pub fn spawn_acp(
                 } else {
                     format!("{error}\n--- agent stderr ---\n{tail}")
                 };
-                let _ = event_tx.try_send(AcpEvent::Fatal(message));
+                let _ = event_tx.try_send(ConversationEvent::Fatal(message));
             }
         })
         .expect("spawn smelt-acp thread");
-    AcpHandle { cmd_tx, event_rx, stdio }
+    ConversationHandle { cmd_tx, event_rx, stdio }
 }
 ```
 
@@ -974,11 +976,11 @@ Extract a pure helper:
 
 ```rust
 fn resolve_restart_launch(
-    current: &smelt_core::agent_kind::AcpLaunchSpec,
+    current: &smelt_core::agent_kind::ConversationLaunchSpec,
     profile_id: Option<&str>,
-    config: &smelt_ui::agent_ui_config::AgentUiConfig,
-    agent: AcpAgentKind,
-) -> smelt_core::agent_kind::AcpLaunchSpec
+    config: &smelt_ui::agent_host_state::AgentHostState,
+    agent: ConversationAgentKind,
+) -> smelt_core::agent_kind::ConversationLaunchSpec
 ```
 
 Test:
@@ -986,18 +988,18 @@ Test:
 ```rust
 #[test]
 fn restart_regenerates_existing_profile_launch() {
-    let mut config = AgentUiConfig::default();
+    let mut config = AgentHostState::default();
     config.profiles.push(AcpProfile {
         id: "quant".into(),
         kind_id: "claude".into(),
         label: "Quant".into(),
         workspace_dir: "~/new quant".into(),
     });
-    let old = AcpLaunchSpec::from_command("claude")
+    let old = ConversationLaunchSpec::from_command("claude")
         .with_env("CLAUDE_CONFIG_DIR", "~/old");
 
     let resolved =
-        resolve_restart_launch(&old, Some("quant"), &config, AcpAgentKind::Claude);
+        resolve_restart_launch(&old, Some("quant"), &config, ConversationAgentKind::Claude);
 
     assert_eq!(
         resolved.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
@@ -1007,8 +1009,8 @@ fn restart_regenerates_existing_profile_launch() {
 
 #[test]
 fn removed_profile_falls_back_to_persisted_launch() {
-    let config = AgentUiConfig::default();
-    let persisted = AcpLaunchSpec::from_command("claude")
+    let config = AgentHostState::default();
+    let persisted = ConversationLaunchSpec::from_command("claude")
         .with_env("CLAUDE_CONFIG_DIR", "~/removed profile");
 
     assert_eq!(
@@ -1016,7 +1018,7 @@ fn removed_profile_falls_back_to_persisted_launch() {
             &persisted,
             Some("missing"),
             &config,
-            AcpAgentKind::Claude,
+            ConversationAgentKind::Claude,
         ),
         persisted
     );
@@ -1039,17 +1041,17 @@ Use:
 
 ```rust
 fn resolve_restart_launch(
-    current: &AcpLaunchSpec,
+    current: &ConversationLaunchSpec,
     profile_id: Option<&str>,
-    config: &AgentUiConfig,
-    agent: AcpAgentKind,
-) -> AcpLaunchSpec {
+    config: &AgentHostState,
+    agent: ConversationAgentKind,
+) -> ConversationLaunchSpec {
     match profile_id {
         Some(id) => config
             .find_profile(id)
             .map(AcpProfile::launch_spec)
             .unwrap_or_else(|| current.clone()),
-        None => AcpLaunchSpec::from_command(config.acp_cmd_for(agent)),
+        None => ConversationLaunchSpec::from_command(config.acp_cmd_for(agent)),
     }
 }
 ```
@@ -1084,7 +1086,7 @@ Change:
 
 ```rust
 let override_dir = profile_id.as_deref().and_then(|id| {
-    cx.global::<crate::settings::AgentUiConfig>()
+    cx.global::<crate::settings::AgentHostState>()
         .find_profile(id)
         .map(|profile| {
             smelt_core::workspace_override::expand_tilde(&profile.workspace_dir)

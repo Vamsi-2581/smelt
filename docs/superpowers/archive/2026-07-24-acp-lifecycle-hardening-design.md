@@ -1,5 +1,7 @@
 # ACP Lifecycle Hardening Design
 
+> Status (2026-08-16): `AcpRegistry` and the per-sid lifecycle lock from this spec remain. Exit confirmation is `waitpid` Recreate. Do not add detach-first kill, `SessionRetiring` sleep, or a Supervisor/epoch lease unless a path releases the resume lease before reap.
+
 ## Goal
 
 Make daemon-hosted ACP sessions safe across concurrent open, kill, restart, and
@@ -45,7 +47,7 @@ off receive an explicit shutdown rather than becoming unreachable.
 
 ## Structured launch configuration
 
-`smelt-core` will define a serializable `AcpLaunchSpec` containing:
+`smelt-core` will define a serializable `ConversationLaunchSpec` containing:
 
 - The executable command and arguments.
 - Explicit environment overrides.

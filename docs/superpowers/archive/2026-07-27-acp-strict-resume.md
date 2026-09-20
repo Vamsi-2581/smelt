@@ -1,5 +1,14 @@
 # ACP Strict Resume Implementation Plan
 
+> **HISTORICAL / 历史文档，勿按字面执行。**
+> 本文档描述的计划已被重构取代：restore 决策现以 `smelt-core/src/acp_conn.rs` 的
+> `ConversationRestoreFailure`（`HistoryMissing`/`UnsupportedLoad`/`Failed`）+
+> `classify_restore_failure`（:1033）+ `SessionStart`（`New`/`Load`/`UnsupportedLoad`，:1067）
+> 语义分类为准；冷恢复只走 `session/load` 不走 `session/resume`；`ConversationEvent::Ready` 无
+> `fallback_reason` 字段，改用 `RestoreFailed(ConversationRestoreFailure)` 事件 + `AcpEndKind::RestoreFailed`；
+> transcript precheck 已整体移除。最终决策落在 smeltd supervisor（`smeltd/src/acp_host.rs`）
+> 而非 core 连接层。现状实现见 `acp_conn.rs` 与 `smeltd/src/acp_host.rs`（技术栈现为 Rust 2024）。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Prevent transient ACP restoration errors from silently creating a new conversation after smeltd restarts.
@@ -178,7 +187,7 @@ fn retryable_restore_failure_preserves_identity_and_entries() {
 
     apply_event(
         &mut state,
-        AcpEvent::Fatal("恢复失败，可重试：transport closed".into()),
+        ConversationEvent::Fatal("恢复失败，可重试：transport closed".into()),
     );
 
     assert_eq!(state.acp_session_id.as_deref(), Some("old-session"));
@@ -201,7 +210,7 @@ fn fresh_fallback_exposes_reason_and_replaces_identity_after_ready() {
 
     apply_event(
         &mut state,
-        AcpEvent::Ready {
+        ConversationEvent::Ready {
             session_id: agent_client_protocol::schema::v1::SessionId::new("new-session"),
             kind: ReadyKind::Fresh,
             supports_image: true,
@@ -218,7 +227,7 @@ fn fresh_fallback_exposes_reason_and_replaces_identity_after_ready() {
 }
 ```
 
-Update existing `AcpEvent::Ready` constructors in this test module with
+Update existing `ConversationEvent::Ready` constructors in this test module with
 `fallback_reason: None`.
 
 - [ ] **Step 2: Run the reducer tests to verify they fail**
@@ -230,12 +239,12 @@ cargo test -p smelt-core \
   acp_session::tests
 ```
 
-Expected: compilation fails because `AcpEvent::Ready` has no
+Expected: compilation fails because `ConversationEvent::Ready` has no
 `fallback_reason`.
 
 - [ ] **Step 3: Carry fallback context on the Ready event**
 
-Change `AcpEvent::Ready` in `acp_conn.rs`:
+Change `ConversationEvent::Ready` in `acp_conn.rs`:
 
 ```rust
 Ready {
@@ -247,7 +256,7 @@ Ready {
 ```
 
 Add a `fallback_reason: Option<String>` parameter to `drive_session`. Emit it
-with `AcpEvent::Ready`, and pass `None` from both successful resume paths and
+with `ConversationEvent::Ready`, and pass `None` from both successful resume paths and
 the inherited-FD path.
 
 In `acp_session.rs`, destructure the new field and replace the unconditional
@@ -279,7 +288,7 @@ Then:
 3. On `TryLoad`, send `session/load`.
 4. On `StartFresh(reason)`, store the reason.
 5. On `Retryable`, send
-   `AcpEvent::Fatal(format!("恢复失败，可重试：{error}"))` and return `Ok(())`.
+   `ConversationEvent::Fatal(format!("恢复失败，可重试：{error}"))` and return `Ok(())`.
 
 Apply `classify_load_failure` to load errors with the same
 `StartFresh`/`Retryable` handling. Do not execute `NewSessionRequest` unless

@@ -1,5 +1,14 @@
 # ACP Strict Resume Design
 
+> **HISTORICAL / 历史文档，勿按字面执行。**
+> 本文档为历史设计记录，已被重构取代：restore 决策现以 `smelt-core/src/acp_conn.rs` 的
+> `ConversationRestoreFailure`（`HistoryMissing`/`UnsupportedLoad`/`Failed`）+
+> `classify_restore_failure` + `SessionStart`（`New`/`Load`/`UnsupportedLoad`）语义分类为准；
+> 冷恢复只走 `session/load` 不走 `session/resume`；`ConversationEvent::Ready` 无 `fallback_reason` 字段，
+> 改用 `RestoreFailed(ConversationRestoreFailure)` 事件 + `AcpEndKind::RestoreFailed`；
+> transcript precheck 已整体移除。最终决策落在 smeltd supervisor（`smeltd/src/acp_host.rs`）
+> 而非 core 连接层。现状实现见 `acp_conn.rs` 与 `smeltd/src/acp_host.rs`。
+
 Issue: https://github.com/smelt-ai/smelt/issues/1
 
 ## Goal

@@ -1,6 +1,14 @@
 # 状态通道落地方案（联机的第一块砖）
 
-配套 [collaboration.md](collaboration.md) 的设计讨论。那份讲「做什么」，这份讲「改哪些函数」。
+> ### ⚠️ 状态：历史施工记录存档
+> 本计划大部分已被实现且形态已变——现状以 `smelt-core/src/agent_status.rs`
+> （三态 `NeedsYou`/`Running`/`Idle`）与 `smelt-core/src/daemon_state.rs`
+> （`DaemonSessionState`/`DaemonPhase` 9 态）为准。
+> 行号和 `AgentStatus` 变体列表已过时，本文作为历史施工记录存档，实施时勿按字面执行。
+> 文中 OSC 标题 spinner 与 OSC 9 的 phase fallback 已废弃；终端标题现在只作展示，
+> OSC/BEL 现在只作信息通知。
+
+配套 [collaboration.md](../collaboration.md) 的设计讨论。那份讲「做什么」，这份讲「改哪些函数」。
 
 **为什么先做这个**：观战席 / 远程遥控 / 作战地图 / 联机 review / 任务分发——五个功能里
 四个不需要画面通道，但**五个全都需要状态通道**。而画面通道（`snapshot_ansi` + 字节流）
@@ -275,15 +283,12 @@ daemon_states: HashMap<String, SessionState>,   // key = smeltd session id
 
 ## 配置放哪
 
-CLAUDE.md 写的是「配置放 `~/.smelt/config.toml`」，但**这是一句尚未兑现的原则**：仓库里
-**没有 `toml` 依赖**，唯一读 config.toml 的地方是 `agent.rs:59` 手写行扫描，只认一个
-`DEEPSEEK_API_KEY`。
+CLAUDE.md 写的是「配置放 `~/.smelt/config.toml`」，但这是一句尚未兑现的原则：仓库里
+目前没有 `toml` 依赖。
 
-实际配置全是 JSON，收口在 `json_store.rs`（`load_json` / `save_json`），已有 5 个：
-`appearance.json` / `launch.json` / `llm.json` / `pet.json` / `workspace.json`。
-
-**联机配置沿现有惯例走 `json_store` 加 `~/.smelt/collab.json`**，零新依赖。真想兑现
-config.toml 那条原则，是另一件事，别混在这个改动里。
+当前 Smelt 自有 serde 状态已经收口到 `~/.smelt/smelt.sqlite3` 的 KV；`json_store.rs`
+保留为旧 JSON 一次性导入和外部配置文件兼容层。联机配置映射为 `json/collab.json`，
+旧 `~/.smelt/collab.json` 首次读取时事务导入。
 
 ---
 
