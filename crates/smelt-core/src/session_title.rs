@@ -152,11 +152,11 @@ mod tests {
         assert_eq!(
             display_title(
                 None,
-                Some("me@MBP:~/smelt"),
+                Some("developer@workstation:~/project"),
                 Some("GitHub Copilot"),
                 Some("smelt"),
             ),
-            "me@MBP:~/smelt"
+            "developer@workstation:~/project"
         );
         assert_eq!(
             display_title(
