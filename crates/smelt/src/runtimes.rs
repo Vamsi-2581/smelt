@@ -439,10 +439,11 @@ pub(crate) fn push_upgrade(client: &RuntimeClient) -> PushUpgrade {
     }
 }
 
-/// 运行时太旧、不会自己升级时，到那台机器上执行的命令：装这个桌面的版本。
+/// 运行时太旧、不会自己升级时，到那台机器上执行的命令：装这个桌面的版本。脚本也取这个
+/// 版本的 Release 里的：latest 只指向正式版，预发布期间可能是一个还没有 install.sh 的旧版。
 pub(crate) fn manual_upgrade_command() -> String {
     format!(
-        "curl -fsSL https://github.com/smelt-ai/smelt/releases/latest/download/install.sh | SMELT_VERSION={DESKTOP_VERSION} bash"
+        "curl -fsSL https://github.com/smelt-ai/smelt/releases/download/v{DESKTOP_VERSION}/install.sh | SMELT_VERSION={DESKTOP_VERSION} bash"
     )
 }
 
