@@ -19,7 +19,6 @@ use chrono::Local;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem};
-use gpui_component::popover::Popover;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::*;
 pub(crate) use smelt_ui::Button;
@@ -195,220 +194,6 @@ fn runtime_section_header(
         })
 }
 
-/// 一台机器能做的事。侧栏标题的 `⋯`、右键和机器面板里每一行用的都是这一份：同一件事
-/// 在哪儿点都是同样的字、同样的结果。
-pub(crate) fn machine_menu(
-    menu: PopupMenu,
-    runtime: crate::runtimes::Runtime,
-    workspace: Entity<Workspace>,
-    cx: &App,
-) -> PopupMenu {
-    let key = runtime.key().clone();
-    let open_runtime = runtime.clone();
-    let open_workspace = workspace.clone();
-    let library_key = key.clone();
-    let library_workspace = workspace.clone();
-    let mut menu = menu
-        .item(
-            PopupMenuItem::new("打开项目…")
-                .icon(Icon::empty().path("smelt-icons/folder-plus.svg"))
-                .on_click(move |_ev, _window, cx| {
-                    let runtime = open_runtime.clone();
-                    open_workspace.update(cx, |ws, cx| ws.open_project_on(runtime, cx));
-                }),
-        )
-        .item(
-            PopupMenuItem::new("能力库")
-                .icon(IconName::LayoutDashboard)
-                .on_click(move |_ev, window, cx| {
-                    let key = library_key.clone();
-                    library_workspace.update(cx, |ws, cx| ws.open_capabilities_on(key, window, cx));
-                }),
-        );
-    // 只有装了远程桌面、眼下连着的机器才有。
-    if crate::runtimes::runtime_has_desktop(&key, cx) {
-        let desktop_runtime = runtime.clone();
-        let desktop_workspace = workspace.clone();
-        menu = menu.item(
-            PopupMenuItem::new("远程桌面")
-                .icon(Icon::empty().path("smelt-icons/monitor.svg"))
-                .on_click(move |_ev, window, cx| {
-                    let runtime = desktop_runtime.clone();
-                    desktop_workspace.update(cx, |ws, cx| ws.open_desktop(runtime, window, cx));
-                }),
-        );
-    }
-    let RuntimeKey::Remote(runtime_id) = key else {
-        return menu;
-    };
-    let rename_id = runtime_id.clone();
-    let rename_workspace = workspace.clone();
-    menu.separator()
-        .item(
-            PopupMenuItem::new("重命名…")
-                .icon(Icon::empty().path("smelt-icons/square-pen.svg"))
-                .on_click(move |_ev, window, cx| {
-                    let target = RenameTarget::Runtime(rename_id.clone());
-                    rename_workspace.update(cx, |ws, cx| ws.start_rename(target, window, cx));
-                }),
-        )
-        .item(
-            PopupMenuItem::new("移除…")
-                .icon(Icon::empty().path("smelt-icons/trash.svg"))
-                .on_click(move |_ev, _window, cx| {
-                    let runtime_id = runtime_id.clone();
-                    workspace.update(cx, |ws, cx| ws.request_remove_runtime(runtime_id, cx));
-                }),
-        )
-}
-
-/// 侧栏底部「设置」旁边的机器按钮：点开是所有机器的连接情况和机器菜单，「添加机器」也在
-/// 这里。有机器离线、版本不对、走中继还很慢时按钮上挂个点，平时不打扰。
-fn machines_button(workspace: Entity<Workspace>, cx: &App) -> impl IntoElement + use<> {
-    let needs_attention = crate::runtimes::any_runtime_needs_attention(cx);
-    let trigger = Button::new("sidebar-machines-btn")
-        .quiet()
-        .compact()
-        .icon(Icon::new(gpui_kit_assets::IconName::Server))
-        .icon_action("机器");
-    div()
-        .relative()
-        .flex_none()
-        .child(
-            Popover::new("sidebar-machines")
-                .anchor(Anchor::BottomLeft)
-                .w(px(320.))
-                .trigger(trigger)
-                .content(move |_, _window, cx| machines_panel(workspace.clone(), cx)),
-        )
-        .when(needs_attention, |d| {
-            d.child(
-                div()
-                    .absolute()
-                    .top(px(4.))
-                    .right(px(4.))
-                    .size(px(6.))
-                    .rounded_full()
-                    .bg(rgb(ui_theme::yellow())),
-            )
-        })
-}
-
-/// 机器面板：本机在前，远程机器按添加顺序。每行是名字、完整的连接说明和机器菜单。
-fn machines_panel(workspace: Entity<Workspace>, cx: &App) -> Div {
-    let mut runtimes = vec![crate::runtimes::Runtime::local()];
-    let mut any_relay = false;
-    let mut load_error = None;
-    if let Some(hub) = cx.try_global::<crate::runtimes::RuntimeHub>() {
-        load_error = hub.load_error.clone();
-        for remote in &hub.remotes {
-            any_relay |= matches!(
-                remote.link.as_ref().map(|link| &link.kind),
-                Some(crate::runtimes::LinkKind::Relay(_))
-            );
-            runtimes.push(remote.runtime.clone());
-        }
-    }
-    let add_workspace = workspace.clone();
-    let mut panel = v_flex().p_2().gap_1().child(
-        h_flex()
-            .px_1()
-            .pb_1()
-            .items_center()
-            .justify_between()
-            .child(
-                div()
-                    .text_sm()
-                    .font_medium()
-                    .text_color(rgb(ui_theme::text_bright()))
-                    .child("机器"),
-            )
-            .child(
-                Button::new("machines-add")
-                    .quiet()
-                    .icon_size()
-                    .label("添加机器")
-                    .on_click(move |_ev, _window, cx| {
-                        add_workspace.update(cx, |ws, cx| {
-                            ws.open_settings_section(
-                                crate::settings::SettingsSection::CollaborationRemote,
-                                cx,
-                            );
-                        });
-                    }),
-            ),
-    );
-    if let Some(error) = load_error {
-        panel = panel.child(
-            div()
-                .px_1()
-                .pb_1()
-                .text_xs()
-                .text_color(rgb(ui_theme::yellow()))
-                .child(error),
-        );
-    }
-    for runtime in runtimes {
-        let key = runtime.key().clone();
-        let name = crate::runtimes::runtime_name(&key, cx);
-        let (detail, tone) = crate::runtimes::runtime_link_detail(&key, cx);
-        let menu_workspace = workspace.clone();
-        panel = panel.child(
-            h_flex()
-                .px_1()
-                .py_1()
-                .gap_2()
-                .items_center()
-                .rounded(ui_theme::row_radius())
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .truncate()
-                                .text_sm()
-                                .text_color(rgb(ui_theme::text_mid()))
-                                .child(name),
-                        )
-                        .child(
-                            div()
-                                .truncate()
-                                .text_xs()
-                                .text_color(rgb(match tone {
-                                    crate::runtimes::LinkTone::Warning => ui_theme::yellow(),
-                                    crate::runtimes::LinkTone::Muted => ui_theme::text_faint(),
-                                }))
-                                .child(detail),
-                        ),
-                )
-                .child(
-                    Button::new(ElementId::from(SharedString::from(format!(
-                        "machines-menu-{key:?}"
-                    ))))
-                    .quiet()
-                    .icon_size()
-                    .icon(IconName::Ellipsis)
-                    .icon_action("这台机器")
-                    .dropdown_menu(move |menu, _window, cx| {
-                        machine_menu(menu, runtime.clone(), menu_workspace.clone(), cx)
-                    }),
-                ),
-        );
-    }
-    if any_relay {
-        panel = panel.child(
-            div()
-                .px_1()
-                .pt_1()
-                .text_xs()
-                .text_color(rgb(ui_theme::text_faint()))
-                .child("走中继会慢：给 Smelt 设 UDP 直连规则，或者自建一个离两边都近的中继。"),
-        );
-    }
-    panel
-}
-
 /// 远程项目的右键菜单：复制路径、置顶、关闭。
 fn remote_project_menu(
     menu: PopupMenu,
@@ -461,6 +246,7 @@ fn project_disclosure_icon(collapsed_or_empty: bool) -> IconName {
 }
 
 mod drag;
+mod machines;
 mod new_session;
 
 use drag::{
@@ -470,6 +256,7 @@ use drag::{
 
 pub(crate) mod row;
 
+use machines::{machine_menu, machines_button};
 use new_session::new_session_picker;
 use row::{
     acp_provider_icon, effective_pane_updated_at, project_header_is_selected, provider_icon,
