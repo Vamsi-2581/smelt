@@ -1571,6 +1571,9 @@ struct SettingsRenderSnapshot {
     /// 插件 id -> 勾选了它的智能体名字，用来在删除前提示占用方。
     agent_names_using_plugin: std::collections::HashMap<String, Vec<String>>,
     update_status: updater::UpdateStatus,
+    /// 正在把 App 移到「应用程序」，见 `Workspace::move_app_to_applications`。
+    moving_app: bool,
+    move_app_error: Option<SharedString>,
     daemon_outdated: Option<bool>,
     daemon_upgrading: bool,
     daemon_upgrade_msg: Option<String>,

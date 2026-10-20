@@ -102,6 +102,9 @@ pub enum UpdateFailure {
     Check,
     Download,
     Recovery,
+    /// App 被系统转移或放在只读位置，更新装不上；见 `app_location`。先移到「应用程序」，
+    /// 不检查、不下载。
+    Location,
 }
 
 impl UpdateFailure {
@@ -110,6 +113,7 @@ impl UpdateFailure {
             Self::Check => "检查更新失败",
             Self::Download => "下载更新失败",
             Self::Recovery => "恢复更新失败",
+            Self::Location => "需要先移到「应用程序」",
         }
     }
 
@@ -118,6 +122,9 @@ impl UpdateFailure {
             Self::Check => "暂时无法连接更新服务，请检查网络后重试。",
             Self::Download => "更新包下载或准备失败，请检查网络和可用存储空间后重试。",
             Self::Recovery => "上次更新事务尚未恢复，请重试；现有安装不会被覆盖。",
+            Self::Location => {
+                "Smelt 没放进「应用程序」就打开了，macOS 让它在只读位置运行，更新装不上。移过去后会自动重新打开，后台会话不受影响。"
+            }
         }
     }
 }
@@ -1412,7 +1419,7 @@ fn app_fingerprint(app: &Path) -> anyhow::Result<String> {
 /// 从当前可执行文件路径反推 `Smelt.app` 的位置：
 /// `<App>.app/Contents/MacOS/smelt` 往上 3 层就是 `<App>.app`。
 /// 非 `.app` 环境（比如 `cargo run`）直接报错，不做任何文件操作。
-fn current_app_bundle() -> anyhow::Result<PathBuf> {
+pub(crate) fn current_app_bundle() -> anyhow::Result<PathBuf> {
     let exe = std::env::current_exe()?;
     let bundle = exe
         .parent()
