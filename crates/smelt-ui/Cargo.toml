@@ -21,8 +21,8 @@ smol = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 gpui = { package = "gpui-pre", version = "=0.3.9" }
-gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "af456ddb2fe7bc57f040bb94064135cf353488d6" }
-gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "af456ddb2fe7bc57f040bb94064135cf353488d6", features = ["tree-sitter-languages"] }
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "77ff6f794dca3bcee2e90977cedf12a64aed17e4" }
+gpui-component = { git = "https://github.com/longbridge/gpui-kit", rev = "77ff6f794dca3bcee2e90977cedf12a64aed17e4", features = ["tree-sitter-languages"] }
 # mermaid 代码块画图，见 markdown_mermaid.rs。版本锁死。
 # 不开 layout-elk：它带进 EPL-2.0 的 merman-elk-layered，分发二进制要随附源码和声明；
 # 默认布局也会从 dagre 换成 ELK（见 markdown_mermaid.rs 文件头）。不走默认 features /

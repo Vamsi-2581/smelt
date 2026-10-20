@@ -3855,8 +3855,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-base"
-version = "0.7.3"
-source = "git+https://github.com/longbridge/gpui-kit?rev=af456ddb2fe7bc57f040bb94064135cf353488d6#af456ddb2fe7bc57f040bb94064135cf353488d6"
+version = "0.8.0"
+source = "git+https://github.com/longbridge/gpui-kit?rev=77ff6f794dca3bcee2e90977cedf12a64aed17e4#77ff6f794dca3bcee2e90977cedf12a64aed17e4"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3896,8 +3896,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-component"
-version = "0.7.3"
-source = "git+https://github.com/longbridge/gpui-kit?rev=af456ddb2fe7bc57f040bb94064135cf353488d6#af456ddb2fe7bc57f040bb94064135cf353488d6"
+version = "0.8.0"
+source = "git+https://github.com/longbridge/gpui-kit?rev=77ff6f794dca3bcee2e90977cedf12a64aed17e4#77ff6f794dca3bcee2e90977cedf12a64aed17e4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3979,8 +3979,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-component-macros"
-version = "0.7.3"
-source = "git+https://github.com/longbridge/gpui-kit?rev=af456ddb2fe7bc57f040bb94064135cf353488d6#af456ddb2fe7bc57f040bb94064135cf353488d6"
+version = "0.8.0"
+source = "git+https://github.com/longbridge/gpui-kit?rev=77ff6f794dca3bcee2e90977cedf12a64aed17e4#77ff6f794dca3bcee2e90977cedf12a64aed17e4"
 dependencies = [
  "proc-macro-crate 3.5.0",
  "proc-macro2",
@@ -3990,9 +3990,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-fast"
-version = "0.1.8"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06f57a8a598a3fc1b8594ff5a72c530241906806a3322d8be1bb9059c3fd3a11"
+checksum = "f539554aee0e994d84014d99e85f3923db613a62a94f248a6559e628bbb0b0be"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -4055,9 +4055,9 @@ dependencies = [
 
 [[package]]
 name = "gpui-fast-macros"
-version = "0.1.8"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb603746606a49ea4562b309ddcd3f299e2e151f93356d7f1b3d867d1b9cd68e"
+checksum = "0ce9b7a528e074c62bf71f05d886d6c8db88d567de2ccd8ab3d228ea2a6f6711"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -4067,8 +4067,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-fps"
-version = "0.7.3"
-source = "git+https://github.com/longbridge/gpui-kit?rev=af456ddb2fe7bc57f040bb94064135cf353488d6#af456ddb2fe7bc57f040bb94064135cf353488d6"
+version = "0.8.0"
+source = "git+https://github.com/longbridge/gpui-kit?rev=77ff6f794dca3bcee2e90977cedf12a64aed17e4#77ff6f794dca3bcee2e90977cedf12a64aed17e4"
 dependencies = [
  "core-graphics 0.24.0",
  "gpui-pre",
@@ -4084,8 +4084,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-kit"
-version = "0.7.3"
-source = "git+https://github.com/longbridge/gpui-kit?rev=af456ddb2fe7bc57f040bb94064135cf353488d6#af456ddb2fe7bc57f040bb94064135cf353488d6"
+version = "0.8.0"
+source = "git+https://github.com/longbridge/gpui-kit?rev=77ff6f794dca3bcee2e90977cedf12a64aed17e4#77ff6f794dca3bcee2e90977cedf12a64aed17e4"
 dependencies = [
  "gpui-base",
  "gpui-pre",
@@ -4096,8 +4096,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-kit-assets"
-version = "0.7.3"
-source = "git+https://github.com/longbridge/gpui-kit?rev=af456ddb2fe7bc57f040bb94064135cf353488d6#af456ddb2fe7bc57f040bb94064135cf353488d6"
+version = "0.8.0"
+source = "git+https://github.com/longbridge/gpui-kit?rev=77ff6f794dca3bcee2e90977cedf12a64aed17e4#77ff6f794dca3bcee2e90977cedf12a64aed17e4"
 dependencies = [
  "anyhow",
  "gpui-pre",
@@ -4590,8 +4590,8 @@ checksum = "4b0d73e1bc02eef886a5947f41b8512708792e9e5d3053d181843311a487f96f"
 
 [[package]]
 name = "gpui-shell"
-version = "0.7.3"
-source = "git+https://github.com/longbridge/gpui-kit?rev=af456ddb2fe7bc57f040bb94064135cf353488d6#af456ddb2fe7bc57f040bb94064135cf353488d6"
+version = "0.8.0"
+source = "git+https://github.com/longbridge/gpui-kit?rev=77ff6f794dca3bcee2e90977cedf12a64aed17e4#77ff6f794dca3bcee2e90977cedf12a64aed17e4"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -4629,8 +4629,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-webview"
-version = "0.7.3"
-source = "git+https://github.com/longbridge/gpui-kit?rev=af456ddb2fe7bc57f040bb94064135cf353488d6#af456ddb2fe7bc57f040bb94064135cf353488d6"
+version = "0.8.0"
+source = "git+https://github.com/longbridge/gpui-kit?rev=77ff6f794dca3bcee2e90977cedf12a64aed17e4#77ff6f794dca3bcee2e90977cedf12a64aed17e4"
 dependencies = [
  "anyhow",
  "gpui-kit",
@@ -9816,7 +9816,7 @@ dependencies = [
 [[package]]
 name = "rquickjs"
 version = "0.12.9"
-source = "git+https://github.com/longbridge/gpui-kit?rev=af456ddb2fe7bc57f040bb94064135cf353488d6#af456ddb2fe7bc57f040bb94064135cf353488d6"
+source = "git+https://github.com/longbridge/gpui-kit?rev=77ff6f794dca3bcee2e90977cedf12a64aed17e4#77ff6f794dca3bcee2e90977cedf12a64aed17e4"
 dependencies = [
  "quickjs-jit",
 ]
@@ -10368,7 +10368,7 @@ version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8050abb251097357e24aff63ba2c52a6309ecb7d23a5474023df960a02694d8"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "nohash-hasher",
  "num-traits",
  "serde_core",
