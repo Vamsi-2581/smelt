@@ -16,7 +16,7 @@ use std::{
     time::Duration,
 };
 
-pub(crate) const BUN_VERSION: &str = "1.4.0";
+pub(crate) const BUN_VERSION: &str = "1.4.3";
 
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 /// 当前受管 Bun 的固定入口，相对 runtime 根目录。generation 目录名带哈希、随版本变，
@@ -29,45 +29,45 @@ include!(concat!(env!("OUT_DIR"), "/pi_agent_runtime_files.rs"));
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const BUN_DOWNLOAD: (&str, &str) = (
-    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-darwin-aarch64.zip",
-    "c669e97f6164e1c96e0701748db98dfa77492908cbd8394c7557134a735de381",
+    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.3/bun-darwin-aarch64.zip",
+    "80afd4c069b46a6fa8f3ec520bebc750a7843e4a8d5b9583d29ad436c00a3403",
 );
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 const BUN_DOWNLOAD: (&str, &str) = (
-    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-darwin-x64.zip",
-    "1d0211b8f1dc991182344687ad15e72ee86f154845a5f7fa477994cd341dd9b0",
+    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.3/bun-darwin-x64.zip",
+    "62660e6438eb872278877acca77e1152d5d031324df368d4a81b428211489d2d",
 );
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const BUN_ZIP_DIR: &str = "bun-darwin-aarch64";
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) const BUN_EXECUTABLE_SHA256: &str =
-    "539598c775882420b9d8deb7dc14d845f20f7d26f5600c50ab067dde6ac3f3bf";
+    "28c7dd0a06916aba284d570ef44a2d70e9c538eaf2ba58dfe0910525563b3f79";
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 const BUN_ZIP_DIR: &str = "bun-darwin-x64";
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 pub(crate) const BUN_EXECUTABLE_SHA256: &str =
-    "ca8a18d0116d7b6b19f53bb0d8c48e487c0757cab4dc3f4f8cc5e43a44cd75d8";
+    "c2a945a9d33f9088b32ac3550d1d1fd485a7fc10d71c66f91ef0d33b41cefa7c";
 // Linux x64 用 baseline 版：不要求 AVX2，云主机的老 CPU 也能跑。
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const BUN_DOWNLOAD: (&str, &str) = (
-    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-x64-baseline.zip",
-    "184fb4595f0d401a217cf7c78c1bc430ba83314dab7a8b94805babbf7fa7097f",
+    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.3/bun-linux-x64-baseline.zip",
+    "1fc2edac843102909e3a1be1d8d9802cc6071cf074e67e88231f4ffe0f8b397b",
 );
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const BUN_ZIP_DIR: &str = "bun-linux-x64-baseline";
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub(crate) const BUN_EXECUTABLE_SHA256: &str =
-    "33d56b070be6a9e3da0ab013038b43d1645d0534ca811ecdba4472599117eb4b";
+    "7ce7d6b654eddeec20afddf2396317fba6dc19ab52788a27e894e1806bf8f24b";
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 const BUN_DOWNLOAD: (&str, &str) = (
-    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-aarch64.zip",
-    "4b1a332ee861983eb93bcfe6f770fff94e3e31b2c388bdaea3c8ed35e58eed0e",
+    "https://github.com/oven-sh/bun/releases/download/bun-v1.4.3/bun-linux-aarch64.zip",
+    "efa9813da5ed72423bf847f916e8d2c47c0d776add972354026a75e10da9aa21",
 );
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 const BUN_ZIP_DIR: &str = "bun-linux-aarch64";
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 pub(crate) const BUN_EXECUTABLE_SHA256: &str =
-    "086c4121c8738a8e0f5ed730e8a461bc3973b4444e372ddb77aef9a747fa2ae9";
+    "029ece746ac9f970c76d8f48bdd1b1d0c52f3636b74d19f546f5e7c1165c0abe";
 
 #[derive(Clone, Debug)]
 pub struct ManagedBunRuntime {
