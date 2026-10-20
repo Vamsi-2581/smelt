@@ -109,12 +109,18 @@ jobs:
       - name: Build & package
         env:
           SMELT_CODESIGN_IDENTITY: "Smelt Local Signing"
+          SMELT_UPDATE_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/Smelt.app.zip
         run: make dist-build
+
+      # 桌面自更新下载的是这个 zip（见 smelt-client 的 updater）。ditto 保留签名和扩展属性。
+      - name: Update archive
+        run: ditto -c -k --keepParent dist/Smelt.app dist/Smelt.app.zip
 
       # 产物必须真的生成，否则后面上传会是空发布。
       - name: Verify artifact
         run: |
           test -f dist/Smelt.dmg || { echo "✗ 没生成 dist/Smelt.dmg"; exit 1; }
+          test -f dist/Smelt.app.zip || { echo "✗ 没生成 dist/Smelt.app.zip"; exit 1; }
           ls -lh dist/Smelt.dmg
           test -x dist/Smelt.app/Contents/MacOS/smelt-notify \
             || { echo "✗ App 缺少可执行的 smelt-notify"; exit 1; }
@@ -158,7 +164,9 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          files: dist/Smelt.dmg
+          files: |
+            dist/Smelt.dmg
+            dist/Smelt.app.zip
           body_path: ${{ runner.temp }}/release-notes.md
           prerelease: ${{ contains(github.ref_name, '-') }}
 
@@ -342,7 +350,7 @@ jobs:
           files: dist/Smelt-*-android-arm64.apk
           prerelease: ${{ contains(github.ref_name, '-') }}
 
-  # 所有产物都上传后，把 SHA256SUMS 重写成覆盖全部产物（dmg、APK、Linux 包、install.sh）。
+  # 所有产物都上传后，把 SHA256SUMS 重写成覆盖全部产物（dmg、自更新 zip、APK、Linux 包、install.sh）。
   checksums:
     needs: [linux-release, android-release]
     runs-on: ubuntu-24.04
@@ -353,7 +361,7 @@ jobs:
         run: |
           mkdir dist && cd dist
           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-            --pattern 'Smelt.dmg' --pattern 'Smelt-*.apk' --pattern 'smeltd-*.tar.gz' --pattern 'install.sh'
+            --pattern 'Smelt.dmg' --pattern 'Smelt.app.zip' --pattern 'Smelt-*.apk' --pattern 'smeltd-*.tar.gz' --pattern 'install.sh'
           sha256sum -- * | sort -k2 > SHA256SUMS
           cat SHA256SUMS
           gh release upload "$GITHUB_REF_NAME" SHA256SUMS --clobber --repo "$GITHUB_REPOSITORY"

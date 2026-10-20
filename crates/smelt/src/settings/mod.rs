@@ -205,7 +205,7 @@ pub fn apply_window_opacity(_window: &Window, _opacity: f32) {}
 
 /// 在线更新配置（全局单例，存 SQLite KV）。
 ///
-/// 通道只决定读取哪一个公司 COS manifest；更新流程本身仍由 updater 统一处理。
+/// 通道只决定认不认 GitHub 上的预发布；更新流程本身仍由 updater 统一处理。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UpdateSettings {
     #[serde(default)]
