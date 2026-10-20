@@ -195,7 +195,7 @@ mod tests {
     use std::rc::Rc;
 
     use gpui::prelude::FluentBuilder as _;
-    use gpui::{Context, IntoElement, Render, Styled as _, Window, div};
+    use gpui::{Context, IntoElement, ParentElement as _, Render, Styled as _, Window, div};
 
     use super::HideWhenNotPainted;
 

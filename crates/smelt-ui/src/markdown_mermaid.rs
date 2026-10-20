@@ -1258,6 +1258,7 @@ fn mermaid_result_element(
         MermaidRender::Ok(m) => {
             let preview = m.clone();
             // 外层 flex 行撑满列宽；触发区按图的实际宽度收缩，空白处不响应点击。
+            // 点开预览不是链接，光标保持默认箭头。
             div()
                 .id(SharedString::from(format!("mermaid-{digest}")))
                 .flex()
@@ -1266,7 +1267,6 @@ fn mermaid_result_element(
                         .id("preview-trigger")
                         .debug_selector(|| "MERMAID_PREVIEW_TRIGGER".to_string())
                         .flex()
-                        .cursor_pointer()
                         .on_click(move |_, window, cx| {
                             open_mermaid_preview(preview.clone(), window, cx);
                         })
