@@ -1,6 +1,6 @@
 # 打 tag（v*）→ 在 Apple Silicon runner 上打包 Smelt.dmg → 发布到 GitHub Release，
 # 再附上 Linux 运行时两种架构的包和一键安装脚本。
-# 本地打包链路复用：make dist-build → scripts/package-mac.sh；ci/linux/ci.sh package。
+# 本地打包链路复用：make dist-build → scripts/package-mac.sh；scripts/package-linux.sh。
 name: release
 
 on:
@@ -199,11 +199,16 @@ jobs:
       - name: Trust workspace
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
+      # 版本由仓库根的 rust-toolchain.toml 决定，rustup 只装个壳，再按它补齐工具链。
       - name: Toolchain
-        run: ./ci/linux/env-setup.sh
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" toolchain install
 
       - name: Package
-        run: ./ci/linux/ci.sh package
+        run: ./scripts/package-linux.sh
 
       - name: Upload package
         uses: actions/upload-artifact@v7
@@ -285,31 +290,38 @@ jobs:
         with:
           channel: stable
 
+      # app/build.gradle.kts 读 android/key.properties（已 gitignore）。不用 -P 直通 Gradle：
+      # 参数会进构建缓存和日志，密码容易泄进 CI 输出。构建完和 keystore 一起删。
       - name: Write keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.SMELT_ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.SMELT_ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.SMELT_ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.SMELT_ANDROID_KEY_PASSWORD }}
         run: |
-          if [[ -z "$KEYSTORE_BASE64" ]]; then
-            echo "✗ 没配置 SMELT_ANDROID_KEYSTORE_BASE64，发版的 APK 必须正式签名。"
-            exit 1
-          fi
+          for var in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [[ -z "${!var}" ]]; then
+              echo "✗ 没配置 SMELT_ANDROID_${var}，发版的 APK 必须正式签名。"
+              exit 1
+            fi
+          done
           echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
-          echo "SMELT_ANDROID_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+          umask 077
+          cat > mobile/android/key.properties <<EOF
+          storeFile=$RUNNER_TEMP/release.jks
+          storePassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEY_ALIAS
+          keyPassword=$KEY_PASSWORD
+          EOF
 
       - name: Build APK
-        env:
-          SMELT_CI_SKIP_ENV: "1"
-          SMELT_REQUIRE_RELEASE_SIGNING: "1"
-          SMELT_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.SMELT_ANDROID_KEYSTORE_PASSWORD }}
-          SMELT_ANDROID_KEY_ALIAS: ${{ secrets.SMELT_ANDROID_KEY_ALIAS }}
-          SMELT_ANDROID_KEY_PASSWORD: ${{ secrets.SMELT_ANDROID_KEY_PASSWORD }}
-          SMELT_BUILD_NUMBER: ${{ github.run_number }}
         run: |
-          export SMELT_BUILD_NAME="${GITHUB_REF_NAME#v}"
-          ./ci/android/ci.sh build
+          version="${GITHUB_REF_NAME#v}"
+          (cd mobile && flutter build apk --release --target-platform android-arm64 \
+            --build-name "$version" --build-number "${{ github.run_number }}")
           mkdir -p dist
           cp mobile/build/app/outputs/flutter-apk/app-release.apk \
-            "dist/Smelt-${SMELT_BUILD_NAME}-android-arm64.apk"
+            "dist/Smelt-${version}-android-arm64.apk"
           ls -lh dist/
 
       # 签名必须是正式证书：apksigner 打出证书指纹，debug 证书的主题是 "CN=Android Debug"。
@@ -324,7 +336,7 @@ jobs:
 
       - name: Clean up keystore
         if: always()
-        run: rm -f "$RUNNER_TEMP/release.jks"
+        run: rm -f "$RUNNER_TEMP/release.jks" mobile/android/key.properties
 
       - name: Upload APK
         uses: actions/upload-artifact@v7
