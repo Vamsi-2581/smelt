@@ -1,0 +1,48 @@
+# 给 release.yml 的 macOS 打包预热 release 依赖缓存。
+#
+# 发版跑在 tag 上，tag 上存的缓存别的 tag 读不到，只有 main 存的大家都能读；而 ci.yml 在 main
+# 上编的是测试用的 debug 产物，release 用不上。所以在 main 上按发版同样的命令编一遍 release，
+# 存到两边共用的 shared-key 下。
+#
+# rust-cache 只存依赖，不存 workspace 自己的 crate（检出会刷新源码时间戳，存了也会重编），
+# 缓存键只跟 Cargo.lock、各 Cargo.toml 和工具链走。所以只在这些变了时重编；平时 main 上的
+# 推送不用跑。每周再跑一次：缓存 7 天没人读会被 GitHub 清掉，隔一阵没发版也不至于冷启动。
+name: release-cache
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/release-cache.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/*/Cargo.toml"
+      - "rust-toolchain.toml"
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: release-cache
+  cancel-in-progress: true
+
+jobs:
+  mac:
+    # 和 release.yml 的 build 一样：GPUI 只在 Apple Silicon 的 macOS 上编得过。
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # shared-key 必须和 release.yml 的一致。
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: mac-release
+
+      # 和 scripts/package-mac.sh --build 编的是同一组目标、同样的参数，产物才对得上。
+      - name: Build release binaries
+        run: cargo build --release --bin smelt --bin smeltd --bin smelt-notify --bin smelt-installer

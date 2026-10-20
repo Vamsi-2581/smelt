@@ -58,11 +58,13 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # GPUI 等 git 依赖编译很慢，缓存 cargo registry 与 target。
+      # GPUI 等 git 依赖编译很慢，读 release-cache.yml 在 main 上预热的 release 依赖缓存。
+      # 只读不存：tag 上存的缓存别处读不到，每次发版白占 1.8GB，还会把 main 的挤掉。
+      # 以前没设 shared-key，键里带着 job 名，main 上没有哪个 job 存过这个键，从来没命中过。
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-        # 只读 main 存的缓存：tag 上存的缓存别处读不到，每次发版白占 1.8GB，还会把 main 的挤掉。
         with:
+          shared-key: mac-release
           save-if: false
 
       # 导入稳定签名身份（scripts/setup-codesign-identity.sh 本地生成、存进
