@@ -62,5 +62,7 @@ serde_json = "1"
 
 [dev-dependencies]
 chrono-tz = "0.10"
+# 测试程序在 main 之前冒充 ACP agent（见 acp_conn/fake_agent_tests.rs）。
+ctor = "1"
 rusqlite = { version = "0.37", features = ["bundled"] }
 tempfile = "3"

@@ -31,18 +31,18 @@ use agent_client_protocol::schema::v1::{
     ElicitationCapabilities, ElicitationContentValue, ElicitationFormCapabilities, ElicitationMode,
     ElicitationPropertySchema, ElicitationSchema, ElicitationUrlCapabilities,
     FileSystemCapabilities, ImageContent, Implementation, InitializeRequest, KillTerminalRequest,
-    KillTerminalResponse, ListSessionsRequest, LoadSessionRequest,
-    MultiSelectItems, NewSessionRequest, Plan, PlanCapabilities, PlanEntry,
-    PlanEntryPriority, PlanEntryStatus, PlanUpdate, PlanUpdateContent, PromptRequest,
-    PromptResponse, ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest,
-    ReleaseTerminalResponse, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigId, SessionConfigKind,
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue,
-    SessionConfigOptionsCapabilities, SessionConfigSelectOption, SessionConfigSelectOptions,
-    SessionConfigValueId, SessionId, SessionInfo, SessionModeState, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionRequest, StopReason, TerminalOutputRequest,
-    TerminalOutputResponse, ToolCall, ToolCallId, ToolCallUpdate, WaitForTerminalExitRequest,
-    WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
+    KillTerminalResponse, ListSessionsRequest, LoadSessionRequest, MultiSelectItems,
+    NewSessionRequest, Plan, PlanCapabilities, PlanEntry, PlanEntryPriority, PlanEntryStatus,
+    PlanUpdate, PlanUpdateContent, PromptRequest, PromptResponse, ReadTextFileRequest,
+    ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionConfigId, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigOptionsCapabilities,
+    SessionConfigSelectOption, SessionConfigSelectOptions, SessionConfigValueId, SessionId,
+    SessionInfo, SessionModeState, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, StopReason, TerminalOutputRequest, TerminalOutputResponse,
+    ToolCall, ToolCallId, ToolCallUpdate, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
+    WriteTextFileRequest, WriteTextFileResponse,
 };
 use agent_client_protocol::schema::{MaybeUndefined, ProtocolVersion};
 use agent_client_protocol::util::{MatchDispatch, MatchDispatchFrom};
@@ -6872,93 +6872,19 @@ mod prompt_failure_tests {
     }
 }
 
+#[cfg(test)]
+mod fake_agent_tests;
+
 /// 需要一个安装了 Smelt Host bundle 的原生 dsh profile，默认不跑：
 ///
-///     cargo test -p smelt-core --lib dsh_live -- --ignored --test-threads=1
-///
-/// `--test-threads=1` 不是保险起见：两个用例各起一棵 dsh 运行时，并发跑会
-/// 争用同一个 profile 的共享会话库，表现为其中一个一直等不到回合结束
-/// （超时 90 秒）。实测确认过，不是偶发。
+///     cargo test -p smelt-core --lib dsh_live -- --ignored
 ///
 /// 存在的理由：148 个单测全绿的那版桥，一接真 runtime 就暴露了 4 个致命 bug。
 /// 「回合失败不能杀会话」这条同样只有真跑一遍才算数——它牵涉 SDK 回调、
 /// 连接驱动任务、事件通道三层，全 mock 就只是在测我自己的假设。
-/// `session/load` 的端到端顺序：真起一个 stdio agent 进程走完整条 spawn 路径。
-/// SDK 2.1 把响应前的重放放进会话自己的队列，要等驱动读出来才进事件通道；
-/// 只看单测里的归约器测不出「收尾信号抢在重放正文前面」。
-#[cfg(test)]
-mod session_load_replay_tests {
-    use super::*;
-
-    fn event_name(event: &ConversationEvent) -> &'static str {
-        match event {
-            ConversationEvent::HistoryReplayStarted => "Started",
-            ConversationEvent::HistoryReplayFinished => "Finished",
-            ConversationEvent::UserChunk(_) => "User",
-            ConversationEvent::AgentChunk { .. } => "Agent",
-            ConversationEvent::Ready { .. } => "Ready",
-            ConversationEvent::Fatal(_) => "Fatal",
-            ConversationEvent::RestoreFailed(_) => "RestoreFailed",
-            _ => "other",
-        }
-    }
-
-    #[test]
-    fn replay_is_delivered_before_history_replay_finished() {
-        let agent = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake_acp_agent.py");
-        let handle = spawn_acp(
-            ConversationLaunch {
-                launch: ConversationLaunchSpec {
-                    command: format!("python3 {agent}"),
-                    env: Default::default(),
-                },
-                ephemeral_env: Default::default(),
-                cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
-                sid: "acp-load-order".to_string(),
-                agent_token: String::new(),
-                resume_session_id: Some(SessionId::new("session-from-disk")),
-                fork_session_id: None,
-                fork_cut: None,
-            },
-            None,
-        );
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        let mut seen = Vec::new();
-        while std::time::Instant::now() < deadline {
-            let next = smol::block_on(async {
-                smol::future::race(async { handle.event_rx.recv().await.ok() }, async {
-                    smol::Timer::after(std::time::Duration::from_millis(200)).await;
-                    None
-                })
-                .await
-            });
-            let Some(event) = next else { continue };
-            let name = event_name(&event);
-            if name != "other" {
-                seen.push(name);
-            }
-            if matches!(name, "Ready" | "Fatal" | "RestoreFailed") {
-                break;
-            }
-        }
-        let _ = handle.cmd_tx.send_blocking(ConversationCommand::Shutdown);
-
-        let position = |name: &str| seen.iter().position(|seen| *seen == name);
-        let finished = position("Finished").unwrap_or_else(|| panic!("没有收尾信号：{seen:?}"));
-        let agent = position("Agent").unwrap_or_else(|| panic!("重放正文没送达：{seen:?}"));
-        let user = position("User").unwrap_or_else(|| panic!("重放的用户消息没送达：{seen:?}"));
-        assert!(
-            position("Started").is_some_and(|started| started < user),
-            "{seen:?}"
-        );
-        assert!(
-            user < finished && agent < finished,
-            "重放正文必须先于 HistoryReplayFinished，否则草稿以空正文提交、历史被当成实时消息：{seen:?}"
-        );
-    }
-}
-
+///
+/// 只跟 dsh 桥有关的才放这里。`acp_conn` 自己的事件顺序用 `fake_agent_tests`
+/// 的假 agent 测：不依赖本机装了什么，CI 每次都跑。
 #[cfg(test)]
 mod dsh_live_tests {
     use super::*;
@@ -7082,74 +7008,6 @@ mod dsh_live_tests {
         assert!(
             seen.iter().any(|s| s.starts_with("TurnFailed")),
             "第一轮失败后连接必须还在：{seen:?}"
-        );
-
-        let _ = handle.cmd_tx.send_blocking(ConversationCommand::Shutdown);
-    }
-
-    /// 顺序回归：prompt 的完成响应现在由我们自己的回调经 cmd 通道送回循环，
-    /// 而流式更新走 SDK 的 update 队列——两条不同的路。回合结束若抢在正文
-    /// 前面到 UI，正文就会落在「已结束」的回合后面。
-    ///
-    /// 需要一个假的 OpenAI 兼容端点，用 `SMELT_TEST_LLM_BASE_URL` 指过来：
-    ///
-    ///     python3 crates/smelt-core/tests/fake_llm.py 8177 &
-    ///     SMELT_TEST_LLM_BASE_URL=http://127.0.0.1:8177/v1 \
-    ///       cargo test -p smelt-core --lib dsh_live -- --ignored --test-threads=1
-    #[test]
-    #[ignore = "needs a real dsh runtime plus SMELT_TEST_LLM_BASE_URL"]
-    fn streamed_text_arrives_before_the_turn_ends() {
-        let base_url = std::env::var("SMELT_TEST_LLM_BASE_URL")
-            .expect("设 SMELT_TEST_LLM_BASE_URL 指向假的 OpenAI 兼容端点");
-        let profile = live_profile();
-        assert!(crate::agent_kind::dsh_bridge_entry(&profile).is_some());
-        let mut env = BTreeMap::new();
-        env.insert("DEEPSEEK_API_KEY".to_string(), "sk-fake".to_string());
-        env.insert("DEEPSEEK_BASE_URL".to_string(), base_url);
-        let handle = spawn_acp(
-            ConversationLaunch {
-                launch: crate::agent_kind::dsh_profile_launch_spec(&profile),
-                ephemeral_env: env,
-                cwd: Some("/tmp".to_string()),
-                sid: "acp-live-order".to_string(),
-                agent_token: String::new(),
-                resume_session_id: None,
-                fork_session_id: None,
-                fork_cut: None,
-            },
-            None,
-        );
-        let seen = drain_until(&handle, std::time::Duration::from_secs(90), |ev| {
-            matches!(ev, ConversationEvent::Ready { .. })
-        });
-        assert!(seen.iter().any(|s| s == "Ready"), "{seen:?}");
-
-        handle
-            .cmd_tx
-            .send_blocking(ConversationCommand::Prompt {
-                text: "你好".to_string(),
-                images: Vec::new(),
-            })
-            .expect("发 prompt");
-        let seen = drain_until(&handle, std::time::Duration::from_secs(90), |ev| {
-            ev.ends_turn() || matches!(ev, ConversationEvent::Fatal(_))
-        });
-
-        let end_at = seen
-            .iter()
-            .position(|s| s == "TurnEnded")
-            .unwrap_or_else(|| panic!("这一轮应当成功收场：{seen:?}"));
-        let last_chunk = seen
-            .iter()
-            .rposition(|s| s == "AgentChunk")
-            .unwrap_or_else(|| panic!("没收到任何流式正文：{seen:?}"));
-        assert!(
-            last_chunk < end_at,
-            "正文必须全部排在回合结束之前：{seen:?}"
-        );
-        assert!(
-            seen.iter().filter(|s| *s == "AgentChunk").count() >= 2,
-            "流式应当是多段增量，不是一次性一整块：{seen:?}"
         );
 
         let _ = handle.cmd_tx.send_blocking(ConversationCommand::Shutdown);
