@@ -1699,6 +1699,7 @@ fn provider_retry_lives_only_while_the_turn_retries() {
         attempt: 1,
         max_attempts: 3,
         delay_ms: 2_000,
+        started_at_ms: 1_000,
         error: "overloaded".into(),
     };
     let mut s = fresh_state();

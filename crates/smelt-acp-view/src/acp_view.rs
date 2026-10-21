@@ -1237,18 +1237,28 @@ fn turn_outcome_card(
     }
 }
 
-/// 自动重试的一行说明。
-fn provider_retry_label(retry: &smelt_model::acp_session::ProviderRetryView) -> String {
+/// 自动重试的一行说明。还在退避就倒数；重发出去之后报已经等了多久，慢的 provider
+/// 迟迟不回时这行字也在走，不像卡住。不知道起点（旧快照）就不报时间。
+fn provider_retry_label(
+    retry: &smelt_model::acp_session::ProviderRetryView,
+    now_ms: u64,
+) -> String {
     let attempt = if retry.max_attempts > 0 {
         format!("{}/{}", retry.attempt, retry.max_attempts)
     } else {
         retry.attempt.to_string()
     };
-    let wait = retry.delay_ms.div_ceil(1_000);
-    if wait > 0 {
-        format!("模型请求出错，{wait} 秒后第 {attempt} 次重试")
-    } else {
-        format!("模型请求出错，正在第 {attempt} 次重试")
+    let waited = (retry.started_at_ms > 0).then(|| now_ms.saturating_sub(retry.started_at_ms));
+    match waited {
+        Some(waited) if waited < retry.delay_ms => {
+            let wait = (retry.delay_ms - waited).div_ceil(1_000);
+            format!("模型请求出错，{wait} 秒后第 {attempt} 次重试")
+        }
+        Some(waited) => format!(
+            "模型请求出错，正在第 {attempt} 次重试 · {}",
+            format_duration(waited - retry.delay_ms)
+        ),
+        None => format!("模型请求出错，正在第 {attempt} 次重试"),
     }
 }
 

@@ -1361,7 +1361,7 @@ impl AcpView {
                         mark,
                         animate_ambient,
                     ))
-                    .child(provider_retry_label(retry)),
+                    .child(provider_retry_label(retry, now_unix_ms())),
             )
             .when(!retry.error.is_empty(), |col| {
                 col.child(

@@ -3254,6 +3254,7 @@ fn handle_event(
                     attempt: number("attempt").unwrap_or(1) as u32,
                     max_attempts: number("maxAttempts").unwrap_or(0) as u32,
                     delay_ms: number("delayMs").unwrap_or(0),
+                    started_at_ms: crate::acp_session::unix_time_ms(),
                     error: event
                         .get("errorMessage")
                         .and_then(serde_json::Value::as_str)
@@ -7906,6 +7907,7 @@ mod tests {
                 assert_eq!(retry.attempt, 2);
                 assert_eq!(retry.max_attempts, 3);
                 assert_eq!(retry.delay_ms, 4000);
+                assert!(retry.started_at_ms > 0, "界面要据此倒数");
                 assert_eq!(retry.error, "429 rate limited");
             }
             _ => panic!("expected a retry state"),

@@ -1274,7 +1274,7 @@ pub fn accepts_mid_turn_steer(state: &AcpSessionState) -> bool {
     )
 }
 
-pub(super) fn unix_time_ms() -> u64 {
+pub(crate) fn unix_time_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

@@ -52,6 +52,10 @@ pub struct ProviderRetryView {
     pub max_attempts: u32,
     /// 这次重试前要等多久。
     pub delay_ms: u64,
+    /// 收到重试通知的时刻（Unix 毫秒）。界面据此倒数，重发出去之后报已等多久。
+    /// 旧快照缺省为 0，表示不知道起点。
+    #[serde(default)]
+    pub started_at_ms: u64,
     /// 触发重试的错误。
     pub error: String,
 }

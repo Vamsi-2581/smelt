@@ -2915,24 +2915,54 @@ fn retry_is_offered_only_when_the_agent_can_rewind() {
     );
 }
 
+/// 退避期间倒数；重发出去以后报已经等了多久，provider 迟迟不回时这行字也在走。
 #[test]
-fn provider_retry_label_says_which_attempt_and_when() {
+fn provider_retry_label_counts_down_then_reports_the_wait() {
     let retry = smelt_model::acp_session::ProviderRetryView {
         attempt: 2,
         max_attempts: 3,
         delay_ms: 4_200,
+        started_at_ms: 10_000,
         error: "429 rate limited".into(),
     };
     assert_eq!(
-        provider_retry_label(&retry),
+        provider_retry_label(&retry, 10_000),
         "模型请求出错，5 秒后第 2/3 次重试"
     );
-    let now = smelt_model::acp_session::ProviderRetryView {
+    assert_eq!(
+        provider_retry_label(&retry, 12_500),
+        "模型请求出错，2 秒后第 2/3 次重试"
+    );
+    assert_eq!(
+        provider_retry_label(&retry, 14_200),
+        "模型请求出错，正在第 2/3 次重试 · 0s"
+    );
+    assert_eq!(
+        provider_retry_label(&retry, 14_200 + 69_000),
+        "模型请求出错，正在第 2/3 次重试 · 1m 9s"
+    );
+    // 本机时钟比守护进程慢：不倒数成负数，按刚开始算。
+    assert_eq!(
+        provider_retry_label(&retry, 9_000),
+        "模型请求出错，5 秒后第 2/3 次重试"
+    );
+    let no_wait = smelt_model::acp_session::ProviderRetryView {
         delay_ms: 0,
         max_attempts: 0,
+        ..retry.clone()
+    };
+    assert_eq!(
+        provider_retry_label(&no_wait, 13_000),
+        "模型请求出错，正在第 2 次重试 · 3s"
+    );
+    let unknown_start = smelt_model::acp_session::ProviderRetryView {
+        started_at_ms: 0,
         ..retry
     };
-    assert_eq!(provider_retry_label(&now), "模型请求出错，正在第 2 次重试");
+    assert_eq!(
+        provider_retry_label(&unknown_start, 99_000),
+        "模型请求出错，正在第 2/3 次重试"
+    );
 }
 
 /// 往上翻着看历史时到的完成不算已读；滚回最新位置那一下才补标。
