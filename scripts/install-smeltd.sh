@@ -142,7 +142,7 @@ install_as_root() {
 
   local user="${SMELT_USER:-smelt}"
   if ! id -u "$user" >/dev/null 2>&1; then
-    say "建用户 $user：运行时和桌面都在它名下运行"
+    say "建用户 ${user}：运行时和桌面都在它名下运行"
     useradd --create-home --shell /bin/bash "$user"
   fi
   local uid home
@@ -360,7 +360,7 @@ user_phase() {
     echo "这台机器没有 systemd：${watched}由 smelt-up 看着，日志在 $SMELT_HOME/logs。"
     echo "容器重启后要再拉起它，或者直接把它设成容器的启动命令："
     echo "  runuser -u $USER -- $BIN/smelt-up    （以 root）"
-    echo "  $BIN/smelt-up &    （以 $USER）"
+    echo "  $BIN/smelt-up &    （以 ${USER}）"
   fi
 }
 

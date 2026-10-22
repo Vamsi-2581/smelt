@@ -17,7 +17,7 @@ main() {
   arch="$(uname -m)"
   case "$arch" in
     x86_64 | aarch64) ;;
-    *) echo "不支持的架构：$arch（只有 x86_64 和 aarch64）" >&2; exit 1 ;;
+    *) echo "不支持的架构：${arch}（只有 x86_64 和 aarch64）" >&2; exit 1 ;;
   esac
   local tool
   for tool in curl tar sha256sum; do

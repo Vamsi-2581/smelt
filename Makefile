@@ -4,7 +4,7 @@
 BIN := smelt
 DAEMON := smeltd
 
-.PHONY: help build icon dist dist-build install dev clean fmt fmt-check lint lint-sh lint-paths test pi-agent-check check-all smelt-pi
+.PHONY: help build icon dist dist-build install dev clean fmt fmt-check lint lint-sh lint-paths test test-sh pi-agent-check check-all smelt-pi
 
 SMELT_PI := target/smelt-pi/smelt-pi
 PI_AGENT_SOURCES := $(shell find packages/pi-agent/src -type f -name '*.ts') $(shell find packages/pi-agent/skills -type f)
@@ -26,11 +26,11 @@ lint: ## 运行 Clippy 静态检查（正确性 lint 由 workspace.lints deny）
 	cargo clippy --workspace --all-targets
 
 lint-sh: ## 检查 shell 脚本里 $$var 紧跟非 ASCII 的写法
-	@# macOS 自带 bash 3.2 在中文 locale 下，会把紧跟在 `$plugin_id` 后面的全角括号
+	@# macOS 自带 bash 3.2 在中文 locale 下，会把紧跟在 `$arch` 后面的全角括号
 	@# 字节当成变量名的一部分，于是 set -u 直接报 "unbound variable"。ASCII locale 下
 	@# 完全看不出来，所以只能靠这条检查兜住——本仓 echo 里中文很多，必然复发。
-	@# 修法是加花括号：$${plugin_id}（…）。
-	@out=$$(LC_ALL=C find scripts packages -name '*.sh' -print0 2>/dev/null \
+	@# 修法是加花括号：$${arch}（…）。只查纳入版本管理的脚本，不碰 node_modules。
+	@out=$$(git ls-files -z '*.sh' \
 		| LC_ALL=C xargs -0 grep -nE '\$$[A-Za-z_][A-Za-z0-9_]*[^[:print:][:space:]]'); \
 	if [ -n "$$out" ]; then \
 		echo "✗ shell 变量后紧跟非 ASCII 字符，请改成 \$${var}："; \
@@ -61,7 +61,11 @@ pi-agent-check: ## 检查内置 Pi Agent（类型 + 原生 RPC/权限单测）
 		&& "$$bun" run check \
 		&& "$$bun" run production-smoke
 
-check-all: fmt-check lint lint-sh lint-paths test pi-agent-check ## 完整检查 (格式 + Clippy + shell + 路径合规 + Rust/TS 测试)
+test-sh: ## 运行打包、安装、部署脚本的 shell 测试（scripts/test-*.sh）
+	@set -e; for t in scripts/test-*.sh; do echo "· $$t"; bash "$$t"; done
+
+# 不含 fmt-check：仓库还没整体 rustfmt 干净过，CI 也不查格式（见 ci.yml）。
+check-all: lint lint-sh lint-paths test test-sh pi-agent-check ## 完整检查 (Clippy + shell + 路径合规 + Rust/TS/脚本测试)
 
 $(SMELT_PI): packages/pi-agent/package.json packages/pi-agent/bun.lock scripts/compile-smelt-pi.ts scripts/build-smelt-pi.sh scripts/fetch-bun.sh $(PI_AGENT_SOURCES)
 	./scripts/build-smelt-pi.sh
