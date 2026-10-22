@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:smelt_mobile/data/models.dart';
+import 'package:smelt_mobile/data/stores.dart';
 import 'package:smelt_mobile/features/conversation/conversation_page.dart';
 import 'package:smelt_mobile/features/home_shell.dart';
 import 'package:smelt_mobile/features/machines/machine_detail_page.dart';
@@ -42,6 +44,23 @@ Future<void> _tapRow(WidgetTester tester, String title) async {
 
 int _count(RecordingBackend backend, String call) =>
     backend.calls.where((c) => c == call).length;
+
+/// 推一条「首页文案改版已完成」的提醒。正文是真实数据没标题时的兜底。
+Future<void> _attention(WidgetTester tester, AppModel model) async {
+  model.catalog.apply(
+    const CatalogEvent(
+      runtimeId: 'rt-mbp',
+      kind: CatalogEventKind.attention,
+      attention: AttentionItem(
+        sessionId: 's-copy',
+        title: '已完成',
+        message: '会话 s-copy',
+        kind: AttentionKind.success,
+      ),
+    ),
+  );
+  await _settle(tester);
+}
 
 void main() {
   testWidgets('平板：点默认详情里正显示的会话、再点已选中的会话，页面原样留着不重订', (tester) async {
@@ -92,6 +111,54 @@ void main() {
     await _tapNav(tester, 'Sessions');
     expect(find.byType(ConversationPage), findsOneWidget);
     expect(_count(backend, 'watch s-md'), 2, reason: '默认内容重新放上来');
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await _settle(tester);
+  });
+
+  testWidgets('手机：提醒提示条显示会话标题，点「打开」压进对话页', (tester) async {
+    usePhone(tester);
+    final backend = RecordingBackend();
+    final model = startModel(backend);
+    await tester.pumpWidget(host(model, const HomeShell()));
+    await _settle(tester);
+
+    await tester.tap(
+      find.descendant(
+        of: find.byType(NavigationBar),
+        matching: find.text('Sessions'),
+      ),
+    );
+    await _settle(tester);
+    await _attention(tester, model);
+
+    expect(find.text('MacBook Pro · 首页文案改版 · 已完成'), findsOneWidget);
+    expect(find.byType(ConversationPage), findsNothing);
+
+    await tester.tap(find.widgetWithText(SnackBarAction, 'Open'));
+    await _settle(tester);
+    expect(find.byType(ConversationPage), findsOneWidget);
+    expect(_count(backend, 'watch s-copy'), 1);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await _settle(tester);
+  });
+
+  testWidgets('平板：提醒提示条点「打开」放进详情栏', (tester) async {
+    _useTablet(tester);
+    final backend = RecordingBackend();
+    final model = startModel(backend);
+    await tester.pumpWidget(host(model, const HomeShell()));
+    await _settle(tester);
+
+    await _tapNav(tester, 'Sessions');
+    await _attention(tester, model);
+    await tester.tap(find.widgetWithText(SnackBarAction, 'Open'));
+    await _settle(tester);
+
+    expect(_count(backend, 'watch s-copy'), 1);
+    expect(_count(backend, 'unwatch s-md'), 1, reason: '换掉默认详情');
+    expect(find.byType(ConversationPage), findsOneWidget);
 
     await tester.pumpWidget(const SizedBox.shrink());
     await _settle(tester);

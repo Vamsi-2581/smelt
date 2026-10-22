@@ -140,8 +140,10 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
       ..clearSnackBars()
       ..showSnackBar(
         SnackBar(
+          // 提醒的 title 是阶段（「已完成」）；正文没有待答问题、daemon 也不知道标题时
+          // 只剩「会话 + id 前缀」。目录里有这条会话就用它的标题。
           content: Text(
-            [?machine, item.title, item.message].join(' · '),
+            [?machine, session?.title ?? item.message, item.title].join(' · '),
             maxLines: 2,
             overflow: TextOverflow.ellipsis,
           ),
@@ -149,7 +151,14 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
               ? null
               : SnackBarAction(
                   label: l10n.commonOpen,
-                  onPressed: () => openSession(context, runtimeId, session),
+                  onPressed: () {
+                    if (!mounted) return;
+                    _openSession(
+                      runtimeId,
+                      session,
+                      split: isSplitLayout(context),
+                    );
+                  },
                 ),
         ),
       );
@@ -209,15 +218,24 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
   Widget _defaultDetail() => _DefaultDetail(
     tab: _tabNotifier,
     pinned: _pinnedDefault,
-    openSession: (runtimeId, session) => openSessionWith(
-      DetailHost(
-        open: (key, builder) => _open(key, builder, split: true),
-        selectedKey: null,
-        child: const SizedBox.shrink(),
-      ),
-      runtimeId,
-      session,
+    openSession: (runtimeId, session) =>
+        _openSession(runtimeId, session, split: true),
+  );
+
+  /// 外壳自己打开会话。它的 context 在 DetailHost 之上，`openSession(context, …)`
+  /// 找不到详情去处，直接走 [_open]。
+  void _openSession(
+    String runtimeId,
+    SessionSummary session, {
+    required bool split,
+  }) => openSessionWith(
+    DetailHost(
+      open: (key, builder) => _open(key, builder, split: split),
+      selectedKey: null,
+      child: const SizedBox.shrink(),
     ),
+    runtimeId,
+    session,
   );
 
   Widget _page(HomeTab tab) => switch (tab) {

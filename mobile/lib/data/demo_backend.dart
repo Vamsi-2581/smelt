@@ -101,7 +101,7 @@ class DemoBackend implements Backend {
       detail: 'Bash',
       attention: const AttentionItem(
         sessionId: 's-md',
-        title: '修复 markdown 链接解析',
+        title: '等你批准',
         message: '想运行 cargo test',
         kind: AttentionKind.approval,
       ),
@@ -116,7 +116,7 @@ class DemoBackend implements Backend {
       ago: const Duration(minutes: 3, seconds: 10),
       attention: const AttentionItem(
         sessionId: 's-route',
-        title: '接入 sing-box 路由',
+        title: '等你输入',
         message: '路由规则放在哪一层？',
         kind: AttentionKind.input,
       ),
@@ -131,7 +131,7 @@ class DemoBackend implements Backend {
       ago: const Duration(minutes: 5),
       attention: const AttentionItem(
         sessionId: 's-relay',
-        title: '部署自建 relay',
+        title: '失败',
         message: 'systemctl restart iroh-relay 退出码 1：端口 443 已被占用',
         kind: AttentionKind.failure,
       ),
@@ -231,7 +231,7 @@ class DemoBackend implements Backend {
           ago: const Duration(minutes: 2),
           attention: const AttentionItem(
             sessionId: 's-copy',
-            title: '首页文案改版',
+            title: '已完成',
             message: '完成',
             kind: AttentionKind.success,
           ),
