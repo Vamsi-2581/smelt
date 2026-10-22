@@ -142,6 +142,18 @@ fn loaded_mcp_servers_for_launch_at(
         .collect()
 }
 
+/// 这些 MCP 服务器里有没有用受管 Bun 启动的。MCP 预设写的命令是
+/// [`smelt_model::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH`]，`~` 由 Pi 展开。
+pub fn uses_managed_bun(servers: &[PiMcpServer]) -> bool {
+    servers.iter().any(|server| {
+        matches!(
+            &server.transport,
+            PiMcpTransport::Stdio { command, .. }
+                if command == smelt_model::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH
+        )
+    })
+}
+
 /// `mcp-auth.json` 的键是 `<命名空间>|<URL>`（旧版只有 URL），值里有 `tokens` 才算登录过。
 /// 只按 URL 认：命名空间的写法是 Pi 的内部细节，这里不跟。
 fn signed_in_urls(auth: &Value) -> HashSet<String> {
@@ -275,6 +287,34 @@ fn last_output_line(output: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 预设都用受管 Bun 启动：Pi 要连它们之前得先把 Bun 备好。
+    #[test]
+    fn presets_run_on_the_managed_bun() {
+        let dir = tempfile::tempdir().unwrap();
+        add_pi_mcp_preset_at(dir.path(), "desktop-chrome").unwrap();
+        let servers = load_pi_mcp_servers_at(dir.path()).unwrap();
+        assert!(uses_managed_bun(&servers));
+
+        let http = PiMcpServer {
+            name: "remote".into(),
+            transport: PiMcpTransport::Http {
+                url: "https://example.com/mcp".into(),
+            },
+            enabled: true,
+            description: None,
+            signed_in: false,
+        };
+        let system_node = PiMcpServer {
+            name: "local".into(),
+            transport: PiMcpTransport::Stdio {
+                command: "npx".into(),
+                args: vec![],
+            },
+            ..http.clone()
+        };
+        assert!(!uses_managed_bun(&[http, system_node]));
+    }
 
     fn temp_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("smelt-pi-mcp-{}", uuid::Uuid::new_v4()));

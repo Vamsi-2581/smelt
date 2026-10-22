@@ -261,6 +261,21 @@ pub fn spawn_pi_rpc(
                     return;
                 }
             };
+            // 要连的 MCP 里有用受管 Bun 启动的（预设都是），先把 Bun 备好，会话期间持有它的
+            // 租约。Pi 自己已经不跑在 Bun 上，没人会为它下载；新装的机器上那条路径不在，
+            // MCP 起不来（spawn … ENOENT）。备不好也照常起 Pi，MCP 那边会如实报错。
+            let _mcp_bun = crate::pi_mcp::uses_managed_bun(
+                &crate::pi_mcp::loaded_mcp_servers_for_launch(&launch.launch),
+            )
+            .then(|| {
+                crate::managed_runtime::sync_managed_bun(&|message| {
+                    let _ = event_tx.try_send(ConversationEvent::Status(message.to_string()));
+                })
+                .inspect_err(|error| {
+                    crate::app_log::error("pi-rpc", &format!("准备 MCP 用的 Bun 失败：{error}"));
+                })
+                .ok()
+            });
             let had_resume = launch.resume_session_id.is_some() || launch.fork_session_id.is_some();
             let result = smol::block_on(async {
                 let result = run_connection(
