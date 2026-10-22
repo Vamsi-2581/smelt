@@ -52,7 +52,11 @@ async function callPeers(request: Record<string, unknown>, signal?: AbortSignal)
 	return (await callBackgroundHost(process.env[SMELT_BACKGROUND_TASK_SOCK_ENV], request, signal)) as PeerHostReply;
 }
 
-function failed(reply: PeerHostReply, details: Record<string, unknown> = {}) {
+// details 标成通用对象：各工具成功时的 details 形状不同，defineTool 要能推出它们共同的类型。
+function failed(
+	reply: PeerHostReply,
+	details: Record<string, unknown> = {},
+): { content: { type: "text"; text: string }[]; details: Record<string, unknown>; isError: true } {
 	return {
 		content: [{ type: "text" as const, text: reply.error || "和别的对话通信失败" }],
 		details: { error: true, reason: reply.reason, ...details },
