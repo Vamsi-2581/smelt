@@ -3,14 +3,17 @@
 //! 应用常驻，远程的跟着 [`RuntimeHub`] 增删。
 //!
 //! 远程运行时每次连之前先对版本（本机守护由桌面自己拉起和升级，版本总是对的）：对不上
-//! 就不订阅，把原因记到 [`RuntimeHub`] 上给人看，这条订阅停下，直到再探测时对上了才重起。
-//! 不然订阅解不出投影就断，断了又连，会话状态永远到不了，也没人知道为什么。
+//! 就不订阅，把原因记到 [`RuntimeHub`] 上给人看，丢掉它的会话状态镜像，隔一阵再探，对上了
+//! 才订阅。不然订阅解不出投影就断，断了又连，会话状态永远到不了，也没人知道为什么。
+//!
+//! 连不上和对不上都退避重探；「重新连接」（[`reconnect`]）叫醒线程立刻再试，退避从头算。
 //!
 //! 订阅线程是远程运行时连通性的唯一来源：每次探测的结果、订阅断开，都报回 [`RuntimeHub`]，
 //! 侧栏的「离线」跟着它走，不是只在启动时探一次。
 //!
 //! 运行时比桌面旧时先请它升到桌面的版本（设计文档 D7，见 [`upgrade_then_probe`]），升完
-//! 再探；每条订阅线程只请一次，升了还对不上就照常标不兼容，不反复请。
+//! 再探；每条订阅线程只请一次，升了还对不上就照常标不兼容，不反复请，人点「重新连接」
+//! 才再请一次。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,9 +31,64 @@ struct RuntimeSubscriptions {
     sender: smol::channel::Sender<RuntimeEvent>,
     /// 订阅线程把远程运行时的连通性报给主线程：哪个运行时、现在怎样。
     status: smol::channel::Sender<(RuntimeKey, RuntimeStatus)>,
-    /// 远程运行时各自的停止标记。
-    remotes: HashMap<RuntimeKey, Arc<AtomicBool>>,
+    /// 本机那条。把手丢了线程就停，所以要留着。
+    _local: SubscriptionHandle,
+    remotes: HashMap<RuntimeKey, SubscriptionHandle>,
     _hub_watch: Option<Subscription>,
+}
+
+/// 叫醒退避中的订阅线程。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Wake {
+    /// 立刻再探一次，退避从头算。
+    Probe,
+    /// 人点了「重新连接」：再探，运行时旧就再请它升级一次（每条线程本来只请一次）。
+    Reconnect,
+}
+
+/// 一条订阅线程的把手：叫醒它，或停下它。把手丢了线程也停。
+pub(crate) struct SubscriptionHandle {
+    stop: Arc<AtomicBool>,
+    wake: std::sync::mpsc::Sender<Wake>,
+}
+
+impl SubscriptionHandle {
+    fn wake(&self, wake: Wake) {
+        let _ = self.wake.send(wake);
+    }
+
+    /// 见 [`reconnect`]。
+    pub(crate) fn reconnect(&self) {
+        self.wake(Wake::Reconnect);
+    }
+
+    pub(crate) fn stop(&self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
+
+/// 版本对不上要等人去升级一边，不必勤探：从 30 秒起翻倍，封顶 10 分钟。
+fn incompatible_backoff(attempt: u32) -> Duration {
+    (Duration::from_secs(30) * 2u32.pow(attempt.min(5))).min(Duration::from_secs(600))
+}
+
+/// 请这台运行时的订阅线程立刻重连（机器菜单的「重新连接」）。
+pub(crate) fn reconnect(key: &RuntimeKey, cx: &App) {
+    if let Some(handle) = cx
+        .try_global::<RuntimeSubscriptions>()
+        .and_then(|subscriptions| subscriptions.remotes.get(key))
+    {
+        handle.reconnect();
+    }
+}
+
+/// 请各台远程运行时立刻再探一次（打开设置窗口时），不重新请求升级。
+pub(crate) fn probe_remotes(cx: &App) {
+    if let Some(subscriptions) = cx.try_global::<RuntimeSubscriptions>() {
+        for handle in subscriptions.remotes.values() {
+            handle.wake(Wake::Probe);
+        }
+    }
 }
 
 impl Global for RuntimeSubscriptions {}
@@ -41,19 +99,23 @@ pub(crate) fn start(cx: &mut App) -> smol::channel::Receiver<RuntimeEvent> {
     let (status, status_rx) = smol::channel::unbounded::<(RuntimeKey, RuntimeStatus)>();
     cx.spawn(async move |cx| {
         while let Ok((key, status)) = status_rx.recv().await {
-            cx.update(|cx| crate::runtimes::set_status(&key, status, cx));
+            cx.update(|cx| {
+                // 刚变成对不上：不订阅了，它的会话状态镜像和移除时一样丢掉，对上了重新订阅再建。
+                if matches!(status, RuntimeStatus::Incompatible { .. })
+                    && !crate::runtimes::runtime_incompatible(&key, cx)
+                {
+                    forget_states(&key, cx);
+                }
+                crate::runtimes::set_status(&key, status, cx);
+            });
         }
     })
     .detach();
-    spawn_subscription(
-        Runtime::local(),
-        sender.clone(),
-        status.clone(),
-        Arc::new(AtomicBool::new(false)),
-    );
+    let local = spawn_subscription(Runtime::local(), sender.clone(), status.clone());
     cx.set_global(RuntimeSubscriptions {
         sender,
         status,
+        _local: local,
         remotes: HashMap::new(),
         _hub_watch: None,
     });
@@ -67,13 +129,19 @@ pub(crate) fn spawn_subscription(
     runtime: Runtime,
     sender: smol::channel::Sender<RuntimeEvent>,
     status_tx: smol::channel::Sender<(RuntimeKey, RuntimeStatus)>,
-    stop: Arc<AtomicBool>,
-) {
+) -> SubscriptionHandle {
     let key = runtime.key().clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let (wake, woken) = std::sync::mpsc::channel();
+    let handle = SubscriptionHandle {
+        stop: Arc::clone(&stop),
+        wake,
+    };
     std::thread::Builder::new()
         .name(format!("smelt-events-{key:?}"))
         .spawn(move || {
             let mut reconnect_attempt = 0u32;
+            let mut incompatible_attempt = 0u32;
             let mut upgrade_requested = false;
             while !stop.load(Ordering::Acquire) {
                 let mut status =
@@ -95,37 +163,69 @@ pub(crate) fn spawn_subscription(
                 if let Some(status) = &status {
                     let _ = status_tx.try_send((key.clone(), status.clone()));
                 }
-                match status {
-                    Some(RuntimeStatus::Incompatible { .. }) => return,
+                let pause = match status {
+                    Some(RuntimeStatus::Incompatible { .. }) => {
+                        reconnect_attempt = 0;
+                        let pause = incompatible_backoff(incompatible_attempt);
+                        incompatible_attempt = incompatible_attempt.saturating_add(1);
+                        pause
+                    }
                     // 连不上就不再拨一次订阅，直接退避。
-                    Some(RuntimeStatus::Offline(_)) => {}
-                    _ => crate::terminal::subscribe_daemon_states_blocking(
-                        runtime.client(),
-                        |event| {
-                            !stop.load(Ordering::Acquire)
-                                && sender.try_send((key.clone(), event)).is_ok()
-                        },
-                    ),
+                    Some(RuntimeStatus::Offline(_)) => {
+                        incompatible_attempt = 0;
+                        let pause = crate::terminal::daemon_reconnect_backoff(reconnect_attempt);
+                        reconnect_attempt = reconnect_attempt.saturating_add(1);
+                        pause
+                    }
+                    _ => {
+                        incompatible_attempt = 0;
+                        crate::terminal::subscribe_daemon_states_blocking(
+                            runtime.client(),
+                            |event| {
+                                !stop.load(Ordering::Acquire)
+                                    && sender.try_send((key.clone(), event)).is_ok()
+                            },
+                        );
+                        if stop.load(Ordering::Acquire) {
+                            return;
+                        }
+                        // 订阅断了：远程运行时这会儿算连不上，退避后再探测时连上了会报回在线。
+                        if !runtime.is_local() {
+                            let _ = status_tx.try_send((
+                                key.clone(),
+                                RuntimeStatus::Offline("连接断开".to_string()),
+                            ));
+                        }
+                        let _ = sender.try_send((key.clone(), DaemonStateEvent::Disconnected));
+                        // 短暂可用后断开（daemon 升级）从首档开始；连续失败则指数退避并封顶，
+                        // 避免运行时没起来时固定节拍反复去连。
+                        if connected_at.elapsed() >= Duration::from_secs(5) {
+                            reconnect_attempt = 0;
+                        }
+                        let pause = crate::terminal::daemon_reconnect_backoff(reconnect_attempt);
+                        reconnect_attempt = reconnect_attempt.saturating_add(1);
+                        pause
+                    }
+                };
+                // 退避等待可被叫醒；把手丢了（运行时被移除）就停。
+                let wake = match woken.recv_timeout(pause) {
+                    Ok(wake) => wake,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                };
+                // 攒着的几次叫醒并成一次，有人点过「重新连接」就按它算。
+                let reconnect = std::iter::once(wake)
+                    .chain(woken.try_iter())
+                    .any(|wake| wake == Wake::Reconnect);
+                reconnect_attempt = 0;
+                incompatible_attempt = 0;
+                if reconnect {
+                    upgrade_requested = false;
                 }
-                if stop.load(Ordering::Acquire) {
-                    return;
-                }
-                // 订阅断了：远程运行时这会儿算连不上，退避后再探测时连上了会报回在线。
-                if !runtime.is_local() {
-                    let _ = status_tx
-                        .try_send((key.clone(), RuntimeStatus::Offline("连接断开".to_string())));
-                }
-                let _ = sender.try_send((key.clone(), DaemonStateEvent::Disconnected));
-                // 短暂可用后断开（daemon 升级）从首档开始；连续失败则指数退避并封顶，
-                // 避免运行时没起来时固定节拍反复去连。
-                if connected_at.elapsed() >= Duration::from_secs(5) {
-                    reconnect_attempt = 0;
-                }
-                std::thread::sleep(crate::terminal::daemon_reconnect_backoff(reconnect_attempt));
-                reconnect_attempt = reconnect_attempt.saturating_add(1);
             }
         })
         .expect("spawn smelt-events 线程");
+    handle
 }
 
 /// 请运行时升到这个桌面的版本，等它换好再探一次，返回探到的状态。升级没成就在原来的
@@ -208,7 +308,7 @@ fn upgrade_then_probe(
 }
 
 /// 远程运行时的订阅跟着 RuntimeHub 走：新添加的起一条，移除的停掉并丢掉它的状态镜像。
-/// 版本不兼容的和移除的一样处理；之后再探测对上了，就当新添加的重起一条。
+/// 版本不兼容的线程不停，它自己隔一阵再探（见 [`spawn_subscription`]）。
 fn sync_remote_subscriptions(cx: &mut App) {
     let Some(hub) = cx.try_global::<RuntimeHub>() else {
         return;
@@ -216,7 +316,6 @@ fn sync_remote_subscriptions(cx: &mut App) {
     let remotes: Vec<Runtime> = hub
         .remotes
         .iter()
-        .filter(|remote| !matches!(remote.status, RuntimeStatus::Incompatible { .. }))
         .map(|remote| remote.runtime.clone())
         .collect();
     let subscriptions = cx.global_mut::<RuntimeSubscriptions>();
@@ -227,28 +326,43 @@ fn sync_remote_subscriptions(cx: &mut App) {
         .cloned()
         .collect();
     for key in &removed {
-        if let Some(stop) = subscriptions.remotes.remove(key) {
-            stop.store(true, Ordering::Release);
+        if let Some(handle) = subscriptions.remotes.remove(key) {
+            handle.stop();
         }
     }
     for runtime in remotes {
         if subscriptions.remotes.contains_key(runtime.key()) {
             continue;
         }
-        let stop = Arc::new(AtomicBool::new(false));
-        subscriptions
-            .remotes
-            .insert(runtime.key().clone(), Arc::clone(&stop));
-        spawn_subscription(
+        let key = runtime.key().clone();
+        let handle = spawn_subscription(
             runtime,
             subscriptions.sender.clone(),
             subscriptions.status.clone(),
-            stop,
         );
+        subscriptions.remotes.insert(key, handle);
     }
     for key in removed {
-        for id in crate::DaemonStates::forget_runtime(&key, cx) {
-            crate::AttentionGlobal::remove_session(&id, cx);
-        }
+        forget_states(&key, cx);
+    }
+}
+
+/// 丢掉一个运行时的会话状态镜像，连同上面会话的提醒。
+fn forget_states(key: &RuntimeKey, cx: &mut App) {
+    for id in crate::DaemonStates::forget_runtime(key, cx) {
+        crate::AttentionGlobal::remove_session(&id, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn incompatible_backoff_doubles_up_to_ten_minutes() {
+        let pauses: Vec<u64> = (0..8)
+            .map(|attempt| incompatible_backoff(attempt).as_secs())
+            .collect();
+        assert_eq!(pauses, [30, 60, 120, 240, 480, 600, 600, 600]);
     }
 }

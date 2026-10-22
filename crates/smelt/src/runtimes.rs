@@ -257,6 +257,22 @@ pub(crate) fn runtime_link_detail(key: &RuntimeKey, cx: &gpui::App) -> (String, 
     }
 }
 
+/// 最近一次探测是版本对不上。
+pub(crate) fn runtime_incompatible(key: &RuntimeKey, cx: &gpui::App) -> bool {
+    remote_of(key, cx)
+        .is_some_and(|remote| matches!(remote.status, RuntimeStatus::Incompatible { .. }))
+}
+
+/// 连不上或版本对不上的远程机器，菜单里给「重新连接」。
+pub(crate) fn runtime_can_reconnect(key: &RuntimeKey, cx: &gpui::App) -> bool {
+    remote_of(key, cx).is_some_and(|remote| {
+        matches!(
+            remote.status,
+            RuntimeStatus::Offline(_) | RuntimeStatus::Incompatible { .. }
+        )
+    })
+}
+
 /// 这台机器装了远程桌面、眼下也连着。本机（macOS）没有这套。
 pub(crate) fn runtime_has_desktop(key: &RuntimeKey, cx: &gpui::App) -> bool {
     remote_of(key, cx)
@@ -542,7 +558,6 @@ pub(crate) fn start_runtime_hub(cx: &mut gpui::App) {
         Err(error) => hub.load_error = Some(format!("读取机器列表失败：{error}")),
     }
     cx.set_global(hub);
-    refresh_runtime_status(cx);
     watch_runtime_links(cx);
 }
 
@@ -609,39 +624,6 @@ fn watch_runtime_links(cx: &mut gpui::App) {
         }
     })
     .detach();
-}
-
-/// 重新探一遍每个远程运行时（打开设置窗口时调）。
-pub(crate) fn refresh_runtime_status(cx: &mut gpui::App) {
-    let Some(hub) = cx.try_global::<RuntimeHub>() else {
-        return;
-    };
-    for remote in hub.remotes.clone() {
-        // 订阅线程正请它升级、等它换好：这时探到的旧版本盖上去，会把那条线程停掉。
-        if matches!(remote.status, RuntimeStatus::Upgrading(_)) {
-            continue;
-        }
-        let runtime_id = remote.connection.runtime_id.clone();
-        let client = remote.runtime.client().clone();
-        cx.spawn(async move |cx| {
-            let status = cx
-                .background_executor()
-                .spawn(async move { status_of(&client) })
-                .await;
-            cx.update(|cx| {
-                update_hub(cx, |hub| {
-                    if let Some(remote) = hub
-                        .remotes
-                        .iter_mut()
-                        .find(|remote| remote.connection.runtime_id == runtime_id)
-                    {
-                        remote.status = status;
-                    }
-                })
-            });
-        })
-        .detach();
-    }
 }
 
 pub(crate) fn set_pairing_input(value: &str, cx: &mut gpui::App) {
@@ -1068,16 +1050,12 @@ mod tests {
     /// 不能只在启动时探一次。
     #[test]
     fn subscription_reports_reachability_changes() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
         let (events, _events_rx) = smol::channel::unbounded();
         let (status, status_rx) = smol::channel::unbounded();
-        let stop = Arc::new(AtomicBool::new(false));
-        crate::runtime_events::spawn_subscription(
+        let handle = crate::runtime_events::spawn_subscription(
             remote_runtime("rt-test", describe_without("no.such.method")),
             events,
             status,
-            Arc::clone(&stop),
         );
         let (key, first) = status_rx.recv_blocking().unwrap();
         assert_eq!(key, RuntimeKey::Remote("rt-test".into()));
@@ -1085,7 +1063,47 @@ mod tests {
         // 假运行时只答 describe，订阅随即断开：断开要报离线。
         let (_, second) = status_rx.recv_blocking().unwrap();
         assert!(matches!(second, RuntimeStatus::Offline(_)), "{second:?}");
-        stop.store(true, Ordering::Release);
+        handle.stop();
+    }
+
+    /// 版本对不上的订阅线程不退出：退避着再探，「重新连接」叫醒它立刻再探。
+    #[test]
+    fn incompatible_runtime_is_probed_again_on_reconnect() {
+        use smelt_runtime_client::protocol::control::ControlResponse;
+        // 比桌面新的运行时：不会去请它升级。
+        let newer = runtime_answering(|request| {
+            let request_id = request["request_id"].as_str().unwrap();
+            let mut described = described_without("no.such.method");
+            described.events.as_mut().unwrap().projection_version += 1;
+            serde_json::to_value(ControlResponse::ok(request_id, described)).unwrap()
+        });
+        let (events, _events_rx) = smol::channel::unbounded();
+        let (status, status_rx) = smol::channel::unbounded();
+        let handle = crate::runtime_events::spawn_subscription(
+            remote_runtime("rt-new", newer),
+            events,
+            status,
+        );
+        let (_, first) = status_rx.recv_blocking().unwrap();
+        assert!(
+            matches!(first, RuntimeStatus::Incompatible { .. }),
+            "{first:?}"
+        );
+
+        handle.reconnect();
+        // 首档退避 30 秒；叫醒了就不用等。
+        let again = smol::block_on(smol::future::or(
+            async { status_rx.recv().await.ok() },
+            async {
+                smol::Timer::after(std::time::Duration::from_secs(5)).await;
+                None
+            },
+        ));
+        assert!(
+            matches!(again, Some((_, RuntimeStatus::Incompatible { .. }))),
+            "{again:?}"
+        );
+        handle.stop();
     }
 
     /// 假运行时：读到首行升级请求后按顺序回这几行，然后断开。

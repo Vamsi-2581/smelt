@@ -82,6 +82,21 @@ pub(crate) fn machine_actions(
             }),
         });
     }
+    // 连不上、版本对不上时不必等退避：立刻再试，运行时旧就再请它升级一次。
+    if crate::runtimes::runtime_can_reconnect(&key, cx) {
+        actions.insert(
+            0,
+            MachineAction {
+                label: "重新连接",
+                icon: IconName::Redo.into(),
+                separated: false,
+                run: Rc::new({
+                    let key = key.clone();
+                    move |_window, cx| crate::runtime_events::reconnect(&key, cx)
+                }),
+            },
+        );
+    }
     let RuntimeKey::Remote(runtime_id) = key else {
         return actions;
     };
