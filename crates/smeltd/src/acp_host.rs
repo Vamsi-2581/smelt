@@ -4784,13 +4784,17 @@ pub(crate) fn resume_acp_after_handoff_rollback(acp_sessions: &AcpSessions) {
     }
 }
 
+/// fd 都是收集时 dup 出来的副本（见 [`crate::handoff_v2::predecessor::StagedHandoff`]）：
+/// 原件归会话，交接期间别的线程关会话会关掉它。dup 不出来就说明原件已经关了，这个
+/// 会话不交接，和拿不到 fd 同样处理。
 pub(crate) fn collect_acp_handoff_typed(
     acp_sessions: &AcpSessions,
 ) -> (
     Vec<crate::handoff_v2::manifest::AcpHandoff>,
-    Vec<(crate::handoff_v2::manifest::FdRole, RawFd)>,
+    Vec<(crate::handoff_v2::manifest::FdRole, std::os::fd::OwnedFd)>,
 ) {
     use crate::handoff_v2::manifest::{AcpHandoff, FdRole};
+    use crate::handoff_v2::predecessor::pin_fd;
     let acp_session_list = acp_sessions.snapshot();
     let mut acp_items = Vec::new();
     let mut acp_fds = Vec::new();
@@ -4809,6 +4813,13 @@ pub(crate) fn collect_acp_handoff_typed(
             let Some(host_fd) = host.control_fd() else {
                 crate::dlog(&format!("acp 交接拿不到宿主控制连接 {id}"));
                 continue;
+            };
+            let host_fd = match pin_fd(host_fd) {
+                Ok(fd) => fd,
+                Err(error) => {
+                    crate::dlog(&format!("acp 交接宿主控制连接已关闭 {id}：{error}"));
+                    continue;
+                }
             };
             let host_pid = host.pid();
             let provider_pid = host.provider_pid();
@@ -4846,6 +4857,13 @@ pub(crate) fn collect_acp_handoff_typed(
             .as_ref()
             .and_then(|h| *h.stdio.lock().unwrap());
         let Some(stdio) = stdio else { continue };
+        let (stdin_fd, stdout_fd) = match (pin_fd(stdio.stdin_fd), pin_fd(stdio.stdout_fd)) {
+            (Ok(stdin_fd), Ok(stdout_fd)) => (stdin_fd, stdout_fd),
+            (Err(error), _) | (_, Err(error)) => {
+                crate::dlog(&format!("acp 交接 provider 管道已关闭 {id}：{error}"));
+                continue;
+            }
+        };
         let launch = recorded_handoff_launch(sess);
         let agent_token = sess.state.lock().unwrap().agent_token.clone();
         let (mut snapshot, pending_raw_line) = {
@@ -4871,13 +4889,13 @@ pub(crate) fn collect_acp_handoff_typed(
             FdRole::AcpStdin {
                 session_id: id.to_string(),
             },
-            stdio.stdin_fd,
+            stdin_fd,
         ));
         acp_fds.push((
             FdRole::AcpStdout {
                 session_id: id.to_string(),
             },
-            stdio.stdout_fd,
+            stdout_fd,
         ));
     }
 

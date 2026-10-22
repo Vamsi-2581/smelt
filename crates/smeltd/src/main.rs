@@ -2223,6 +2223,9 @@ fn import_main(sock_fd: RawFd, daemon_fingerprint: Option<String>) {
     let _ = set_cloexec(sock_fd, true);
     // SAFETY：fd 有效性刚校验过，且该号只属于这次 import（predecessor 传参保证）。
     let sock = unsafe { UnixStream::from_raw_fd(sock_fd) };
+    // COMMIT 前主库要迁移就不打开（见 `defer_migration`）。这期间读不到库的地方都有退路：
+    // 远程目录访问时重试加载，会话目录下一次变化整份重写，菜单挪到 COMMIT 之后才读。
+    smelt_core::sqlite_state::defer_migration();
 
     // 建不起来则直接 exit（ABORT 都发不出，predecessor 见 EOF 回滚）。
     let event_hub = match event_hub::DaemonEventHub::new() {
@@ -2233,7 +2236,6 @@ fn import_main(sock_fd: RawFd, daemon_fingerprint: Option<String>) {
         }
     };
     let remote_sessions = new_remote_sessions();
-    let workspace_menu = new_workspace_menu();
     *SESSION_DIRECTORY.write().unwrap_or_else(|e| e.into_inner()) = Some(SessionDirectory::new());
 
     match handoff_v2::successor::run_import(
@@ -2252,6 +2254,9 @@ fn import_main(sock_fd: RawFd, daemon_fingerprint: Option<String>) {
                 "handoff: import 接管（终端 {} + ACP {}，丢 grid {:?}）",
                 ready.restored_terminals, ready.restored_acp, ready.dropped_grids
             ));
+            // 已 COMMIT，旧进程在退出：主库归这里了，要迁移就在下一次打开时迁。
+            smelt_core::sqlite_state::allow_migration();
+            let workspace_menu = new_workspace_menu();
             let automations = new_automation_store();
             reconcile_remote_catalog_runtime(
                 &remote_sessions,

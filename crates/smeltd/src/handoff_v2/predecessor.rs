@@ -20,7 +20,7 @@ use super::manifest::{
 };
 use super::transport::{self, ReadyInfo};
 use alacritty_terminal::term::TermMode;
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::MutexGuard;
 use std::time::Duration;
@@ -28,11 +28,27 @@ use std::time::Duration;
 use std::time::Instant;
 
 /// 已 stage 的交接载荷：fd_roles/fds/grids 三组同序一一对应。
-/// fds 是发送方原件号（保持 CLOEXEC），`SCM_RIGHTS` 发 dup 份。
+/// fds 里每个号在事务结束前都不会被关掉或复用：listen 归服务循环、终端 master 归会话
+/// （快照 guards 挡着），ACP 的是收集时 dup 出来的副本，由 `_pinned` 持有。ACP 的
+/// 原件归会话自己，关会话、自动化回收、provider 退出都会关它，而这些不受快照约束；
+/// 直接记原件号的话，发出去时号可能已经关了（EBADF），更糟的是被别的连接复用，
+/// successor 会接到错的 socket。`SCM_RIGHTS` 再发一份 dup 给 successor。
 pub(crate) struct StagedHandoff {
     pub manifest: HandoffManifest,
     pub fds: Vec<RawFd>,
     pub grid_blobs: Vec<Vec<u8>>,
+    _pinned: Vec<OwnedFd>,
+}
+
+/// dup 一份（带 CLOEXEC）归调用方所有。原件已经关了就报错，不碰别人的号。
+pub(crate) fn pin_fd(fd: RawFd) -> std::io::Result<OwnedFd> {
+    // SAFETY：F_DUPFD_CLOEXEC 只读 fd 号；号无效时内核返回 EBADF，不会动别的描述符。
+    let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if dup < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY：dup 是刚拿到、没有别人持有的新描述符。
+    Ok(unsafe { OwnedFd::from_raw_fd(dup) })
 }
 
 /// [`with_snapshot`] 交给闭包的快照：载荷 + 跨事务持有的 guards。
@@ -145,9 +161,11 @@ pub(crate) fn with_snapshot<R>(
         child_guards.push(child_state);
     }
 
-    for (role, fd) in &acp_fds {
-        fd_roles.push(role.clone());
-        fds.push(*fd);
+    let mut pinned = Vec::with_capacity(acp_fds.len());
+    for (role, fd) in acp_fds {
+        fd_roles.push(role);
+        fds.push(fd.as_raw_fd());
+        pinned.push(fd);
     }
 
     #[cfg(target_os = "macos")]
@@ -176,6 +194,7 @@ pub(crate) fn with_snapshot<R>(
             manifest,
             fds,
             grid_blobs,
+            _pinned: pinned,
         },
         _output_guards: output_guards,
         _input_guards: input_guards,

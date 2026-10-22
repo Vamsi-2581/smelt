@@ -3670,22 +3670,35 @@ fn open_then_handoff_keeps_one_stable_registry_slot() {
         panic!("应为 direct 形态");
     };
     assert_eq!(launch.command, "/definitely/not/a/real/binary-xyz");
+    let roles: Vec<_> = fds.iter().map(|(role, _)| role.clone()).collect();
     assert_eq!(
-        fds,
+        roles,
         vec![
-            (
-                crate::handoff_v2::manifest::FdRole::AcpStdin {
-                    session_id: "acp-handoff".to_string()
-                },
-                stdin_fd_owner.as_raw_fd(),
-            ),
-            (
-                crate::handoff_v2::manifest::FdRole::AcpStdout {
-                    session_id: "acp-handoff".to_string()
-                },
-                stdout_fd_owner.as_raw_fd(),
-            ),
+            crate::handoff_v2::manifest::FdRole::AcpStdin {
+                session_id: "acp-handoff".to_string()
+            },
+            crate::handoff_v2::manifest::FdRole::AcpStdout {
+                session_id: "acp-handoff".to_string()
+            },
         ]
+    );
+    // 交出去的是副本：和原件是同一个打开的文件，号却是自己的。
+    assert!(same_open_file(
+        fds[0].1.as_raw_fd(),
+        stdin_fd_owner.as_raw_fd()
+    ));
+    assert!(same_open_file(
+        fds[1].1.as_raw_fd(),
+        stdout_fd_owner.as_raw_fd()
+    ));
+    assert_ne!(fds[0].1.as_raw_fd(), stdin_fd_owner.as_raw_fd());
+    // 交接期间会话被关掉（原件关了），快照里的副本照样能发：以前这里交出去的是原件号，
+    // 发送时报 EBADF，或者号被别的连接复用、successor 接到错的 socket。
+    let stdin_fd = fds[0].1.as_raw_fd();
+    drop(stdin_fd_owner);
+    assert!(
+        unsafe { libc::fcntl(stdin_fd, libc::F_GETFD) } >= 0,
+        "原件关了以后快照里的 fd 不能跟着失效"
     );
     assert_eq!(acp_sessions.snapshot().len(), 1);
     assert!(Arc::ptr_eq(
@@ -5012,4 +5025,14 @@ fn conversation_image_finds_the_original_by_reference() {
     )
     .unwrap();
     assert_eq!(again, thumb);
+}
+
+/// 两个 fd 指向同一个打开的文件（同设备、同 inode）。
+fn same_open_file(a: std::os::fd::RawFd, b: std::os::fd::RawFd) -> bool {
+    let stat = |fd| {
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::fstat(fd, &mut stat) }, 0, "fstat {fd} 失败");
+        (stat.st_dev, stat.st_ino)
+    };
+    stat(a) == stat(b)
 }
