@@ -72,6 +72,17 @@ const BUN_ZIP_DIR: &str = "bun-linux-aarch64";
 pub(crate) const BUN_EXECUTABLE_SHA256: &str =
     "029ece746ac9f970c76d8f48bdd1b1d0c52f3636b74d19f546f5e7c1165c0abe";
 
+/// npmmirror 按 GitHub Release 原样同步的 Bun 包，连不上 GitHub 时从这里下。
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const BUN_MIRROR: &str = "https://registry.npmmirror.com/-/binary/bun";
+
+/// 和 `BUN_DOWNLOAD` 同一个包。校验和写死在上面，从哪下都一样可信，所以镜像地址不进
+/// generation 身份：换着来源下，装的仍是同一个 generation。
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn bun_mirror_url() -> String {
+    format!("{BUN_MIRROR}/bun-v{BUN_VERSION}/{BUN_ZIP_DIR}.zip")
+}
+
 #[derive(Clone, Debug)]
 pub struct ManagedBunRuntime {
     pub path: PathBuf,
@@ -275,17 +286,31 @@ fn install_bun_generation(
     manager: &RuntimeManagerLock,
 ) -> Result<(), String> {
     let (url, expected_archive_sha) = BUN_DOWNLOAD;
+    let mirror = bun_mirror_url();
+    // 连不上 GitHub（中国大陆常见）就先走镜像，省得等 GitHub 那边一轮轮超时。
+    let sources = if crate::mirrors::reachable("github.com", 443) {
+        [url, mirror.as_str()]
+    } else {
+        [mirror.as_str(), url]
+    };
     let archive = staging.join("download.zip");
-    let mut download = bun_download_command(&archive, url);
-    manager.inherit_into(&mut download);
-    let output = download
-        .output()
-        .map_err(|error| format!("无法执行 curl：{error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "下载 Bun 失败：{}",
+    let mut failures = Vec::new();
+    for source in sources {
+        let mut download = bun_download_command(&archive, source);
+        manager.inherit_into(&mut download);
+        let output = download
+            .output()
+            .map_err(|error| format!("无法执行 curl：{error}"))?;
+        if output.status.success() {
+            break;
+        }
+        failures.push(format!(
+            "{source}：{}",
             String::from_utf8_lossy(&output.stderr).trim()
         ));
+    }
+    if failures.len() == sources.len() {
+        return Err(format!("下载 Bun 失败：{}", failures.join("；")));
     }
     let actual_archive_sha = sha256_file(&archive)?;
     if actual_archive_sha != expected_archive_sha {
@@ -560,5 +585,15 @@ mod tests {
                 .contains(&format!("/bun-v{BUN_VERSION}/"))
         );
         assert_eq!(manifest.archive_sha256.len(), 64);
+    }
+
+    /// 镜像下的必须是同一个包，不然写死的校验和对不上。
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn bun_mirror_serves_the_same_release_file() {
+        let (url, _) = BUN_DOWNLOAD;
+        let mirror = bun_mirror_url();
+        let tail = |url: &str| url.rsplitn(3, '/').take(2).collect::<Vec<_>>();
+        assert_eq!(tail(&mirror), tail(url), "版本目录和文件名都要一致");
     }
 }

@@ -8,6 +8,9 @@
 #   ./install.sh --no-pair        不打印配对串
 #   ./install.sh --relay=<地址>   远程访问只用这个自建 iroh relay（域名、IP 或 URL），配对串会
 #                                 带上它；不给就用 n0 的公共 relay（见 smeltd relay）
+#   ./install.sh --apt-mirror=<镜像>  装系统包时把 Debian / Ubuntu 官方源换成这个镜像（主机名
+#                                 或 URL）。不给时先试官方源，连不上（中国大陆常见）就自动换
+#                                 APT_MIRRORS 里头一个连得上的。只用于这次安装，不改 /etc/apt
 #
 # 装在谁名下：运行时不用 root 跑。以 root 执行时（容器里常见），装完系统包后建一个普通用户
 # （默认 smelt，SMELT_USER 可改），运行时和桌面都装在它名下；以普通用户执行时装在自己名下，
@@ -37,11 +40,12 @@ DESKTOP_UNITS=(smelt-display.service smelt-desktop.service smelt-chrome.service)
 WITH_DESKTOP=0
 PAIR=1
 RELAY=""
+APT_MIRROR=""
 # 内部用：root 那部分经 sudo 单独跑（system），装到用户名下那部分经 runuser 单独跑（user）。
 PHASE=all
 
 usage() {
-  echo "用法：$0 [--with-desktop] [--no-pair] [--relay=<地址>]" >&2
+  echo "用法：$0 [--with-desktop] [--no-pair] [--relay=<地址>] [--apt-mirror=<镜像>]" >&2
 }
 
 for arg in "$@"; do
@@ -49,6 +53,7 @@ for arg in "$@"; do
     --with-desktop) WITH_DESKTOP=1 ;;
     --no-pair) PAIR=0 ;;
     --relay=?*) RELAY="${arg#--relay=}" ;;
+    --apt-mirror=?*) APT_MIRROR="${arg#--apt-mirror=}" ;;
     --phase=system | --phase=user) PHASE="${arg#--phase=}" ;;
     *) usage; exit 2 ;;
   esac
@@ -58,14 +63,94 @@ FLAGS=()
 ((WITH_DESKTOP)) && FLAGS+=(--with-desktop)
 ((PAIR)) || FLAGS+=(--no-pair)
 [[ -z "$RELAY" ]] || FLAGS+=("--relay=$RELAY")
+[[ -z "$APT_MIRROR" ]] || FLAGS+=("--apt-mirror=$APT_MIRROR")
 
 say() { echo "==> $*"; }
 
-# 新开的机器上常有自动更新或初始化脚本正在跑 apt，占着 dpkg 的锁。等它放锁（最多 10 分钟），
-# 不要一见锁就失败。
-apt_get() { apt-get -o DPkg::Lock::Timeout=600 "$@"; }
 warn() { echo "install.sh：$*" >&2; }
 die() { warn "$*"; exit 1; }
+
+# 用了 --apt-mirror 时，每次 apt-get 都读换过地址的那份源配置（见 use_apt_mirror）。
+APT_SOURCES=()
+# 新开的机器上常有自动更新或初始化脚本正在跑 apt，占着 dpkg 的锁。等它放锁（最多 10 分钟），
+# 不要一见锁就失败。
+apt_get() {
+  local rc=0
+  apt-get -o DPkg::Lock::Timeout=600 "${APT_SOURCES[@]}" "$@" || rc=$?
+  ((rc)) && warn "apt-get 失败。是源连不上或太慢的话，用 --apt-mirror=<镜像> 指定一个重新执行"
+  return "$rc"
+}
+
+# 软件包索引每次安装刷新一次：机器上留着的索引可能是旧的，按它去取包会 404；换了镜像时
+# 更得按镜像重新取。用哪套源也在这时定：不装包就不用探测。
+APT_UPDATED=0
+apt_update() {
+  ((APT_UPDATED)) && return 0
+  choose_apt_sources
+  apt_get update -qq
+  APT_UPDATED=1
+}
+
+# 中国大陆的机器常连不上 Debian / Ubuntu 官方源。没给 --apt-mirror 又连不上时，按顺序换头一个
+# 连得上的镜像。
+APT_MIRRORS=(mirrors.aliyun.com mirrors.tuna.tsinghua.edu.cn mirrors.ustc.edu.cn)
+OFFICIAL_APT='https?://(deb\.debian\.org|security\.debian\.org|([a-z]+\.)?archive\.ubuntu\.com|security\.ubuntu\.com|ports\.ubuntu\.com)/'
+APT_SOURCE_FILES=(/etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources)
+
+# 只试 TCP 建连：连不上的机器在这一步就失败（不通或超时），用不着装了 curl 才能探测。
+reachable() { timeout 5 bash -c "exec 3<>/dev/tcp/$1/$2" 2>/dev/null; }
+
+official_sources_reachable() {
+  local url host
+  while read -r url; do
+    host="${url#*://}"
+    host="${host%/}"
+    if [[ "$url" == https:* ]]; then reachable "$host" 443; else reachable "$host" 80; fi \
+      || return 1
+  done < <(grep -Eoh "$OFFICIAL_APT" "${APT_SOURCE_FILES[@]}" 2>/dev/null | sort -u)
+}
+
+choose_apt_sources() {
+  if [[ -n "$APT_MIRROR" ]]; then
+    use_apt_mirror "$APT_MIRROR"
+    return 0
+  fi
+  official_sources_reachable && return 0
+  local mirror
+  for mirror in "${APT_MIRRORS[@]}"; do
+    if reachable "$mirror" 80; then
+      say "连不上 Debian / Ubuntu 官方源"
+      use_apt_mirror "$mirror"
+      return 0
+    fi
+  done
+  warn "官方源和镜像（${APT_MIRRORS[*]}）都连不上，照原来的源试"
+}
+
+# 只在这次安装里把发行版官方源换成镜像，不改 /etc/apt：源配置复制一份、改掉官方地址，
+# apt-get 经 -o 读这份。路径原样保留，镜像站都按官方源的目录摆（/debian、/debian-security、
+# /ubuntu、/ubuntu-ports）。只给主机名时用 http：新机器上可能还没装 ca-certificates。
+use_apt_mirror() {
+  local mirror=$1
+  [[ "$mirror" == *://* ]] || mirror="http://$mirror"
+  mirror="${mirror%/}"
+  # 不能是 local：EXIT 时 trap 里还要用它。
+  apt_dir="$(mktemp -d)"
+  trap 'rm -rf "$apt_dir"' EXIT
+  mkdir "$apt_dir/sources.list.d"
+  local file to replaced=0
+  for file in "${APT_SOURCE_FILES[@]}"; do
+    [[ -f "$file" ]] || continue
+    to="$apt_dir/sources.list.d/$(basename "$file")"
+    [[ "$file" == /etc/apt/sources.list ]] && to="$apt_dir/sources.list"
+    grep -Eq "$OFFICIAL_APT" "$file" && replaced=1
+    sed -E "s#$OFFICIAL_APT#$mirror/#g" "$file" >"$to"
+  done
+  ((replaced)) || die "apt 源里没有 Debian / Ubuntu 的官方地址，--apt-mirror 无从替换"
+  say "这次安装用镜像 $mirror 装系统包"
+  APT_SOURCES=(-o "Dir::Etc::SourceList=$apt_dir/sources.list"
+    -o "Dir::Etc::SourceParts=$apt_dir/sources.list.d")
+}
 
 # 同 sd_booted(3)。容器里一般不是：装了 systemctl 也连不上 systemd。
 has_systemd() { [[ -d /run/systemd/system ]]; }
@@ -100,6 +185,9 @@ install_browser() {
         download="$(mktemp -d)"
         curl -fsSL --retry 3 -o "$download/chrome.deb" \
           https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+        # mktemp -d 是 0700，apt 的下载用户 _apt 读不到，会退回 root 取包并报一句提示。
+        chmod -R a+rX "$download"
+        apt_update
         # 包里自带 Google 的 apt 源，以后跟着 apt upgrade 升级。
         apt_get install -y --no-install-recommends "$download/chrome.deb"
         rm -rf "$download"
@@ -112,6 +200,7 @@ install_browser() {
       fi
       if [[ -n "$(missing_packages chromium)" ]]; then
         say "安装 Chromium"
+        apt_update
         apt_get install -y --no-install-recommends chromium
       fi
       policy_dir=/etc/chromium/policies/managed
@@ -129,12 +218,12 @@ system_phase() {
     warn "不是 apt 系的发行版，系统包请自己装：${BASE_PACKAGES[*]}"
     return 0
   fi
+  export DEBIAN_FRONTEND=noninteractive
   local missing
   read -ra missing <<<"$(missing_packages $(wanted_packages) | tr '\n' ' ')"
   if ((${#missing[@]})); then
     say "安装系统包：${missing[*]}"
-    export DEBIAN_FRONTEND=noninteractive
-    apt_get update -qq
+    apt_update
     apt_get install -y --no-install-recommends "${missing[@]}"
   fi
   ((WITH_DESKTOP)) && install_browser

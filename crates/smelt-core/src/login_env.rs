@@ -216,10 +216,14 @@ pub fn login_environment() -> &'static HashMap<String, String> {
 ///
 /// 保留（而不是 `env_clear`）父进程环境：GUI 自身注入的那些变量（临时目录、
 /// 沙盒标识）子进程照样需要。同名的以 login shell 为准——用户在 rc 里写的才是
-/// 他真正在用的那套工具链。
+/// 他真正在用的那套工具链。npm 官方源连不上、用户又没配源时补上国内镜像，
+/// 见 `mirrors`。
 pub fn apply_login_environment(command: &mut Command) -> &mut Command {
     for (key, value) in login_environment() {
         command.env(key, value);
+    }
+    if let Some(registry) = crate::mirrors::npm_registry_fallback() {
+        command.env("NPM_CONFIG_REGISTRY", registry);
     }
     command.env("PATH", login_path())
 }

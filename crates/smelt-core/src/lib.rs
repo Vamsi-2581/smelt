@@ -44,6 +44,7 @@ pub mod login_env;
 #[cfg(unix)]
 pub mod managed_runtime;
 pub mod memory_settings;
+mod mirrors;
 pub mod new_session;
 pub mod runtime_generation;
 pub use smelt_model::osc;
