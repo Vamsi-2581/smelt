@@ -28,7 +28,7 @@ BASE_PACKAGES=(ca-certificates curl unzip)
 # （只占磁盘，不耗 CPU）；Adwaita 留着给鼠标指针，也是 Papirus 缺图标时的后备。
 DESKTOP_PACKAGES=(
   tigervnc-standalone-server xauth xfonts-base xfce4 xfce4-terminal adwaita-icon-theme
-  papirus-icon-theme dbus-x11 xdotool fonts-noto-cjk fonts-dejavu-core
+  papirus-icon-theme dbus xdotool fonts-noto-cjk fonts-dejavu-core
 )
 DESKTOP_UNITS=(smelt-display.service smelt-desktop.service smelt-chrome.service)
 
@@ -228,6 +228,37 @@ write_unit() {
   } >"$UNIT_DIR/$name"
 }
 
+# XFCE 的精简设置随包走，按内容记一份指纹：包里的设置没变就不动，人在远程桌面里改过的
+# 保留；变了（包括有指纹之前装的机器）就整份换掉，再重启会话让它读新的。
+apply_desktop_config() {
+  local dir=$1 config=$2
+  local stamp="$dir/config.sha256" xml_dir="$config/xfce4/xfconf/xfce-perchannel-xml" want
+  want="$(cat "$HERE"/desktop/xfce4/*.xml "$HERE/desktop/terminalrc" | sha256sum | cut -d' ' -f1)"
+  [[ "$(cat "$stamp" 2>/dev/null)" == "$want" ]] && return 0
+  mkdir -p "$xml_dir" "$config/xfce4/terminal"
+  install -m 0644 "$HERE"/desktop/xfce4/*.xml "$xml_dir/"
+  # xfce4-terminal 1.0 以前的版本不读 xfconf，读这份；和 xfce4-terminal.xml 内容相同。
+  install -m 0644 "$HERE/desktop/terminalrc" "$config/xfce4/terminal/terminalrc"
+  restart_desktop_session
+  echo "$want" >"$stamp"
+}
+
+# 换了设置的会话要整个重来。xfconfd 把设置缓存在内存里，正常退出会把旧值写回文件，所以
+# 会话里的进程一律 SIGKILL，不给写回的机会；看护（systemd 或 smelt-up）随即按新设置拉起。
+# 没在跑就什么都不做。
+restart_desktop_session() {
+  if has_systemd; then
+    systemctl --user is-active --quiet smelt-desktop.service || return 0
+    systemctl --user kill -s KILL smelt-desktop.service
+    systemctl --user restart smelt-desktop.service
+    return 0
+  fi
+  pkill -KILL -u "$(id -u)" -x '(xfce4-session|xfwm4|xfce4-panel|xfdesktop|xfsettingsd|xfconfd)' || true
+  # 换成 dbus-run-session 之前，会话的总线由 dbus-launch 起，会话死了它还留着。
+  pkill -KILL -u "$(id -u)" -x dbus-launch || true
+  pkill -KILL -u "$(id -u)" -f '^dbus-daemon .*--session' || true
+}
+
 install_desktop() {
   local dir="$SMELT_HOME/desktop" config="${XDG_CONFIG_HOME:-$HOME/.config}"
   mkdir -p "$dir/bin"
@@ -236,16 +267,6 @@ install_desktop() {
     put 0755 "$HERE/desktop/$script" "$dir/bin/$script"
   done
 
-  # XFCE 的精简设置只在第一次装时写：之后人在远程桌面里改过的，重装不覆盖。
-  local xml_dir="$config/xfce4/xfconf/xfce-perchannel-xml" xml
-  mkdir -p "$xml_dir"
-  for xml in "$HERE"/desktop/xfce4/*.xml; do
-    [[ -e "$xml_dir/$(basename "$xml")" ]] || install -m 0644 "$xml" "$xml_dir/"
-  done
-  # xfce4-terminal 1.0 以前的版本不读 xfconf，读这份；和 xfce4-terminal.xml 内容相同。
-  mkdir -p "$config/xfce4/terminal"
-  [[ -e "$config/xfce4/terminal/terminalrc" ]] \
-    || install -m 0644 "$HERE/desktop/terminalrc" "$config/xfce4/terminal/terminalrc"
   # 任务栏的两个启动图标（xfce4-panel.xml 里的 launcher-1、launcher-2）。Chrome 图标调同一个
   # 启动脚本，开的是 agent 用的那个实例，不会另起一个没有登录状态、agent 也连不上的 Chrome。
   local icon=chromium
@@ -265,6 +286,8 @@ Name=终端
 Exec=xfce4-terminal
 Icon=utilities-terminal
 EOF
+  # 启动图标写好之后再换设置：要重启会话的话，新会话一起来就看得到它们。
+  apply_desktop_config "$dir" "$config"
 
   if has_systemd; then
     UNIT_DIR="$config/systemd/user"

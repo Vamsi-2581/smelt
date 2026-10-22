@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 远程桌面的 XFCE 会话，跑在 display 起的那块虚拟屏幕上。精简过的设置（深色主题、底部
-# 停靠栏、最大化不画标题栏、关合成器……）在安装时写进 ~/.config/xfce4，见 install.sh。
+# 停靠栏、关合成器……）在安装时写进 ~/.config/xfce4，见 install.sh。
 set -euo pipefail
 
 source "$(dirname "$0")/common.sh"
@@ -9,4 +9,6 @@ source "$(dirname "$0")/common.sh"
 export SHELL=/bin/bash
 
 wait_for_display
-exec dbus-launch --exit-with-session xfce4-session
+# 会话自带一条 D-Bus，会话结束时连同在上面按需起来的 xfconfd 一起退出。dbus-launch 起的
+# 总线不跟会话走：会话被杀后旧的 xfconfd 还在，会把内存里的旧设置写回文件。
+exec dbus-run-session -- xfce4-session

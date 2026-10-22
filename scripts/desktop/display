@@ -27,6 +27,7 @@ fi
 cookie="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 xauth -q -f "$HOME/.Xauthority" add "$DISPLAY" MIT-MAGIC-COOKIE-1 "$cookie"
 
+# 1440x900 只是起始大小：桌面打开远程桌面页后按页面大小改（noVNC 的 resizeSession）。
 exec Xvnc "$DISPLAY" \
   -auth "$HOME/.Xauthority" \
   -geometry 1440x900 \
