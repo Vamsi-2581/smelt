@@ -13,8 +13,9 @@ use serde_json::Value;
 
 use crate::connector::Connector;
 use crate::protocol::control::{
-    CONTROL_API_VERSION, ControlCall, ControlClientError, EmptyParams, SystemDescribe,
-    SystemDescribeResult, decode_response_with_version, encode_request_with_version,
+    CONTROL_API_VERSION, ControlCall, ControlClientError, ControlError, ControlErrorCode,
+    EmptyParams, SystemDescribe, SystemDescribeResult, decode_response_with_version,
+    encode_request_with_version,
 };
 
 /// 短请求的默认读写时限。调用方都在后台线程，但运行时不回包时仍要及时放掉线程。
@@ -131,8 +132,25 @@ impl RuntimeClient {
     }
 
     /// 握手：运行时身份、版本、平台和支持的方法。
+    ///
+    /// 运行时不支持这个客户端的控制协议版本时，按它报的最高版本再问一次：
+    /// `system.describe` 是冻结契约，哪个版本的回复都解得了。这样版本对不上的运行时也
+    /// 读得出它是什么版本，兼容与否交给调用方判断（`smelt_client::compat`）。
     pub fn describe(&self) -> Result<SystemDescribeResult, ControlClientError> {
-        self.call::<SystemDescribe>(&EmptyParams::default(), DEFAULT_REQUEST_TIMEOUT)
+        let params = EmptyParams::default();
+        match self.call::<SystemDescribe>(&params, DEFAULT_REQUEST_TIMEOUT) {
+            Err(ControlClientError::Protocol(ControlError {
+                code: ControlErrorCode::UnsupportedVersion,
+                supported_versions: Some(range),
+                ..
+            })) if range.max_supported_version != CONTROL_API_VERSION => self
+                .call_with_version::<SystemDescribe>(
+                    range.max_supported_version,
+                    &params,
+                    DEFAULT_REQUEST_TIMEOUT,
+                ),
+            result => result,
+        }
     }
 }
 
@@ -263,6 +281,32 @@ mod tests {
 
         assert_eq!(result.daemon.runtime_id, None);
         assert_eq!(result.daemon.os, None);
+    }
+
+    /// 只认旧控制协议的运行时先拒绝，再按它报的版本问一次，读得出它的版本。
+    #[test]
+    fn describe_falls_back_to_the_runtime_control_version() {
+        let old = CONTROL_API_VERSION - 1;
+        let client = client_serving(move |request| {
+            let request_id = request["request_id"].as_str().unwrap();
+            let response = if request["control_version"] == old {
+                let mut result = describe_result(old);
+                result.daemon.version = "0.9.0-rc.3".to_string();
+                serde_json::to_value(ControlResponse::ok_with_version(old, request_id, result))
+            } else {
+                serde_json::to_value(ControlResponse::<SystemDescribeResult>::error_with_version(
+                    old,
+                    request_id,
+                    ControlError::unsupported_version(CONTROL_API_VERSION, old, old),
+                ))
+            };
+            response.unwrap()
+        });
+
+        let result = client.describe().unwrap();
+
+        assert_eq!(result.daemon.version, "0.9.0-rc.3");
+        assert_eq!(result.control.max_supported_version, old);
     }
 
     #[test]

@@ -94,6 +94,8 @@ pub(crate) enum RuntimeStatus {
     /// 连得上，但版本和这个桌面对不上（见 `smelt_client::compat`），说明里写着该升级
     /// 哪一边。这时不订阅它的事件：订阅了也解不出来，只会断开重连。
     Incompatible {
+        /// 运行时自己报的版本。
+        version: String,
         detail: String,
         /// 是运行时旧：可以请它升到这个桌面的版本（见 [`push_upgrade`]）。
         runtime_outdated: bool,
@@ -193,7 +195,15 @@ fn link_text(
     match status {
         RuntimeStatus::Connecting => Some(("连接中".to_string(), LinkTone::Muted)),
         RuntimeStatus::Offline(_) => Some(("离线".to_string(), LinkTone::Muted)),
-        RuntimeStatus::Incompatible { .. } => Some(("版本不兼容".to_string(), LinkTone::Warning)),
+        RuntimeStatus::Incompatible { version, .. } => {
+            let text = format!("版本不兼容 · {version}");
+            // 连得上，连接路径照样有：机器面板里也说走哪条路、多慢。
+            let text = match link {
+                Some(link) if !compact => format!("{text} · {}", link_summary(link)),
+                _ => text,
+            };
+            Some((text, LinkTone::Warning))
+        }
         RuntimeStatus::Upgrading(_) if compact => Some(("升级中".to_string(), LinkTone::Muted)),
         RuntimeStatus::Upgrading(progress) => Some((progress.clone(), LinkTone::Muted)),
         RuntimeStatus::Online { .. } => {
@@ -207,10 +217,9 @@ fn link_text(
             };
             match &link.kind {
                 LinkKind::Relay(_) if compact => Some((format!("中继 · {}ms", link.rtt_ms), tone)),
-                LinkKind::Relay(relay) => Some((format!("中继 {relay} · {}ms", link.rtt_ms), tone)),
                 _ if compact => None,
-                LinkKind::Direct => Some((format!("直连 · {}ms", link.rtt_ms), tone)),
                 LinkKind::Other => Some((format!("在线 · {}ms", link.rtt_ms), tone)),
+                _ => Some((link_summary(link), tone)),
             }
         }
     }
@@ -221,6 +230,15 @@ fn remote_of<'a>(key: &RuntimeKey, cx: &'a gpui::App) -> Option<&'a RemoteRuntim
         .remotes
         .iter()
         .find(|remote| remote.runtime.key() == key)
+}
+
+/// 走哪条路、多慢，机器面板里的写法。
+fn link_summary(link: &RuntimeLink) -> String {
+    match &link.kind {
+        LinkKind::Direct => format!("直连 · {}ms", link.rtt_ms),
+        LinkKind::Relay(relay) => format!("中继 {relay} · {}ms", link.rtt_ms),
+        LinkKind::Other => format!("{}ms", link.rtt_ms),
+    }
 }
 
 /// 侧栏标题上的连接状态，见 [`link_text`]。本机不写。
@@ -362,15 +380,13 @@ fn remote_client(
 pub(crate) fn status_of(client: &RuntimeClient) -> RuntimeStatus {
     match client.describe() {
         Ok(described) => described_status(described),
-        Err(error) => match smelt_client::compat::describe_error(&error) {
-            Some(incompatible) => incompatible_status(&incompatible),
-            None => RuntimeStatus::Offline(error.to_string()),
-        },
+        Err(error) => RuntimeStatus::Offline(error.to_string()),
     }
 }
 
 fn incompatible_status(incompatible: &smelt_client::compat::Incompatibility) -> RuntimeStatus {
     RuntimeStatus::Incompatible {
+        version: incompatible.runtime_version.clone(),
         detail: incompatible.to_string(),
         runtime_outdated: incompatible.outdated == smelt_client::compat::Outdated::Runtime,
     }
@@ -530,8 +546,8 @@ pub(crate) fn start_runtime_hub(cx: &mut gpui::App) {
     watch_runtime_links(cx);
 }
 
-/// 隔一会儿读一次各台机器的连接路径和延迟。只读已经连着的，不为此拨号；没变化就不动
-/// hub，免得看着它的侧栏跟着重画。
+/// 隔一会儿读一次各台机器的连接路径和延迟。只读已经连着的（在线的，和连得上但版本
+/// 不对的），不为此拨号；没变化就不动 hub，免得看着它的侧栏跟着重画。
 fn watch_runtime_links(cx: &mut gpui::App) {
     const INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
     cx.spawn(async move |cx| {
@@ -544,8 +560,12 @@ fn watch_runtime_links(cx: &mut gpui::App) {
                             .map(|remote| {
                                 (
                                     remote.connection.runtime_id.clone(),
-                                    matches!(remote.status, RuntimeStatus::Online { .. })
-                                        .then(|| remote.probe.clone()),
+                                    matches!(
+                                        remote.status,
+                                        RuntimeStatus::Online { .. }
+                                            | RuntimeStatus::Incompatible { .. }
+                                    )
+                                    .then(|| remote.probe.clone()),
                                 )
                             })
                             .collect::<Vec<_>>()
@@ -876,9 +896,35 @@ mod tests {
         );
     }
 
+    /// 版本不兼容也写出运行时的版本；连得上，机器面板里照样说走哪条路、多慢。
+    #[test]
+    fn incompatible_runtime_shows_its_version_and_link() {
+        let status = RuntimeStatus::Incompatible {
+            version: "0.9.0-rc.3".into(),
+            detail: "运行时 0.9.0-rc.3 较旧，需要升级运行时（控制协议 v1，桌面要 v2）".into(),
+            runtime_outdated: true,
+        };
+        let relay = link(LinkKind::Relay("n0 usw1-1".into()), 437);
+        assert_eq!(
+            link_text(&status, Some(&relay), true),
+            Some(("版本不兼容 · 0.9.0-rc.3".into(), LinkTone::Warning))
+        );
+        assert_eq!(
+            link_text(&status, Some(&relay), false),
+            Some((
+                "版本不兼容 · 0.9.0-rc.3 · 中继 n0 usw1-1 · 437ms".into(),
+                LinkTone::Warning
+            ))
+        );
+        assert_eq!(
+            link_text(&status, None, false),
+            Some(("版本不兼容 · 0.9.0-rc.3".into(), LinkTone::Warning))
+        );
+    }
+
     /// 每次连接都用 `respond` 回一条 `system.describe`，模拟另一个版本的运行时。
     fn runtime_answering(
-        respond: impl Fn(&str) -> serde_json::Value + Send + Sync + Clone + 'static,
+        respond: impl Fn(&serde_json::Value) -> serde_json::Value + Send + Sync + Clone + 'static,
     ) -> RuntimeClient {
         use std::io::{BufRead, Write};
         RuntimeClient::new(move || {
@@ -890,7 +936,7 @@ mod tests {
                     .read_line(&mut line)
                     .unwrap();
                 let request: serde_json::Value = serde_json::from_str(&line).unwrap();
-                let response = respond(request["request_id"].as_str().unwrap());
+                let response = respond(&request);
                 writeln!(&server, "{response}").unwrap();
             });
             Ok(client)
@@ -898,48 +944,56 @@ mod tests {
     }
 
     fn describe_without(method: &'static str) -> RuntimeClient {
+        use smelt_runtime_client::protocol::control::ControlResponse;
+        runtime_answering(move |request| {
+            let request_id = request["request_id"].as_str().unwrap();
+            serde_json::to_value(ControlResponse::ok(request_id, described_without(method)))
+                .unwrap()
+        })
+    }
+
+    /// 版本 0.0.1、和这个桌面同一套协议、只少了 `method` 的运行时会回的 describe。
+    fn described_without(
+        method: &str,
+    ) -> smelt_runtime_client::protocol::control::SystemDescribeResult {
         use smelt_runtime_client::protocol::control::{
             CONTROL_API_MIN_SUPPORTED_VERSION, CONTROL_API_VERSION, ControlMethod,
-            ControlProtocolDescription, ControlResponse, DaemonRuntimeInfo,
-            EventProtocolDescription, SystemDescribeResult,
+            ControlProtocolDescription, DaemonRuntimeInfo, EventProtocolDescription,
+            SystemDescribeResult,
         };
-        runtime_answering(move |request_id| {
-            let described = SystemDescribeResult {
-                control: ControlProtocolDescription {
-                    current_version: CONTROL_API_VERSION,
-                    min_supported_version: CONTROL_API_MIN_SUPPORTED_VERSION,
-                    max_supported_version: CONTROL_API_VERSION,
-                    methods: ControlMethod::ALL
-                        .iter()
-                        .map(ToString::to_string)
-                        .filter(|name| name != method)
-                        .collect(),
-                },
-                daemon: DaemonRuntimeInfo {
-                    version: "0.0.1".to_string(),
-                    exe_mtime: 0,
-                    exe: None,
-                    pid: 1,
-                    started_at: 0,
-                    session_count: 0,
-                    agent_event_version: 1,
-                    runtime_id: Some("runtime-a".to_string()),
-                    os: Some("linux".to_string()),
-                    arch: Some("x86_64".to_string()),
-                    hostname: None,
-                    desktop: None,
-                },
-                events: Some(EventProtocolDescription {
-                    protocol_version: smelt_event_protocol::EVENT_BUS_PROTOCOL_VERSION,
-                    projection_version: smelt_event_protocol::CORE_PROJECTION_VERSION,
-                    session_projection_version:
-                        smelt_event_protocol::CORE_SESSION_PROJECTION_VERSION,
-                    session_state_schema_version:
-                        smelt_event_protocol::CORE_SESSION_STATE_SCHEMA_VERSION,
-                }),
-            };
-            serde_json::to_value(ControlResponse::ok(request_id, described)).unwrap()
-        })
+        SystemDescribeResult {
+            control: ControlProtocolDescription {
+                current_version: CONTROL_API_VERSION,
+                min_supported_version: CONTROL_API_MIN_SUPPORTED_VERSION,
+                max_supported_version: CONTROL_API_VERSION,
+                methods: ControlMethod::ALL
+                    .iter()
+                    .map(ToString::to_string)
+                    .filter(|name| name != method)
+                    .collect(),
+            },
+            daemon: DaemonRuntimeInfo {
+                version: "0.0.1".to_string(),
+                exe_mtime: 0,
+                exe: None,
+                pid: 1,
+                started_at: 0,
+                session_count: 0,
+                agent_event_version: 1,
+                runtime_id: Some("runtime-a".to_string()),
+                os: Some("linux".to_string()),
+                arch: Some("x86_64".to_string()),
+                hostname: None,
+                desktop: None,
+            },
+            events: Some(EventProtocolDescription {
+                protocol_version: smelt_event_protocol::EVENT_BUS_PROTOCOL_VERSION,
+                projection_version: smelt_event_protocol::CORE_PROJECTION_VERSION,
+                session_projection_version: smelt_event_protocol::CORE_SESSION_PROJECTION_VERSION,
+                session_state_schema_version:
+                    smelt_event_protocol::CORE_SESSION_STATE_SCHEMA_VERSION,
+            }),
+        }
     }
 
     #[test]
@@ -955,6 +1009,7 @@ mod tests {
     #[test]
     fn older_runtime_is_incompatible() {
         let RuntimeStatus::Incompatible {
+            version,
             detail,
             runtime_outdated,
         } = status_of(&describe_without("workspace.load"))
@@ -962,29 +1017,42 @@ mod tests {
             panic!("缺方法的运行时应判为不兼容");
         };
         assert!(runtime_outdated, "运行时旧，可以请它升级");
+        assert_eq!(version, "0.0.1");
+        assert!(detail.contains("0.0.1"), "{detail}");
         assert!(detail.contains("需要升级运行时"), "{detail}");
         assert!(detail.contains("workspace.load"), "{detail}");
     }
 
-    /// 运行时的控制协议比桌面新，连 describe 都被拒：仍要认出是版本问题，提示升级桌面。
+    /// 运行时的控制协议比桌面新，拒绝桌面的版本：按它的版本再问一次，读出它是什么版本，
+    /// 提示升级桌面。
     #[test]
     fn runtime_rejecting_our_control_version_is_incompatible() {
         use smelt_runtime_client::protocol::control::{
             CONTROL_API_VERSION, ControlError, ControlResponse,
         };
-        let client = runtime_answering(|request_id| {
-            serde_json::to_value(ControlResponse::<()>::error_with_version(
-                CONTROL_API_VERSION + 1,
-                request_id,
-                ControlError::unsupported_version(
-                    CONTROL_API_VERSION,
-                    CONTROL_API_VERSION + 1,
-                    CONTROL_API_VERSION + 1,
-                ),
-            ))
-            .unwrap()
+        let newer = CONTROL_API_VERSION + 1;
+        let client = runtime_answering(move |request| {
+            let request_id = request["request_id"].as_str().unwrap();
+            if request["control_version"] == newer {
+                let mut described = described_without("no.such.method");
+                described.control.min_supported_version = newer;
+                described.control.max_supported_version = newer;
+                described.daemon.version = "9.9.9".to_string();
+                serde_json::to_value(ControlResponse::ok_with_version(
+                    newer, request_id, described,
+                ))
+                .unwrap()
+            } else {
+                serde_json::to_value(ControlResponse::<()>::error_with_version(
+                    newer,
+                    request_id,
+                    ControlError::unsupported_version(CONTROL_API_VERSION, newer, newer),
+                ))
+                .unwrap()
+            }
         });
         let RuntimeStatus::Incompatible {
+            version,
             detail,
             runtime_outdated,
         } = status_of(&client)
@@ -992,6 +1060,7 @@ mod tests {
             panic!("控制协议对不上应判为不兼容");
         };
         assert!(!runtime_outdated, "运行时比桌面新，只升不降，不能请它升级");
+        assert_eq!(version, "9.9.9");
         assert!(detail.contains("需要升级桌面"), "{detail}");
     }
 

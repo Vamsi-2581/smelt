@@ -80,13 +80,16 @@ pub(crate) fn spawn_subscription(
                     (!runtime.is_local()).then(|| crate::runtimes::status_of(runtime.client()));
                 if !upgrade_requested
                     && let Some(RuntimeStatus::Incompatible {
+                        version,
                         detail,
                         runtime_outdated: true,
                     }) = &status
                 {
                     upgrade_requested = true;
-                    let detail = detail.clone();
-                    status = Some(upgrade_then_probe(&runtime, &detail, &status_tx, &stop));
+                    let (version, detail) = (version.clone(), detail.clone());
+                    status = Some(upgrade_then_probe(
+                        &runtime, &version, &detail, &status_tx, &stop,
+                    ));
                 }
                 let connected_at = Instant::now();
                 if let Some(status) = &status {
@@ -129,6 +132,7 @@ pub(crate) fn spawn_subscription(
 /// 不兼容说明后面写上为什么、该怎么办。
 fn upgrade_then_probe(
     runtime: &Runtime,
+    version: &str,
     detail: &str,
     status_tx: &smol::channel::Sender<(RuntimeKey, RuntimeStatus)>,
     stop: &AtomicBool,
@@ -140,6 +144,7 @@ fn upgrade_then_probe(
         let _ = status_tx.try_send((key.clone(), RuntimeStatus::Upgrading(progress)));
     };
     let still_incompatible = |note: String| RuntimeStatus::Incompatible {
+        version: version.to_string(),
         detail: format!("{detail}。{note}"),
         runtime_outdated: true,
     };
@@ -186,9 +191,11 @@ fn upgrade_then_probe(
         if !pending || stop.load(Ordering::Acquire) {
             return match status {
                 RuntimeStatus::Incompatible {
+                    version,
                     detail,
                     runtime_outdated,
                 } => RuntimeStatus::Incompatible {
+                    version,
                     detail: format!(
                         "{detail}。请它升到 v{DESKTOP_VERSION} 后仍对不上，详见那台机器的 ~/.smelt/daemon.log"
                     ),

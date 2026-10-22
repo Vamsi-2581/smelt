@@ -1,7 +1,7 @@
 //! 桌面和运行时的版本协商（设计文档 D7）。连上运行时先读 `system.describe`，对照这个
 //! 桌面要用的控制方法和事件投影版本，对不上就是不兼容，并说清该升级哪一边。不对的话，
 //! 运行时较新时订阅解不出投影，断开重连没有尽头，会话状态永远到不了；较旧时各处零散地
-//! 报 MethodNotFound。
+//! 报 MethodNotFound。说明里带着运行时的版本，看得出它是哪个版本。
 
 use std::fmt;
 
@@ -10,7 +10,7 @@ use smelt_event_protocol::{
     EVENT_BUS_PROTOCOL_VERSION,
 };
 use smelt_runtime_client::protocol::control::{
-    CONTROL_API_VERSION, ControlClientError, ControlErrorCode, ControlMethod, SystemDescribeResult,
+    CONTROL_API_VERSION, ControlMethod, SystemDescribeResult,
 };
 
 /// 该升级的一边。
@@ -23,14 +23,24 @@ pub enum Outdated {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Incompatibility {
     pub outdated: Outdated,
+    /// 运行时自己报的版本（`system.describe` 的 `daemon.version`）。
+    pub runtime_version: String,
     pub reason: String,
 }
 
 impl fmt::Display for Incompatibility {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.outdated {
-            Outdated::Runtime => write!(f, "运行时版本较旧，需要升级运行时（{}）", self.reason),
-            Outdated::Desktop => write!(f, "运行时版本较新，需要升级桌面（{}）", self.reason),
+            Outdated::Runtime => write!(
+                f,
+                "运行时 {} 较旧，需要升级运行时（{}）",
+                self.runtime_version, self.reason
+            ),
+            Outdated::Desktop => write!(
+                f,
+                "运行时 {} 较新，需要升级桌面（{}）",
+                self.runtime_version, self.reason
+            ),
         }
     }
 }
@@ -41,6 +51,14 @@ impl fmt::Display for Incompatibility {
 /// 不改，缺了就是运行时旧）。事件：总线协议和核心投影要相同，会话投影和会话状态事件
 /// 不能比桌面新（新字段都可缺省，桌面解得了更旧的）。
 pub fn check(described: &SystemDescribeResult) -> Result<(), Incompatibility> {
+    check_versions(described).map_err(|(outdated, reason)| Incompatibility {
+        outdated,
+        runtime_version: described.daemon.version.clone(),
+        reason,
+    })
+}
+
+fn check_versions(described: &SystemDescribeResult) -> Result<(), (Outdated, String)> {
     let control = &described.control;
     if CONTROL_API_VERSION < control.min_supported_version {
         return Err(desktop(format!(
@@ -88,45 +106,15 @@ pub fn check(described: &SystemDescribeResult) -> Result<(), Incompatibility> {
     Ok(())
 }
 
-/// `system.describe` 本身被拒：控制协议版本区间不含桌面的版本。别的错误不是版本问题。
-pub fn describe_error(error: &ControlClientError) -> Option<Incompatibility> {
-    let ControlClientError::Protocol(error) = error else {
-        return None;
-    };
-    if error.code != ControlErrorCode::UnsupportedVersion {
-        return None;
-    }
-    let range = error.supported_versions.as_ref()?;
-    if CONTROL_API_VERSION < range.min_supported_version {
-        Some(desktop(format!(
-            "控制协议 v{CONTROL_API_VERSION}，运行时至少要 v{}",
-            range.min_supported_version
-        )))
-    } else if CONTROL_API_VERSION > range.max_supported_version {
-        Some(runtime(format!(
-            "控制协议 v{}，桌面要 v{CONTROL_API_VERSION}",
-            range.max_supported_version
-        )))
-    } else {
-        None
-    }
+fn runtime(reason: String) -> (Outdated, String) {
+    (Outdated::Runtime, reason)
 }
 
-fn runtime(reason: String) -> Incompatibility {
-    Incompatibility {
-        outdated: Outdated::Runtime,
-        reason,
-    }
+fn desktop(reason: String) -> (Outdated, String) {
+    (Outdated::Desktop, reason)
 }
 
-fn desktop(reason: String) -> Incompatibility {
-    Incompatibility {
-        outdated: Outdated::Desktop,
-        reason,
-    }
-}
-
-fn same(label: &str, runtime_version: u16, desktop_version: u16) -> Result<(), Incompatibility> {
+fn same(label: &str, runtime_version: u16, desktop_version: u16) -> Result<(), (Outdated, String)> {
     if runtime_version < desktop_version {
         return Err(runtime(format!(
             "{label} v{runtime_version}，桌面要 v{desktop_version}"
@@ -139,7 +127,7 @@ fn not_newer(
     label: &str,
     runtime_version: u16,
     desktop_version: u16,
-) -> Result<(), Incompatibility> {
+) -> Result<(), (Outdated, String)> {
     if runtime_version > desktop_version {
         return Err(desktop(format!(
             "{label} v{runtime_version}，桌面只认到 v{desktop_version}"
@@ -161,8 +149,8 @@ fn missing_methods(missing: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use smelt_runtime_client::protocol::control::{
-        CONTROL_API_MIN_SUPPORTED_VERSION, ControlError, ControlProtocolDescription,
-        DaemonRuntimeInfo, EventProtocolDescription,
+        CONTROL_API_MIN_SUPPORTED_VERSION, ControlProtocolDescription, DaemonRuntimeInfo,
+        EventProtocolDescription,
     };
 
     use super::*;
@@ -289,38 +277,12 @@ mod tests {
     }
 
     #[test]
-    fn rejected_describe_reports_which_side_to_upgrade() {
-        let newer = ControlClientError::Protocol(ControlError::unsupported_version(
-            CONTROL_API_VERSION,
-            CONTROL_API_VERSION + 1,
-            CONTROL_API_VERSION + 2,
-        ));
-        assert_eq!(
-            describe_error(&newer).map(|error| error.outdated),
-            Some(Outdated::Desktop)
-        );
-
-        let older = ControlClientError::Protocol(ControlError::unsupported_version(
-            CONTROL_API_VERSION,
-            0,
-            CONTROL_API_VERSION - 1,
-        ));
-        assert_eq!(
-            describe_error(&older).map(|error| error.outdated),
-            Some(Outdated::Runtime)
-        );
-
-        let offline = ControlClientError::Transport("connection refused".to_string());
-        assert_eq!(describe_error(&offline), None);
-    }
-
-    #[test]
     fn message_names_the_side_to_upgrade_in_chinese() {
         let mut described = current();
         described.events = None;
         assert_eq!(
             check(&described).unwrap_err().to_string(),
-            "运行时版本较旧，需要升级运行时（没有声明事件协议版本）"
+            "运行时 test 较旧，需要升级运行时（没有声明事件协议版本）"
         );
     }
 }
