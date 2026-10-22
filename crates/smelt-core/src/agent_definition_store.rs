@@ -189,16 +189,22 @@ pub fn prepare_launch(params: LaunchPrepareParams) -> LaunchPrepareResult {
     };
     let skills =
         crate::pi_plugin_catalog::loaded_skills_for_launch(&launch, cwd.as_deref().map(Path::new));
-    LaunchPrepareResult { launch, skills }
+    let mcp_servers = crate::pi_mcp::loaded_mcp_servers_for_launch(&launch);
+    LaunchPrepareResult {
+        launch,
+        skills,
+        mcp_servers,
+    }
 }
 
-/// `session.loaded_skills`：一场 Pi 会话按启动规格和工作目录会加载哪些技能。
+/// `session.loaded_skills`：一场 Pi 会话按启动规格和工作目录会加载哪些技能、连哪些 MCP。
 pub fn loaded_skills(params: LoadedSkillsParams) -> LoadedSkillsResult {
     LoadedSkillsResult {
         skills: crate::pi_plugin_catalog::loaded_skills_for_launch(
             &params.launch,
             params.cwd.as_deref().map(Path::new),
         ),
+        mcp_servers: crate::pi_mcp::loaded_mcp_servers_for_launch(&params.launch),
     }
 }
 

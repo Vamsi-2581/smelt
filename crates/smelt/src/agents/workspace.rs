@@ -75,7 +75,7 @@ impl Workspace {
     }
 
     /// 直接打开能力库的某个页签，比如智能体编辑器里「插件 · 管理」。
-    pub(super) fn open_capabilities(
+    pub(crate) fn open_capabilities(
         &mut self,
         tab: CapabilitiesTab,
         window: &mut Window,
@@ -125,7 +125,7 @@ impl Workspace {
         self.open_agent_definition(selected, window, cx);
     }
 
-    pub(super) fn open_agent_definition(
+    pub(crate) fn open_agent_definition(
         &mut self,
         id: String,
         window: &mut Window,

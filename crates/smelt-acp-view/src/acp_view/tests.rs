@@ -20,7 +20,7 @@ use super::{
     external_clipboard_image_paths, filter_trajectory_events, format_attached_paths,
     is_active_permission_selection, is_fresh_conversation_start, is_match_count_line,
     is_new_conversation_command, is_stale_blank_history_id, latest_user_message_index,
-    loaded_entries_end, loaded_skills_refresh,
+    loaded_capabilities_summary, loaded_entries_end, loaded_skills_refresh,
     merge_rejected_prompt, merge_snapshot_entries, model_label_with_provider,
     native_queue_item_kind_label, next_prompt_dispatch_pending, notice_to_show,
     overlay_model_state, overlay_pending_initial_config, overlay_session_configs,
@@ -65,6 +65,15 @@ fn cleanshot_external_png_is_treated_as_an_image_attachment() {
     assert_eq!(external_clipboard_image_paths(&entries), vec![path]);
 }
 
+/// 输入栏能力按钮的提示：只说有的那一类，都没有时明说。
+#[test]
+fn loaded_capabilities_summary_names_only_what_is_loaded() {
+    assert_eq!(loaded_capabilities_summary(0, 0), "没有加载技能或 MCP");
+    assert_eq!(loaded_capabilities_summary(2, 0), "已加载 2 个技能");
+    assert_eq!(loaded_capabilities_summary(0, 1), "已加载 1 个 MCP");
+    assert_eq!(loaded_capabilities_summary(2, 1), "已加载 2 个技能、1 个 MCP");
+}
+
 #[test]
 fn loaded_skills_are_not_rescanned_until_launch_or_cwd_changes() {
     let launch = ConversationLaunchSpec::from_command("pi");
@@ -73,6 +82,7 @@ fn loaded_skills_are_not_rescanned_until_launch_or_cwd_changes() {
         launch: launch.clone(),
         cwd: cwd.clone(),
         skills: Vec::new(),
+        mcp_servers: Vec::new(),
     };
 
     assert_eq!(

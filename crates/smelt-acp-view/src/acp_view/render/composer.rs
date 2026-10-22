@@ -1,6 +1,7 @@
 //! ACP 输入栏：补全、模型选择、发送。
 
 use super::*;
+use gpui_component::popover::PopoverState;
 use smelt_client::daemon_state::DaemonPhase;
 
 /// 排队条目用正文当身份。相同正文按出现次序分开，删掉前面一条时后面的格子跟着正文走。
@@ -21,6 +22,171 @@ fn queue_row_id<'a>(
         format!("{text}\u{0}{n}")
     };
     gpui::ElementId::from((gpui::ElementId::from(kind), key))
+}
+
+const CAPABILITIES_PANEL_WIDTH: f32 = 320.;
+
+/// 能力弹层：这场对话加载的技能和连的 MCP，按类型分组，底部去改勾选。勾选跟着智能体
+/// 定义、启动时就定了，对话里改不了，所以行都只读。
+fn capabilities_panel(
+    skills: &[smelt_model::pi_plugin_catalog::PiPlugin],
+    mcp_servers: &[smelt_model::pi_mcp::PiMcpServer],
+    by_agent: bool,
+    view: gpui::WeakEntity<AcpView>,
+    popover: gpui::WeakEntity<PopoverState>,
+) -> gpui::Div {
+    let mut panel = v_flex().p_2();
+    if skills.is_empty() && mcp_servers.is_empty() {
+        panel = panel.child(
+            div()
+                .px_1()
+                .py_3()
+                .text_sm()
+                .text_color(gpui::rgb(ui_theme::text_muted()))
+                .child("这场对话没有加载技能或 MCP"),
+        );
+    } else {
+        let skill_rows = skills.iter().map(|skill| {
+            capability_row(
+                skill.name.clone(),
+                // 描述可能是多行的 frontmatter，压成一行再截断。
+                skill
+                    .description
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                Some(skill.origin.clone()),
+            )
+        });
+        let mcp_rows = mcp_servers
+            .iter()
+            .map(|server| capability_row(server.name.clone(), mcp_server_detail(server), None));
+        panel = panel.child(
+            v_flex()
+                .id("acp-capabilities-list")
+                .max_h(px(360.))
+                .overflow_y_scroll()
+                .child(capability_group_header("技能", skills.len()))
+                .children(skill_rows)
+                .when(skills.is_empty(), |list| list.child(capability_none()))
+                .child(capability_separator())
+                .child(capability_group_header("MCP", mcp_servers.len()))
+                .children(mcp_rows)
+                .when(mcp_servers.is_empty(), |list| list.child(capability_none())),
+        );
+    }
+    let (source, action) = if by_agent {
+        ("按智能体的勾选加载", "在智能体里修改")
+    } else {
+        ("按 Pi 的自动发现加载", "在能力库里管理")
+    };
+    panel.child(capability_separator()).child(
+        h_flex()
+            .px_1()
+            .gap_2()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(gpui::rgb(ui_theme::text_faint()))
+                    .child(source),
+            )
+            .child(
+                Button::new("acp-capabilities-manage")
+                    .quiet()
+                    .compact()
+                    .label(action)
+                    .on_click(move |_, window, cx| {
+                        let _ = popover.update(cx, |state, cx| state.dismiss(window, cx));
+                        let _ = view.update(cx, |_, cx| {
+                            cx.emit(AcpViewEvent::ManageCapabilities { by_agent })
+                        });
+                    }),
+            ),
+    )
+}
+
+fn capability_group_header(title: &'static str, count: usize) -> impl IntoElement {
+    h_flex()
+        .px_1()
+        .pt_1()
+        .pb_0p5()
+        .justify_between()
+        .text_xs()
+        .text_color(gpui::rgb(ui_theme::text_faint()))
+        .child(title)
+        .child(count.to_string())
+}
+
+/// 一行：名字和来源在上，说明在下，都截成一行。
+fn capability_row(name: String, detail: String, tag: Option<String>) -> impl IntoElement {
+    v_flex()
+        .px_1()
+        .py_1()
+        .child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_sm()
+                        .text_color(gpui::rgb(ui_theme::text_mid()))
+                        .child(name),
+                )
+                .children(tag.map(|tag| {
+                    div()
+                        .flex_none()
+                        .max_w(px(140.))
+                        .truncate()
+                        .text_xs()
+                        .text_color(gpui::rgb(ui_theme::text_faint()))
+                        .child(tag)
+                })),
+        )
+        .when(!detail.is_empty(), |row| {
+            row.child(
+                div()
+                    .truncate()
+                    .text_xs()
+                    .text_color(gpui::rgb(ui_theme::text_muted()))
+                    .child(detail),
+            )
+        })
+}
+
+fn capability_none() -> impl IntoElement {
+    div()
+        .px_1()
+        .pb_1()
+        .text_xs()
+        .text_color(gpui::rgb(ui_theme::text_muted()))
+        .child("没有")
+}
+
+fn capability_separator() -> impl IntoElement {
+    div().h(px(1.)).my_1().bg(ui_theme::hairline())
+}
+
+/// MCP 行的第二行：有说明用说明，没有就给连接方式（运行时已经打过码）。
+fn mcp_server_detail(server: &smelt_model::pi_mcp::PiMcpServer) -> String {
+    if let Some(description) = &server.description {
+        return description.clone();
+    }
+    match &server.transport {
+        smelt_model::pi_mcp::PiMcpTransport::Http { url } => url.clone(),
+        smelt_model::pi_mcp::PiMcpTransport::Stdio { command, args } => std::iter::once(command)
+            .chain(args)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(" "),
+        smelt_model::pi_mcp::PiMcpTransport::Unknown => String::new(),
+    }
 }
 
 impl AcpView {
@@ -403,44 +569,31 @@ impl AcpView {
                     .child(model_label)
                     .into_any_element()
             };
-            let skills_control = (self.agent == ConversationAgentKind::Pi).then(|| {
-                // 缓存在 `ensure_loaded_skills`；这里再调 `loaded_skills_for_launch` 会把扫盘盘回每帧。
+            let capabilities_control = (self.agent == ConversationAgentKind::Pi).then(|| {
+                // 缓存在 `ensure_loaded_skills`；这里再向运行时要，会把扫盘拉回每帧。
                 let skills = self.loaded_skills().to_vec();
-                let count = skills.len();
-                Button::new("acp-skills-pill")
+                let mcp_servers = self.loaded_mcp_servers().to_vec();
+                // 产品智能体按勾选加载，裸 Pi 按 Pi 自己的全局目录和 mcp.json。
+                let by_agent = self
+                    .launch
+                    .env
+                    .contains_key(smelt_model::agent_kind::SMELT_AGENT_PLUGIN_ARGS_ENV);
+                let view = cx.entity().downgrade();
+                // 图标作为子元素放进去，保持 16px；理由同旁边的「会话追踪」。
+                let trigger = Button::new("acp-capabilities")
                     .quiet()
-                    .compact()
-                    .capsule()
-                    .dropdown_caret(true)
-                    .label(format!("技能 {count}"))
-                    .dropdown_menu_with_anchor(
-                        gpui::Anchor::BottomLeft,
-                        move |mut menu, _window, _cx| {
-                            if skills.is_empty() {
-                                return menu.item(PopupMenuItem::label("这场对话没有加载技能"));
-                            }
-                            menu = menu.item(PopupMenuItem::label("已加载的技能"));
-                            for skill in &skills {
-                                let label = if skill.description.is_empty() {
-                                    skill.name.clone()
-                                } else {
-                                    let desc = skill
-                                        .description
-                                        .split_whitespace()
-                                        .collect::<Vec<_>>()
-                                        .join(" ");
-                                    let desc = if desc.chars().count() > 36 {
-                                        format!("{}…", desc.chars().take(36).collect::<String>())
-                                    } else {
-                                        desc
-                                    };
-                                    format!("{} · {desc}", skill.name)
-                                };
-                                menu = menu.item(PopupMenuItem::new(label).disabled(true));
-                            }
-                            menu
-                        },
-                    )
+                    .icon_size()
+                    .text_color(gpui::rgb(ui_theme::text_muted()))
+                    .child(Icon::new(gpui_kit_assets::IconName::Puzzle).size(px(16.)))
+                    .icon_action(loaded_capabilities_summary(skills.len(), mcp_servers.len()));
+                Popover::new("acp-capabilities-pop")
+                    .anchor(Anchor::BottomLeft)
+                    .w(px(CAPABILITIES_PANEL_WIDTH))
+                    .trigger(trigger)
+                    .content(move |_, _, cx| {
+                        let popover = cx.entity().downgrade();
+                        capabilities_panel(&skills, &mcp_servers, by_agent, view.clone(), popover)
+                    })
                     .into_any_element()
             });
             let composer_border = mix_rgba(
@@ -821,7 +974,6 @@ impl AcpView {
                                 .gap_2()
                                 .items_center()
                                 .child(model_control)
-                                .children(skills_control)
                                 .children(next_turn_notice.as_ref().map(|label| {
                                     div()
                                         .flex_shrink_0()
@@ -829,6 +981,7 @@ impl AcpView {
                                         .text_color(gpui::rgb(ui_theme::yellow()))
                                         .child(label.clone())
                                 }))
+                                .children(capabilities_control)
                                 .child(
                                     // 图标作为子元素放进去，保持 16px；`icon()` 会按按钮尺寸缩到 13.5px。
                                     Button::new("acp-trajectory")

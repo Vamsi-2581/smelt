@@ -1201,6 +1201,9 @@ pub enum AcpViewEvent {
     ReturnedToLatest,
     /// 用户点了另一个 Pi 对话的标题（互发消息的事件行）。上层切过去。
     OpenConversation { sid: String },
+    /// 用户在输入栏的能力弹层里点了修改。`by_agent`：这场对话按产品智能体的勾选加载，
+    /// 去它的编辑器；否则是裸 Pi，去能力库。
+    ManageCapabilities { by_agent: bool },
 }
 
 /// 上一轮没正常结束后能做的事。
@@ -2556,8 +2559,8 @@ impl AcpView {
         }
     }
 
-    /// 技能发现只跟启动规格和工作目录走，由运行时扫（插件目录在运行时那台机器上）。
-    /// 绘制路径只读 `loaded_skills()`；扫描回来之前按没有技能显示。
+    /// 技能和 MCP 只跟启动规格和工作目录走，由运行时算（插件目录和 `mcp.json` 在运行时那台
+    /// 机器上）。绘制路径只读 `loaded_skills()` / `loaded_mcp_servers()`；回来之前按没有显示。
     fn ensure_loaded_skills(&mut self, cx: &mut Context<Self>) {
         match loaded_skills_refresh(
             self.agent,
@@ -2573,6 +2576,7 @@ impl AcpView {
                     launch: self.launch.clone(),
                     cwd: self.cwd.clone(),
                     skills: Vec::new(),
+                    mcp_servers: Vec::new(),
                 });
                 let params = smelt_model::agent_definition_store::LoadedSkillsParams {
                     launch: self.launch.clone(),
@@ -2588,10 +2592,10 @@ impl AcpView {
                                     &params,
                                     RUNTIME_PREPARE_TIMEOUT,
                                 )
-                                .map(|result| (params, result.skills))
+                                .map(|result| (params, result))
                         })
                         .await;
-                    let Ok((params, skills)) = scanned else {
+                    let Ok((params, loaded)) = scanned else {
                         return;
                     };
                     let _ = this.update(cx, |this, cx| {
@@ -2599,7 +2603,8 @@ impl AcpView {
                             && cached.launch == params.launch
                             && cached.cwd == params.cwd
                         {
-                            cached.skills = skills;
+                            cached.skills = loaded.skills;
+                            cached.mcp_servers = loaded.mcp_servers;
                             cx.notify();
                         }
                     });
@@ -2659,6 +2664,7 @@ impl AcpView {
                             launch: prepared.launch.clone(),
                             cwd: this.cwd.clone(),
                             skills: prepared.skills,
+                            mcp_servers: prepared.mcp_servers,
                         });
                         client.launch = prepared.launch;
                         let handle = spawn_acp_client(this.runtime.client().clone(), client);
@@ -2711,6 +2717,13 @@ impl AcpView {
         self.loaded_skills
             .as_ref()
             .map(|cached| cached.skills.as_slice())
+            .unwrap_or(&[])
+    }
+
+    fn loaded_mcp_servers(&self) -> &[smelt_model::pi_mcp::PiMcpServer] {
+        self.loaded_skills
+            .as_ref()
+            .map(|cached| cached.mcp_servers.as_slice())
             .unwrap_or(&[])
     }
 
@@ -6622,6 +6635,17 @@ struct LoadedSkillsSnapshot {
     launch: ConversationLaunchSpec,
     cwd: Option<String>,
     skills: Vec<smelt_model::pi_plugin_catalog::PiPlugin>,
+    mcp_servers: Vec<smelt_model::pi_mcp::PiMcpServer>,
+}
+
+/// 输入栏能力按钮的提示、读屏名，以及空对话里那行说明。
+fn loaded_capabilities_summary(skills: usize, mcp_servers: usize) -> String {
+    match (skills, mcp_servers) {
+        (0, 0) => "没有加载技能或 MCP".to_string(),
+        (skills, 0) => format!("已加载 {skills} 个技能"),
+        (0, mcp_servers) => format!("已加载 {mcp_servers} 个 MCP"),
+        (skills, mcp_servers) => format!("已加载 {skills} 个技能、{mcp_servers} 个 MCP"),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

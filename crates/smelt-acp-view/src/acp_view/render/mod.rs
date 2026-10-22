@@ -427,12 +427,10 @@ impl AcpView {
                                 .child(label)
                         }))
                         .children((self.agent == ConversationAgentKind::Pi).then(|| {
-                            let count = self.loaded_skills().len();
-                            div().text_xs().text_color(muted).child(if count == 0 {
-                                "未加载技能".to_string()
-                            } else {
-                                format!("已加载 {count} 个技能")
-                            })
+                            div().text_xs().text_color(muted).child(loaded_capabilities_summary(
+                                self.loaded_skills().len(),
+                                self.loaded_mcp_servers().len(),
+                            ))
                         }))
                         .child(prompt_chips),
                 )

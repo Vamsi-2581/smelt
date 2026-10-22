@@ -1036,6 +1036,30 @@ impl Workspace {
                         this.mark_visible_session_read(cx);
                     }
                 }
+                acp_view::AcpViewEvent::ManageCapabilities { by_agent: false } => {
+                    this.open_capabilities(crate::CapabilitiesTab::Plugins, window, cx);
+                }
+                acp_view::AcpViewEvent::ManageCapabilities { by_agent: true } => {
+                    // 智能体定义已经删了就停在智能体列表。
+                    let agent_id = this.sessions.iter().find_map(|session| {
+                        let SessionKind::Conversation(existing) = &session.kind else {
+                            return None;
+                        };
+                        if existing.entity_id() != _view.entity_id() {
+                            return None;
+                        }
+                        let id = session.agent_definition_id.as_deref()?;
+                        cx.global::<settings::AgentHostState>()
+                            .agents
+                            .iter()
+                            .any(|agent| agent.id == id)
+                            .then(|| id.to_string())
+                    });
+                    this.open_agents_route(window, cx);
+                    if let Some(id) = agent_id {
+                        this.open_agent_definition(id, window, cx);
+                    }
+                }
                 acp_view::AcpViewEvent::OpenConversation { sid } => {
                     // 互发消息的事件行上点了对方的标题。不在侧栏里的（别处托管的）不动。
                     let target = this.sessions.iter().position(|session| {

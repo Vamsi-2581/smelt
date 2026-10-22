@@ -10919,6 +10919,7 @@ dependencies = [
  "base64 0.22.1",
  "gpui-base",
  "gpui-component",
+ "gpui-kit-assets",
  "gpui-pre",
  "serde",
  "serde_json",
