@@ -277,6 +277,10 @@ pub struct ConversationAgentDescriptor {
     pub bare_kind: bool,
     /// 全自动任务要改启动命令时的补丁；多数 adapter 只靠 session config。
     pub task_cli: TaskCliPatch,
+    /// 新对话的模型和推理档位由引擎自己的配置决定（Pi：`~/.pi/agent/settings.json`，
+    /// 设置页编辑）。对话里换模型只作用于这一段，Smelt 不记成「最近选择」：记了就是
+    /// 第二份默认值，新对话先按引擎默认起、Idle 后再被客户端改掉，模型胶囊闪一下。
+    pub engine_owns_model_defaults: bool,
 }
 
 /// ACP agent 注册表。顺序 = 新建菜单 / 设置页的排列顺序，且必须与
@@ -303,6 +307,7 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         cli_resume: Some(CliResumeSyntax::Flag),
         bare_kind: true,
         task_cli: TaskCliPatch::None,
+        engine_owns_model_defaults: false,
     },
     ConversationAgentDescriptor {
         id: "copilot",
@@ -329,6 +334,7 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
             full_access_aliases: &["--yolo"],
             thinking_flag: Some("--effort"),
         },
+        engine_owns_model_defaults: false,
     },
     ConversationAgentDescriptor {
         id: "codex",
@@ -350,6 +356,7 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         cli_resume: Some(CliResumeSyntax::Subcommand),
         bare_kind: true,
         task_cli: TaskCliPatch::None,
+        engine_owns_model_defaults: false,
     },
     ConversationAgentDescriptor {
         id: "grok",
@@ -376,6 +383,7 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
             full_access: "--always-approve",
             thinking_flag: Some("--reasoning-effort"),
         },
+        engine_owns_model_defaults: false,
     },
     ConversationAgentDescriptor {
         id: "cursor",
@@ -404,6 +412,7 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
             full_access: "--force",
             thinking_flag: None,
         },
+        engine_owns_model_defaults: false,
     },
     ConversationAgentDescriptor {
         id: "opencode",
@@ -432,6 +441,7 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         // `opencode acp --auto` 会被 yargs 拒绝。全权限由上面的进程级配置表达，
         // 这里不再给命令行叠一个无效 flag。
         task_cli: TaskCliPatch::None,
+        engine_owns_model_defaults: false,
     },
     ConversationAgentDescriptor {
         id: "kiro",
@@ -463,6 +473,7 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
             full_access_aliases: &["-a"],
             thinking_flag: Some("--effort"),
         },
+        engine_owns_model_defaults: false,
     },
     ConversationAgentDescriptor {
         id: "pi",
@@ -487,6 +498,7 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         cli_resume: Some(CliResumeSyntax::SessionFlag),
         bare_kind: true,
         task_cli: TaskCliPatch::None,
+        engine_owns_model_defaults: true,
     },
     ConversationAgentDescriptor {
         id: "dsh",
@@ -515,6 +527,7 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
         cli_resume: None,
         bare_kind: false,
         task_cli: TaskCliPatch::None,
+        engine_owns_model_defaults: false,
     },
 ];
 
@@ -633,6 +646,14 @@ impl ConversationAgentKind {
     /// 全自动任务的 session config 参数映射。
     pub fn task_params(self) -> &'static TaskAgentParams {
         &self.descriptor().task_params
+    }
+
+    /// 用户在对话里选的这项配置要不要记成这家的「最近选择」，带给下一个新对话。
+    /// 默认值归引擎自己配置的那几项（模型、推理档位）不记。
+    pub fn remembers_config(self, config_id: &str) -> bool {
+        let descriptor = self.descriptor();
+        !(descriptor.engine_owns_model_defaults
+            && (config_id == "model" || descriptor.task_params.thinking_key == Some(config_id)))
     }
 
     /// 终端 CLI 续接语法。`None` 表示没有可在终端里继续的 CLI。

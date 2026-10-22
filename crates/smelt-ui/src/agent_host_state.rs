@@ -250,13 +250,17 @@ impl AgentHostState {
     }
 
     /// 记录一次用户显式选择。同一配置只保留最后一个值；profile/cwd 不参与 key。
+    /// 默认值归引擎自己配置的项（Pi 的模型、推理档位）不记，见 `remembers_config`。
     pub fn remember_acp_config_value(
         &mut self,
         agent: ConversationAgentKind,
         config_id: String,
         value_id: String,
     ) {
-        if config_id.trim().is_empty() || value_id.trim().is_empty() {
+        if config_id.trim().is_empty()
+            || value_id.trim().is_empty()
+            || !agent.remembers_config(&config_id)
+        {
             return;
         }
         let values = self
@@ -280,8 +284,8 @@ impl AgentHostState {
         values
     }
 
-    /// 产品智能体由用户显式创建并长期托管，新开对话默认可自主执行。模型和推理
-    /// 档位仍继承最近选择，但权限不能继承普通对话里可能选过的逐次审批。
+    /// 产品智能体由用户显式创建并长期托管，新开对话默认可自主执行。其余配置仍继承
+    /// 最近选择，但权限不能继承普通对话里可能选过的逐次审批。
     pub fn initial_agent_conversation_config(
         &self,
         agent: ConversationAgentKind,
@@ -1029,18 +1033,13 @@ mod tests {
         let mut config = AgentHostState::default();
         config.remember_acp_config_value(
             ConversationAgentKind::Pi,
-            "model".into(),
-            "openai/gpt-5".into(),
-        );
-        config.remember_acp_config_value(
-            ConversationAgentKind::Pi,
             "mode".into(),
             "default".into(),
         );
         config.remember_acp_config_value(
             ConversationAgentKind::Pi,
-            "thought_level".into(),
-            "high".into(),
+            "codemode".into(),
+            "on".into(),
         );
 
         assert!(
@@ -1051,10 +1050,46 @@ mod tests {
         assert_eq!(
             config.initial_agent_conversation_config(ConversationAgentKind::Pi),
             vec![
-                ("model".into(), "openai/gpt-5".into()),
                 ("mode".into(), "bypassPermissions".into()),
-                ("thought_level".into(), "high".into()),
+                ("codemode".into(), "on".into()),
             ]
+        );
+    }
+
+    /// Pi 新对话的模型和推理档位只认 `~/.pi/agent/settings.json`。在对话里换模型不能
+    /// 变成第二份默认值：否则新对话先按 settings.json 起，Idle 后又被改成上次的选择，
+    /// 模型胶囊闪一下。别家没有这份引擎默认值，照旧记最近选择。
+    #[test]
+    fn pi_model_and_thinking_choices_stay_in_their_conversation() {
+        let mut config = AgentHostState::default();
+        config.remember_acp_config_value(
+            ConversationAgentKind::Pi,
+            "model".into(),
+            "commandcode/deepseek/deepseek-v4.1-flash-fast".into(),
+        );
+        config.remember_acp_config_value(
+            ConversationAgentKind::Pi,
+            "thought_level".into(),
+            "max".into(),
+        );
+        config.remember_acp_config_value(
+            ConversationAgentKind::Codex,
+            "model".into(),
+            "gpt-5.6".into(),
+        );
+
+        assert!(
+            config
+                .remembered_acp_config(ConversationAgentKind::Pi)
+                .is_empty()
+        );
+        assert_eq!(
+            config.initial_agent_conversation_config(ConversationAgentKind::Pi),
+            vec![("mode".into(), "bypassPermissions".into())]
+        );
+        assert_eq!(
+            config.remembered_acp_config(ConversationAgentKind::Codex),
+            vec![("model".into(), "gpt-5.6".into())]
         );
     }
 

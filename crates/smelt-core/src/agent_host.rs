@@ -29,6 +29,12 @@ fn from_snapshot(snapshot: smelt_store::AgentUiSnapshot) -> AgentHostSettings {
     }
     let mut config_memory: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for record in snapshot.config_memory {
+        // 库里可能还留着改规则前记下的 Pi 模型 / 推理档位；不读出来，下次整表重写就没了。
+        if ConversationAgentKind::from_id(&record.engine_kind_id)
+            .is_some_and(|agent| !agent.remembers_config(&record.config_id))
+        {
+            continue;
+        }
         config_memory
             .entry(record.engine_kind_id)
             .or_default()
@@ -284,6 +290,51 @@ mod tests {
         let stored = store.get_agent_ui_snapshot().unwrap().unwrap();
         assert!(!stored.agent_hooks_enabled, "没改的开关不能被这次提交改掉");
         assert_eq!(load_on(&store).unwrap(), merged);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 库里留着改规则前记下的 Pi 模型 / 推理档位：读出来就没有，下一次写偏好整表重写后
+    /// 库里也没了。否则新 Pi 对话还会先按 `settings.json` 起、再被改成这条旧选择。
+    #[test]
+    fn stale_pi_model_memory_is_dropped_on_load_and_rewrite() {
+        let (store, dir) = temp_store();
+        let mut seeded = prefs_snapshot(&AgentHostSettings::fresh());
+        let memory = |agent: &str, config: &str, value: &str| {
+            smelt_store::AgentAcpConfigMemoryRecord {
+                engine_kind_id: agent.into(),
+                config_id: config.into(),
+                value_id: value.into(),
+            }
+        };
+        seeded.config_memory = vec![
+            memory("pi", "model", "commandcode/deepseek/deepseek-v4.1-flash-fast"),
+            memory("pi", "thought_level", "max"),
+            memory("pi", "mode", "bypassPermissions"),
+            memory("codex", "model", "gpt-5.6"),
+        ];
+        store.put_agent_ui_prefs(&seeded).unwrap();
+
+        let before = load_on(&store).unwrap();
+        assert_eq!(
+            before.config_memory["pi"],
+            vec![("mode".to_string(), "bypassPermissions".to_string())]
+        );
+        assert_eq!(
+            before.config_memory["codex"],
+            vec![("model".to_string(), "gpt-5.6".to_string())]
+        );
+
+        let mut after = before.clone();
+        after.hooks_enabled = !after.hooks_enabled;
+        apply_edit_on(&store, &AgentHostEdit { before, after }).unwrap();
+        let stored = store.get_agent_ui_snapshot().unwrap().unwrap();
+        assert_eq!(
+            stored.config_memory,
+            vec![
+                memory("codex", "model", "gpt-5.6"),
+                memory("pi", "mode", "bypassPermissions"),
+            ]
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
