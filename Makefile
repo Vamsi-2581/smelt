@@ -54,9 +54,11 @@ test: ## 运行全工作区单元测试（nextest：smeltd handoff 不能同进�
 		echo "✗ 需要 cargo-nextest（与 CI 同一运行器）。安装：cargo install cargo-nextest --locked"; exit 1; }
 	cargo nextest run --workspace
 
+# package.json 的脚本按名字调 bun：钉死版本放到 PATH 最前面，子脚本才用同一个。
 pi-agent-check: ## 检查内置 Pi Agent（类型 + 原生 RPC/权限单测）
 	@bun="$$(./scripts/bun.sh --managed-only)" || { \
 		echo "✗ 取不到钉死版本的 Bun（scripts/fetch-bun.sh）"; exit 1; }; \
+	export PATH="$$(dirname "$$bun"):$$PATH"; \
 	cd packages/pi-agent && "$$bun" install --frozen-lockfile --silent \
 		&& "$$bun" run check \
 		&& "$$bun" run production-smoke
