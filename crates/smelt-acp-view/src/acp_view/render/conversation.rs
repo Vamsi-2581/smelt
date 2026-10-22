@@ -161,10 +161,15 @@ fn event_line(muted: gpui::Hsla) -> gpui::Div {
         .text_color(muted)
 }
 
-/// 「非用户、非助手」的条目（后台结果、子智能体结果、别的对话的消息）居中一行，
-/// 和靠右的用户气泡、靠左的助手回答分开。
+/// 对话之间互发的消息居中一行，和靠右的用户气泡、靠左的助手回答分开。
 fn centered_event(row: gpui::Div) -> gpui::Div {
     h_flex().w_full().justify_center().py_1().child(row)
+}
+
+/// 后台任务、后台子智能体结束的状态行靠左，和过程里的工具行对齐：它们是这段对话
+/// 自己干的活，不是别人发来的话。
+fn leading_event(row: gpui::Div) -> gpui::Div {
+    h_flex().w_full().py_1().child(row)
 }
 
 struct SubagentCard<'a> {
@@ -1147,7 +1152,7 @@ impl AcpView {
                         if let Some(peer) = note.peer.as_ref() {
                             this.render_peer_note(i, &note_owner, entry, note, peer, muted, t.border, cx)
                         } else {
-                        // 后台任务和后台子智能体的结果：居中一行，不是谁说的话。输出可能很长，
+                        // 后台任务和后台子智能体的结果：靠左一行，不是谁说的话。输出可能很长，
                         // 模型已经拿到完整内容，人要看时再点开，展开后限高滚动。展开状态和思考
                         // 详情共用 `expanded_thoughts`（key 都是 entries 下标，互不冲突）。
                         let has_output = !note.output_tail.trim().is_empty();
@@ -1167,7 +1172,7 @@ impl AcpView {
                                 cx,
                             ));
                         }
-                        let mut block = v_flex().w_full().child(centered_event(row));
+                        let mut block = v_flex().w_full().child(leading_event(row));
                         if expanded {
                             block = block.child(
                                 div()
