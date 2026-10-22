@@ -3,6 +3,7 @@
 #
 #   curl -fsSL https://github.com/smelt-ai/smelt/releases/latest/download/install.sh | bash
 #   curl -fsSL https://github.com/smelt-ai/smelt/releases/latest/download/install.sh | bash -s -- --with-desktop
+#   curl -fsSL https://github.com/smelt-ai/smelt/releases/latest/download/install.sh | bash -s -- --relay=relay.example.com
 #
 # 按 uname -m 下载对应架构的包，对着同一个 Release 的 SHA256SUMS 核对，解包后把参数原样交给
 # 包里的 install.sh（参数见那个脚本）。SMELT_VERSION=0.7.0 装指定版本，不设就是最新版。

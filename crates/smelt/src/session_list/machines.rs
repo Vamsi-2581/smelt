@@ -114,6 +114,19 @@ pub(crate) fn machine_actions(
         }),
     });
     actions.push(MachineAction {
+        label: "中继…",
+        icon: IconName::Globe.into(),
+        separated: false,
+        run: Rc::new({
+            let runtime_id = runtime_id.clone();
+            let workspace = workspace.clone();
+            move |window, cx| {
+                let runtime_id = runtime_id.clone();
+                workspace.update(cx, |ws, cx| ws.start_relay_edit(runtime_id, window, cx));
+            }
+        }),
+    });
+    actions.push(MachineAction {
         label: "移除…",
         icon: Icon::empty().path("smelt-icons/trash.svg"),
         separated: false,

@@ -2862,6 +2862,92 @@ impl Workspace {
         self._rename_sub = None;
         cx.notify();
     }
+
+    /// 机器菜单「中继…」：弹出文本框，预填这台电脑现在经哪个中继连它。回车 / 点「保存」
+    /// 提交，见 `confirm_relay_edit`。
+    pub(crate) fn start_relay_edit(
+        &mut self,
+        runtime_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use gpui_component::input::{InputEvent, InputState};
+        let current =
+            crate::runtimes::runtime_relay(&crate::RuntimeKey::Remote(runtime_id.clone()), cx);
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("留空用 n0 的公共 relay")
+                .default_value(current)
+        });
+        self.begin_main_modal_focus(window, cx);
+        input.update(cx, |s, cx| s.focus(window, cx));
+        let sub = cx.subscribe_in(&input, window, |this, _input, ev: &InputEvent, _, cx| {
+            if matches!(ev, InputEvent::PressEnter { .. }) {
+                this.confirm_relay_edit(cx);
+            }
+        });
+        self.relay_edit = Some(RelayEdit {
+            runtime_id,
+            input,
+            saving: false,
+            error: None,
+            _sub: sub,
+        });
+        cx.notify();
+    }
+
+    /// 提交中继：在线时要等那台机器改好才关弹窗，没改成就把原因留在弹窗里。
+    pub(crate) fn confirm_relay_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(edit) = self.relay_edit.as_mut() else {
+            return;
+        };
+        if edit.saving {
+            return;
+        }
+        edit.saving = true;
+        edit.error = None;
+        let runtime_id = edit.runtime_id.clone();
+        let relay = edit.input.read(cx).value().to_string();
+        let task = crate::runtimes::set_runtime_relay(runtime_id.clone(), relay, cx);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                // 等的时候弹窗可能已经关了，或者换成了另一台机器的。
+                let Some(edit) = this
+                    .relay_edit
+                    .as_mut()
+                    .filter(|edit| edit.runtime_id == runtime_id)
+                else {
+                    return;
+                };
+                match result {
+                    Ok(()) => this.relay_edit = None,
+                    Err(error) => {
+                        edit.saving = false;
+                        edit.error = Some(error);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 关掉「中继…」弹窗。已经提交的照常做完，只是不再等结果。
+    pub(crate) fn cancel_relay_edit(&mut self, cx: &mut Context<Self>) {
+        self.relay_edit = None;
+        cx.notify();
+    }
+}
+
+/// 「中继…」弹窗：改哪台机器、输入框、是否在等那台机器回话、上次没改成的原因。
+pub(crate) struct RelayEdit {
+    pub(crate) runtime_id: String,
+    pub(crate) input: Entity<gpui_component::input::InputState>,
+    pub(crate) saving: bool,
+    pub(crate) error: Option<String>,
+    _sub: Subscription,
 }
 
 /// 工具面板要把文字交给哪个会话。`active` 是舞台上的会话下标，`project` 是面板

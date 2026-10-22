@@ -15,6 +15,7 @@ use super::*;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ModalLayer {
     Rename,
+    RelayEdit,
     Quit,
     MoveApp,
     CloseConfirm,
@@ -37,6 +38,7 @@ impl ModalLayer {
     pub(crate) fn rank(self) -> u8 {
         match self {
             Self::Rename => 1,
+            Self::RelayEdit => 1,
             Self::Quit => 2,
             Self::MoveApp => 14,
             Self::CloseConfirm => 3,
@@ -80,6 +82,11 @@ impl Workspace {
             &mut rank,
             self.rename_target.is_some(),
             ModalLayer::Rename.rank(),
+        );
+        raise(
+            &mut rank,
+            self.relay_edit.is_some(),
+            ModalLayer::RelayEdit.rank(),
         );
         raise(&mut rank, self.show_quit_confirm, ModalLayer::Quit.rank());
         raise(
@@ -288,6 +295,9 @@ impl Workspace {
         } else if self.rename_target.is_some() {
             self.cancel_rename(cx);
             true
+        } else if self.relay_edit.is_some() {
+            self.cancel_relay_edit(cx);
+            true
         } else if self.dir_picker.is_some() {
             self.dir_picker = None;
             cx.notify();
@@ -480,6 +490,11 @@ impl Workspace {
                 self.rename_target
                     .is_some()
                     .then(|| self.render_rename_session(cx)),
+            )
+            .children(
+                self.relay_edit
+                    .is_some()
+                    .then(|| self.render_relay_edit(cx)),
             )
             .children(
                 self.dir_picker

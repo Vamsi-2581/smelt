@@ -6,6 +6,8 @@
 #   ./install.sh                  装好、启动，打印配对串
 #   ./install.sh --with-desktop   另装远程桌面（Xvnc + XFCE）和常驻 Chrome，Pi 接上这个 Chrome
 #   ./install.sh --no-pair        不打印配对串
+#   ./install.sh --relay=<地址>   远程访问只用这个自建 iroh relay（域名、IP 或 URL），配对串会
+#                                 带上它；不给就用 n0 的公共 relay（见 smeltd relay）
 #
 # 装在谁名下：运行时不用 root 跑。以 root 执行时（容器里常见），装完系统包后建一个普通用户
 # （默认 smelt，SMELT_USER 可改），运行时和桌面都装在它名下；以普通用户执行时装在自己名下，
@@ -34,17 +36,19 @@ DESKTOP_UNITS=(smelt-display.service smelt-desktop.service smelt-chrome.service)
 
 WITH_DESKTOP=0
 PAIR=1
+RELAY=""
 # 内部用：root 那部分经 sudo 单独跑（system），装到用户名下那部分经 runuser 单独跑（user）。
 PHASE=all
 
 usage() {
-  echo "用法：$0 [--with-desktop] [--no-pair]" >&2
+  echo "用法：$0 [--with-desktop] [--no-pair] [--relay=<地址>]" >&2
 }
 
 for arg in "$@"; do
   case "$arg" in
     --with-desktop) WITH_DESKTOP=1 ;;
     --no-pair) PAIR=0 ;;
+    --relay=?*) RELAY="${arg#--relay=}" ;;
     --phase=system | --phase=user) PHASE="${arg#--phase=}" ;;
     *) usage; exit 2 ;;
   esac
@@ -53,6 +57,7 @@ done
 FLAGS=()
 ((WITH_DESKTOP)) && FLAGS+=(--with-desktop)
 ((PAIR)) || FLAGS+=(--no-pair)
+[[ -z "$RELAY" ]] || FLAGS+=("--relay=$RELAY")
 
 say() { echo "==> $*"; }
 
@@ -371,6 +376,10 @@ user_phase() {
   wait_for_runtime
   if ((WITH_DESKTOP)); then
     "$BIN/smeltd" mcp add desktop-chrome
+  fi
+  # 配对串要带上中继，所以先设中继再配对。
+  if [[ -n "$RELAY" ]]; then
+    "$BIN/smeltd" relay "$RELAY"
   fi
   if ((PAIR)); then
     "$BIN/smeltd" pair

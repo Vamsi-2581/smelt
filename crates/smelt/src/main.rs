@@ -2754,6 +2754,8 @@ struct Workspace {
     rename_input: Option<Entity<gpui_component::input::InputState>>,
     /// 重命名文本框的事件订阅句柄，随 rename_input 一起换（回车/失焦提交）。
     _rename_sub: Option<Subscription>,
+    /// 「中继…」弹窗（None = 没开）。见 `start_relay_edit`。
+    relay_edit: Option<workspace_sessions::RelayEdit>,
     /// 仓库身份缓存（cwd → 当前分支）：侧栏项目行和会话行显示分支名靠它。None = 探测过
     /// 但不是 git 仓库（比如临时终端落脚的 $HOME），不会重复无意义地重试。
     repo_info: HashMap<String, (Instant, Option<RepoInfo>)>,
@@ -3219,6 +3221,7 @@ impl Workspace {
             rename_target: None,
             rename_input: None,
             _rename_sub: None,
+            relay_edit: None,
             repo_info: HashMap::new(),
             repo_info_inflight: HashSet::new(),
             dir_picker: None,

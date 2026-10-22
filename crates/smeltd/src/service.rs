@@ -29,6 +29,7 @@ pub(crate) fn maybe_run(args: &[String]) -> Option<i32> {
         "uninstall" => report(uninstall()),
         "pair" => report(pair()),
         "devices" => report(devices(&args[2..])),
+        "relay" => report(relay(&args[2..])),
         "mcp" => report(mcp(&args[2..])),
         "help" | "--help" | "-h" => {
             print_help();
@@ -53,6 +54,9 @@ fn print_help() {
   smeltd devices     列出已配对设备
   smeltd devices revoke <endpoint-id>
                      撤销一台设备，立即断开它
+  smeltd relay [<地址>|off]
+                     远程访问用哪个 iroh relay：不带参数看现在的；填自建 relay 的域名、
+                     IP 或 URL 就只用它；off 改回 n0 的公共 relay
   smeltd mcp add <id>
                      把内置的 MCP 服务器加进 Pi 的 mcp.json，已经有了就不动
   smeltd --version   打印版本"
@@ -214,6 +218,42 @@ fn devices(args: &[String]) -> Result<(), String> {
         }
         _ => Err("用法：smeltd devices [revoke <endpoint-id>]".to_string()),
     }
+}
+
+/// 远程访问用哪个 iroh relay。配对串会带上它，所以要在配对之前设好；已经配对的设备要在
+/// 桌面上把这台机器的中继改成同一个（机器菜单的「中继…」），不然连不上。
+fn relay(args: &[String]) -> Result<(), String> {
+    use smelt_core::control_api::{RemoteConfigGet, RemoteConfigSet};
+    use smelt_runtime_client::protocol::control::EmptyParams;
+
+    let mut config = call::<RemoteConfigGet>(&EmptyParams::default())?;
+    let relay = match args {
+        [] => {
+            match config.iroh_relay.trim() {
+                "" => println!("用 n0 的公共 relay"),
+                relay => println!("自建 relay：{relay}"),
+            }
+            return Ok(());
+        }
+        [value] if value == "off" => String::new(),
+        [value] => {
+            smelt_iroh::RelaySettings::parse(value).map_err(|error| format!("{error:#}"))?;
+            value.trim().to_string()
+        }
+        _ => return Err("用法：smeltd relay [<地址>|off]".to_string()),
+    };
+    if config.iroh_relay == relay {
+        println!("没有变化");
+        return Ok(());
+    }
+    config.iroh_relay = relay;
+    call::<RemoteConfigSet>(&config)?;
+    match config.iroh_relay.as_str() {
+        "" => println!("已改用 n0 的公共 relay"),
+        relay => println!("已改用自建 relay：{relay}"),
+    }
+    println!("之后生成的配对串会带上它；已经配对的设备要在桌面上把这台机器的中继改成同一个。");
+    Ok(())
 }
 
 /// 把内置的 MCP 服务器加进 Pi 的 `mcp.json`。安装脚本会重复跑，所以已经有同名服务器就

@@ -110,8 +110,8 @@ pub(crate) struct RemoteRuntime {
     pub(crate) connection: smelt_client_store::RuntimeConnection,
     pub(crate) runtime: Runtime,
     pub(crate) status: RuntimeStatus,
-    /// 读它眼下连接路径的把手，和它的连接器共用。
-    probe: PathProbe,
+    /// 经哪个中继连它，和它的连接器共用：读眼下的连接路径、改中继都经这里。
+    route: RemoteRoute,
     /// 最近一次读到的连接路径和延迟。只在连着时有。
     pub(crate) link: Option<RuntimeLink>,
 }
@@ -396,43 +396,64 @@ pub(crate) fn iroh_client() -> Result<std::sync::Arc<smelt_iroh::runtime::IrohCl
     Ok(client)
 }
 
-type ConnectorSlot =
-    std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<smelt_iroh::runtime::RuntimeConnector>>>>;
+/// 经哪个中继连一台远程运行时，以及按它拨好的连接器（还没拨过号就是 `None`）。
+#[derive(Default)]
+struct RouteState {
+    relay: Option<smelt_iroh::RelaySettings>,
+    connector: Option<std::sync::Arc<smelt_iroh::runtime::RuntimeConnector>>,
+}
+
+/// 一台远程运行时的连接路线，它的连接器和 [`RemoteRuntime`] 共用一份：开着的终端、对话
+/// 拿的都是同一个连接器，改了中继，它们下次开流就走新中继，不用重开。
+#[derive(Clone, Default)]
+struct RemoteRoute(std::sync::Arc<std::sync::Mutex<RouteState>>);
+
+impl RemoteRoute {
+    fn new(relay: Option<smelt_iroh::RelaySettings>) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(RouteState {
+            relay,
+            connector: None,
+        })))
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, RouteState> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 眼下的连接路径和延迟。还没拨过号就读不到，也不会为了读而去拨号。阻塞，只在后台调。
+    fn read(&self) -> Option<RuntimeLink> {
+        let connector = self.lock().connector.clone()?;
+        connector
+            .path_status()
+            .map(|path| RuntimeLink::from_path(&path))
+    }
+
+    /// 改走另一个中继：丢掉按旧中继拨的连接器，下一次开流按新的重拨。
+    fn retarget(&self, relay: Option<smelt_iroh::RelaySettings>) {
+        let mut route = self.lock();
+        route.relay = relay;
+        route.connector = None;
+    }
+}
 
 /// 远程运行时的连接器。iroh 要起 tokio，不能在主线程绑，所以第一次连接（总在后台）时
 /// 才绑；之后复用同一个，同一条 QUIC 连接上开流。
 struct LazyRemoteConnector {
     endpoint: smelt_iroh::EndpointId,
-    relay: Option<smelt_iroh::RelaySettings>,
-    connector: ConnectorSlot,
-}
-
-/// 读一个远程运行时眼下的连接路径。和它的连接器共用一个槽：还没拨过号就读不到，也不会
-/// 为了读而去拨号。
-#[derive(Clone, Default)]
-struct PathProbe(ConnectorSlot);
-
-impl PathProbe {
-    /// 阻塞，只在后台调。
-    fn read(&self) -> Option<RuntimeLink> {
-        let connector = self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()?;
-        connector
-            .path_status()
-            .map(|path| RuntimeLink::from_path(&path))
-    }
+    route: RemoteRoute,
 }
 
 impl smelt_runtime_client::Connector for LazyRemoteConnector {
     fn connect(&self) -> std::io::Result<std::os::unix::net::UnixStream> {
         let connector = {
-            let mut slot = self.connector.lock().unwrap_or_else(|e| e.into_inner());
-            match slot.as_ref() {
+            let mut route = self.route.lock();
+            match route.connector.as_ref() {
                 Some(connector) => std::sync::Arc::clone(connector),
                 None => {
                     let client = iroh_client().map_err(std::io::Error::other)?;
                     let connector =
-                        std::sync::Arc::new(client.connector(self.endpoint, self.relay.as_ref()));
-                    *slot = Some(std::sync::Arc::clone(&connector));
+                        std::sync::Arc::new(client.connector(self.endpoint, route.relay.as_ref()));
+                    route.connector = Some(std::sync::Arc::clone(&connector));
                     connector
                 }
             }
@@ -441,27 +462,32 @@ impl smelt_runtime_client::Connector for LazyRemoteConnector {
     }
 }
 
+/// 中继地址：空的是 n0 的公共 relay。
+fn parse_relay(relay: &str) -> Result<Option<smelt_iroh::RelaySettings>, String> {
+    match relay.trim() {
+        "" => Ok(None),
+        relay => smelt_iroh::RelaySettings::parse(relay)
+            .map(Some)
+            .map_err(|error| format!("{error:#}")),
+    }
+}
+
 /// 只解析地址，不碰网络，主线程可以调。
 fn remote_client(
     connection: &smelt_client_store::RuntimeConnection,
-) -> Result<(RuntimeClient, PathProbe), String> {
+) -> Result<(RuntimeClient, RemoteRoute), String> {
     let endpoint: smelt_iroh::EndpointId = connection
         .endpoint_id
         .parse()
         .map_err(|_| format!("运行时的 endpoint id 不合法：{}", connection.endpoint_id))?;
-    let relay = connection
-        .relay_url
-        .as_deref()
-        .map(smelt_iroh::RelaySettings::parse)
-        .transpose()
-        .map_err(|error| format!("relay 地址不合法：{error:#}"))?;
-    let probe = PathProbe::default();
+    let relay = parse_relay(connection.relay_url.as_deref().unwrap_or_default())
+        .map_err(|error| format!("relay 地址不合法：{error}"))?;
+    let route = RemoteRoute::new(relay);
     let client = RuntimeClient::new(LazyRemoteConnector {
         endpoint,
-        relay,
-        connector: probe.0.clone(),
+        route: route.clone(),
     });
-    Ok((client, probe))
+    Ok((client, route))
 }
 
 /// 本机守护：没在跑就按 App 里的版本拉起（运行中退出了也靠这里补上），再对版本。
@@ -617,11 +643,11 @@ pub(crate) fn start_runtime_hub(cx: &mut gpui::App) {
             hub.remotes = connections
                 .into_iter()
                 .map(|connection| match remote_client(&connection) {
-                    Ok((client, probe)) => RemoteRuntime {
+                    Ok((client, route)) => RemoteRuntime {
                         runtime: remote_runtime(&connection.runtime_id, client),
                         connection,
                         status: RuntimeStatus::Connecting,
-                        probe,
+                        route,
                         link: None,
                     },
                     Err(error) => RemoteRuntime {
@@ -633,7 +659,7 @@ pub(crate) fn start_runtime_hub(cx: &mut gpui::App) {
                         ),
                         connection,
                         status: RuntimeStatus::Offline(error),
-                        probe: PathProbe::default(),
+                        route: RemoteRoute::default(),
                         link: None,
                     },
                 })
@@ -664,7 +690,7 @@ fn watch_runtime_links(cx: &mut gpui::App) {
                                         RuntimeStatus::Online { .. }
                                             | RuntimeStatus::Incompatible { .. }
                                     )
-                                    .then(|| remote.probe.clone()),
+                                    .then(|| remote.route.clone()),
                                 )
                             })
                             .collect::<Vec<_>>()
@@ -676,7 +702,7 @@ fn watch_runtime_links(cx: &mut gpui::App) {
                 .spawn(async move {
                     probes
                         .into_iter()
-                        .map(|(runtime_id, probe)| (runtime_id, probe.and_then(|p| p.read())))
+                        .map(|(runtime_id, route)| (runtime_id, route.and_then(|r| r.read())))
                         .collect::<Vec<_>>()
                 })
                 .await;
@@ -768,7 +794,7 @@ pub(crate) fn pair_with(uri: &str) -> Result<RemoteRuntime, String> {
             .map(|elapsed| elapsed.as_millis() as i64)
             .unwrap_or_default(),
     };
-    let (client, probe) = remote_client(&connection)?;
+    let (client, route) = remote_client(&connection)?;
     client
         .call::<DevicePair>(
             &PairParams {
@@ -798,7 +824,7 @@ pub(crate) fn pair_with(uri: &str) -> Result<RemoteRuntime, String> {
         runtime: remote_runtime(&connection.runtime_id, client),
         status: described_status(described),
         connection,
-        probe,
+        route,
         link: None,
     })
 }
@@ -828,6 +854,85 @@ pub(crate) fn rename_runtime(runtime_id: String, name: String, cx: &mut gpui::Ap
             }
         })
         .detach();
+}
+
+/// 最近一次探测是在线。
+pub(crate) fn runtime_online(key: &RuntimeKey, cx: &gpui::App) -> bool {
+    status_of_key(key, cx).is_some_and(|status| matches!(status, RuntimeStatus::Online { .. }))
+}
+
+/// 这台电脑经哪个中继连这台远程机器（配对时记下、或之后改过的）。空的是 n0 的公共 relay。
+pub(crate) fn runtime_relay(key: &RuntimeKey, cx: &gpui::App) -> String {
+    remote_of(key, cx)
+        .and_then(|remote| remote.connection.relay_url.clone())
+        .unwrap_or_default()
+}
+
+/// 改一台远程机器的中继，`relay` 空着就是 n0 的公共 relay。
+///
+/// 在线：先请它自己改用新中继（它的远程配置），成了再改这边记下的地址。顺序不能反：先改
+/// 这边就连不上它，没法再请它改。不在线：只改这边记下的——那台机器多半已经在那边改过
+/// （`smeltd relay`），这边跟上才连得回去。改完立刻重连，开着的终端和对话下次开流就走
+/// 新中继（见 [`RemoteRoute`]）。
+pub(crate) fn set_runtime_relay(
+    runtime_id: String,
+    relay: String,
+    cx: &mut gpui::App,
+) -> gpui::Task<Result<(), String>> {
+    use smelt_model::control_api::{RemoteConfigGet, RemoteConfigSet};
+    use smelt_runtime_client::protocol::control::EmptyParams;
+
+    let key = RuntimeKey::Remote(runtime_id.clone());
+    let Some(remote) = remote_of(&key, cx).cloned() else {
+        return gpui::Task::ready(Err("这台机器已经移除了".to_string()));
+    };
+    let relay = relay.trim().to_string();
+    let parsed = match parse_relay(&relay) {
+        Ok(parsed) => parsed,
+        Err(error) => return gpui::Task::ready(Err(error)),
+    };
+    let online = matches!(remote.status, RuntimeStatus::Online { .. });
+    let route = remote.route.clone();
+    let mut connection = remote.connection.clone();
+    connection.relay_url = (!relay.is_empty()).then(|| relay.clone());
+    cx.spawn(async move |cx| {
+        let saved = connection.clone();
+        cx.background_executor()
+            .spawn(async move {
+                if online {
+                    let client = remote.runtime.client();
+                    let timeout = smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT;
+                    let mut config = client
+                        .call::<RemoteConfigGet>(&EmptyParams::default(), timeout)
+                        .map_err(|error| format!("读不到那台机器的远程配置：{error}"))?;
+                    if config.iroh_relay != relay {
+                        config.iroh_relay = relay;
+                        client
+                            .call::<RemoteConfigSet>(&config, timeout)
+                            .map_err(|error| format!("那台机器没改成：{error}"))?;
+                    }
+                }
+                smelt_client_store::client_store()
+                    .and_then(|store| store.put_runtime_connection(&saved))
+                    .map_err(|error| format!("保存中继失败：{error}"))
+            })
+            .await?;
+        cx.update(|cx| {
+            route.retarget(parsed);
+            update_hub(cx, |hub| {
+                if let Some(remote) = hub
+                    .remotes
+                    .iter_mut()
+                    .find(|remote| remote.connection.runtime_id == connection.runtime_id)
+                {
+                    remote.connection.relay_url = connection.relay_url;
+                    remote.link = None;
+                }
+            });
+            crate::runtime_events::reconnect(&key, cx);
+        });
+        Ok(())
+    })
 }
 
 /// 配对要走公网拨号，比本机调用慢得多。

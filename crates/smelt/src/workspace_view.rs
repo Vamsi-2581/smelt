@@ -538,6 +538,65 @@ impl Workspace {
         self.modal_shell(320., false, content, crate::overlay::ModalLayer::Rename, cx)
     }
 
+    /// 机器菜单「中继…」弹层：和改名同款，多一行没改成的原因。在线和离线改的东西不一样，
+    /// 说明里讲清楚。
+    pub(crate) fn render_relay_edit(&self, cx: &mut Context<Self>) -> AnyElement {
+        let (fg, muted, danger) = {
+            let t = cx.theme();
+            (t.foreground, t.muted_foreground, t.danger)
+        };
+        let Some(edit) = self.relay_edit.as_ref() else {
+            return div().into_any_element();
+        };
+        let key = crate::RuntimeKey::Remote(edit.runtime_id.clone());
+        let hint = if crate::runtimes::runtime_online(&key, cx) {
+            "那台机器会改用这个中继，这台电脑也跟着改。填自建 iroh relay 的域名、IP 或 URL；\
+             留空用 n0 的公共 relay。"
+        } else {
+            "那台机器现在连不上，只改这台电脑这边：那台机器要已经用 smeltd relay 改成同一个。"
+        };
+        let content = v_flex()
+            .child(Self::modal_title(
+                fg,
+                format!("{} 的中继", crate::runtimes::runtime_name(&key, cx)),
+            ))
+            .child(div().text_sm().text_color(muted).child(hint))
+            .child(Input::new(&edit.input).disabled(edit.saving))
+            .children(
+                edit.error
+                    .clone()
+                    .map(|error| div().text_sm().text_color(danger).child(error)),
+            )
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(Self::modal_normal_button(
+                        "cancel-relay-edit",
+                        "取消",
+                        |this, _, _, cx| this.cancel_relay_edit(cx),
+                        cx,
+                    ))
+                    .child(Self::modal_commit_button(
+                        "confirm-relay-edit",
+                        if edit.saving {
+                            "正在保存…"
+                        } else {
+                            "保存"
+                        },
+                        |this, _, _, cx| this.confirm_relay_edit(cx),
+                        cx,
+                    )),
+            );
+        self.modal_shell(
+            380.,
+            false,
+            content,
+            crate::overlay::ModalLayer::RelayEdit,
+            cx,
+        )
+    }
+
     /// 「重启守护进程」二次确认弹窗：明确告知会断开所有当前终端会话。与
     /// render_quit_confirm 同款视觉（居中卡片 + 半透明遮罩）。
     ///
