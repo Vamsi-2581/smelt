@@ -98,6 +98,10 @@ impl EntryMirror {
 
     /// 发送方：`entries` 是从绝对下标 `base` 起的当前条目。算出 `[from, end)` 相对
     /// 镜像的变化，并把它应用到镜像上，镜像从此记着对方收到这一帧之后的样子。
+    ///
+    /// 对方缺的条目发送方也已经没有了（`base` 越过了镜像末尾，比如父镜像一次合并
+    /// 就把前缀裁到了对方没收到的位置），增量帧表达不了，返回 [`MirrorGap`]。
+    /// 镜像随之作废，调用方要改发整段帧。
     pub fn encode(
         &mut self,
         base: usize,
@@ -105,7 +109,7 @@ impl EntryMirror {
         from: usize,
         end: usize,
         keep_from: usize,
-    ) -> EntriesDelta {
+    ) -> Result<EntriesDelta, MirrorGap> {
         self.encode_with(base, entries, from, end, keep_from, |_, entry| {
             Cow::Borrowed(entry)
         })
@@ -122,7 +126,7 @@ impl EntryMirror {
         end: usize,
         keep_from: usize,
         project: impl Fn(usize, &'e AcpEntry) -> Cow<'e, AcpEntry>,
-    ) -> EntriesDelta {
+    ) -> Result<EntriesDelta, MirrorGap> {
         let end = end.clamp(base, base + entries.len());
         // 对方没有的都算变化：镜像末尾之后的条目即使没被记脏也要发，不能留空洞。
         let from = if self.json.is_empty() {
@@ -152,8 +156,8 @@ impl EntryMirror {
             keep_from,
             patches,
         };
-        self.apply(&delta).expect("发送方镜像覆盖自己算出的增量");
-        delta
+        self.apply(&delta)?;
+        Ok(delta)
     }
 
     /// 应用一帧增量，返回 `(第一个变化的下标, 从它到末尾的条目)`，正好是视图按下标
@@ -301,7 +305,8 @@ impl FrameMirror {
     }
 
     /// 发送方：`frame` 是这一帧完整的快照头（条目不必带），`entries` 是从绝对下标 `base`
-    /// 起的当前条目。算出相对镜像的变化，并应用到镜像上。
+    /// 起的当前条目。算出相对镜像的变化，并应用到镜像上。增量帧表达不了时见
+    /// [`EntryMirror::encode`]。
     pub fn encode(
         &mut self,
         frame: &Value,
@@ -310,12 +315,12 @@ impl FrameMirror {
         from: usize,
         end: usize,
         keep_from: usize,
-    ) -> FrameDelta {
-        let entries = self.encode_entries(base, entries, from, end, keep_from);
-        FrameDelta {
+    ) -> Result<FrameDelta, MirrorGap> {
+        let entries = self.encode_entries(base, entries, from, end, keep_from)?;
+        Ok(FrameDelta {
             fields: self.encode_header(frame),
             entries,
-        }
+        })
     }
 
     /// 发送方第一步：条目的变化。条目要在持有归约状态时读，所以和快照头分开算。
@@ -326,7 +331,7 @@ impl FrameMirror {
         from: usize,
         end: usize,
         keep_from: usize,
-    ) -> EntriesDelta {
+    ) -> Result<EntriesDelta, MirrorGap> {
         self.entries.encode(base, entries, from, end, keep_from)
     }
 
@@ -339,7 +344,7 @@ impl FrameMirror {
         end: usize,
         keep_from: usize,
         project: impl Fn(usize, &'e AcpEntry) -> Cow<'e, AcpEntry>,
-    ) -> EntriesDelta {
+    ) -> Result<EntriesDelta, MirrorGap> {
         self.entries
             .encode_with(base, entries, from, end, keep_from, project)
     }
@@ -446,7 +451,8 @@ mod tests {
         fn send(&mut self, entries: &[AcpEntry], from: usize, keep_from: usize) -> EntriesDelta {
             let delta = self
                 .sender
-                .encode(0, entries, from, entries.len(), keep_from);
+                .encode(0, entries, from, entries.len(), keep_from)
+                .unwrap();
             let wire: EntriesDelta =
                 serde_json::from_str(&serde_json::to_string(&delta).unwrap()).unwrap();
             let (first, tail) = self.receiver.apply(&wire).unwrap();
@@ -557,7 +563,7 @@ mod tests {
         let mut sender = EntryMirror::default();
         sender.splice(0, &entries);
         entries[0] = assistant("ab");
-        let delta = sender.encode(0, &entries, 0, 1, 0);
+        let delta = sender.encode(0, &entries, 0, 1, 0).unwrap();
 
         let mut receiver = EntryMirror::default();
         assert_eq!(
@@ -567,9 +573,23 @@ mod tests {
         );
         receiver.splice(0, &entries);
         entries[0] = assistant("abc");
-        let delta = sender.encode(0, &entries, 0, 1, 0);
+        let delta = sender.encode(0, &entries, 0, 1, 0).unwrap();
         let (_, tail) = receiver.apply(&delta).unwrap();
         assert_eq!(texts(&tail), texts(&entries));
+    }
+
+    #[test]
+    fn a_trimmed_sender_that_cannot_fill_the_receivers_gap_asks_for_a_full_frame() {
+        // 对方停在 [2, 3)。父镜像一次合并就收完上一轮、开了下一轮，把前缀裁到 4：
+        // 下标 3 对方没收到，发送方也没有了。以前这里在发送方 panic。
+        let mut sender = EntryMirror::default();
+        sender.splice(2, &[AcpEntry::User("A".into())]);
+        let entries = vec![AcpEntry::User("B".into()), assistant("b")];
+        assert_eq!(sender.encode(4, &entries, 3, 6, 3), Err(MirrorGap));
+        // 镜像作废之后照样不能拿它算增量，直到下一份整段帧。
+        assert_eq!(sender.encode(4, &entries, 4, 6, 4), Err(MirrorGap));
+        sender.splice(4, &entries);
+        assert!(sender.encode(4, &entries, 4, 6, 4).is_ok());
     }
 
     #[test]
@@ -619,7 +639,9 @@ mod tests {
     ) -> (usize, Value) {
         let entries: Vec<AcpEntry> =
             serde_json::from_value(frame["snapshot"]["entries"].clone()).unwrap();
-        let delta = sender.encode(frame, 0, &entries, 0, entries.len(), 0);
+        let delta = sender
+            .encode(frame, 0, &entries, 0, entries.len(), 0)
+            .unwrap();
         let wire = serde_json::to_string(&serde_json::json!({ "delta": delta })).unwrap();
         let decoded: FrameDelta =
             serde_json::from_value(serde_json::from_str::<Value>(&wire).unwrap()["delta"].clone())
@@ -674,7 +696,9 @@ mod tests {
         let mut sender = FrameMirror::default();
         sender.full(&first);
         let entries = vec![assistant("ab")];
-        let delta = sender.encode(&frame(2, "thinking", &entries), 0, &entries, 0, 1, 0);
+        let delta = sender
+            .encode(&frame(2, "thinking", &entries), 0, &entries, 0, 1, 0)
+            .unwrap();
         let mut receiver = FrameMirror::default();
         assert_eq!(receiver.apply(&delta), Err(MirrorGap));
     }

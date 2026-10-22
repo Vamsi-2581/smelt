@@ -1259,24 +1259,14 @@ pub(crate) fn encode_acp_snapshot(
                 include_envelope,
             )
         };
-        let (mut snapshot, entries_delta) = if full {
-            // 窗口只订阅当前一轮，但收尾那一步改到的条目已经划进历史。从记脏的
-            // `from` 起一起带上，窗口才接得上，不会当成漏帧把对话清空。
-            let start = if include_history {
-                from
-            } else {
-                from.min(history_len)
-            };
-            if image_refs {
-                prepare_image_refs(&reduced, start, window_end);
-            }
-            (range(start), None)
+        // 条目不进快照，只发相对对方镜像的变化。已收尾的回合不会再长，
+        // 双方都不必再为它留镜像。
+        // 要图片引用的连接，镜像记的是替换后的条目：只有含大图的条目才克隆替换，
+        // 摘要缓存在原图上，同一张图不会每帧重算。
+        let delta = if full {
+            None
         } else {
-            // 条目不进快照，只发相对对方镜像的变化。已收尾的回合不会再长，
-            // 双方都不必再为它留镜像。
-            // 要图片引用的连接，镜像记的是替换后的条目：只有含大图的条目才克隆替换，
-            // 摘要缓存在原图上，同一张图不会每帧重算。
-            let delta = mirror.encode_entries_with(
+            let encoded = mirror.encode_entries_with(
                 reduced.entries_base(),
                 reduced.entries(),
                 from,
@@ -1290,7 +1280,34 @@ pub(crate) fn encode_acp_snapshot(
                     }
                 },
             );
-            (range(window_end), Some(delta))
+            // 对方缺的条目父镜像已经裁掉了，增量帧补不上，改发下面的整段帧。
+            encoded
+                .inspect_err(|_| {
+                    crate::dlog(&format!(
+                        "acp snapshot 镜像接不上增量，改发整段帧 from={from} base={}",
+                        reduced.entries_base()
+                    ));
+                })
+                .ok()
+        };
+        let (mut snapshot, entries_delta) = match delta {
+            Some(delta) => (range(window_end), Some(delta)),
+            None => {
+                // 增量补不上时不知道对方停在哪，从头要：起点会被抬到父镜像还留着的
+                // 前缀，能给的都给，窗口再按漏帧接上最新的后缀。
+                let from = if full { from } else { 0 };
+                // 窗口只订阅当前一轮，但收尾那一步改到的条目已经划进历史。从记脏的
+                // `from` 起一起带上，窗口才接得上，不会当成漏帧把对话清空。
+                let start = if include_history {
+                    from
+                } else {
+                    from.min(history_len)
+                };
+                if image_refs {
+                    prepare_image_refs(&reduced, start, window_end);
+                }
+                (range(start), None)
+            }
         };
         if let Some(runtime_debug) =
             runtime_debug.filter(|_| include_runtime_debug && include_debug)

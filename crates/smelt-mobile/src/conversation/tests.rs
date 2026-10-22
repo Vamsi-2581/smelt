@@ -85,7 +85,8 @@ impl FakeWatch {
             .mirror
             .lock()
             .unwrap()
-            .encode(&frame, 0, &entries, 0, entries.len(), 0);
+            .encode(&frame, 0, &entries, 0, entries.len(), 0)
+            .unwrap();
         self.send(&json!({ "delta": delta }));
     }
 

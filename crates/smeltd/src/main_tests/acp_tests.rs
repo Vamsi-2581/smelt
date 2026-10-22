@@ -3203,6 +3203,113 @@ fn hosted_window_link_carries_entries_written_as_the_turn_closes() {
 }
 
 #[test]
+fn hosted_window_link_falls_back_to_a_full_frame_when_the_trimmed_prefix_skips_its_mirror() {
+    // 窗口镜像停在 [2, 3)。宿主一次合并里收完 A、紧接着开了排队的 B，父镜像把
+    // 前缀裁到 B（下标 4）：下标 3 窗口没收到，父镜像也没有了。以前快照写线程
+    // 在持有归约锁时 panic，锁被污染，会话关不掉，provider 会话一直被它占着。
+    let mut host = AcpSessionState::default();
+    host.entries_mut().extend([
+        AcpEntry::User("早先".into()),
+        AcpEntry::Assistant {
+            text: "好".into(),
+            thought: false,
+        },
+        AcpEntry::User("A".into()),
+    ]);
+    host.phase = DaemonPhase::Thinking;
+    host.turn_started_at_ms = Some(1);
+    let acp_sessions = new_test_acp_sessions();
+    let (slot, _) = acp_sessions.reserve_with("acp-hosted-trim-gap", || {
+        make_acp_session_value("acp-hosted-trim-gap", AcpSessionState::default())
+    });
+    let merged = slot
+        .value
+        .reduced
+        .lock()
+        .unwrap()
+        .merge_hosted_snapshot(host.to_snapshot(false))
+        .unwrap();
+    let (server, client) = UnixStream::pair().unwrap();
+    slot.value.out.lock().unwrap().client = Some(
+        acp_snapshot_link_for_slot(
+            &slot,
+            server,
+            Vec::new(),
+            nothing_sent(),
+            0,
+            "acp-hosted-trim-gap",
+            "acp-client",
+            SnapshotProjection {
+                history: false,
+                debug: true,
+                image_refs: false,
+            },
+        )
+        .unwrap(),
+    );
+    let mut reader = BufReader::new(client);
+    let mut mirror = nothing_sent();
+    push_acp_snapshot_since(&slot.value, false, Some(merged.changed_from));
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    decode_frame(&mut mirror, &line);
+
+    host.entries_mut().extend([
+        AcpEntry::Assistant {
+            text: "A 的回答".into(),
+            thought: false,
+        },
+        AcpEntry::User("B".into()),
+    ]);
+    host.turn_started_at_ms = Some(2);
+    let merged = slot
+        .value
+        .reduced
+        .lock()
+        .unwrap()
+        .merge_hosted_snapshot(host.to_snapshot_since(false, 3))
+        .unwrap();
+    assert_eq!(slot.value.reduced.lock().unwrap().entries_base(), 4);
+    push_acp_snapshot_since(&slot.value, false, Some(merged.changed_from));
+    line.clear();
+    reader.read_line(&mut line).unwrap();
+    assert!(
+        !line.is_empty(),
+        "快照写线程不能因为增量补不上而退出（以前在这里 panic）"
+    );
+    let raw: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert!(raw.get("delta").is_none(), "补不上的增量要改发整段帧：{line}");
+    let frame = decode_frame(&mut mirror, &line);
+    assert_eq!(frame["snapshot"]["entries_offset"], 4);
+    let entries = frame["snapshot"]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "{line}");
+    assert!(entries[0].to_string().contains("\"B\""), "{line}");
+    assert!(
+        !slot.value.reduced.is_poisoned(),
+        "归约锁不能被污染，否则会话关不掉、provider 会话释放不了"
+    );
+
+    // 整段帧重建了两端镜像，之后照常发增量。
+    host.entries_mut().push(AcpEntry::Assistant {
+        text: "B 的回答".into(),
+        thought: false,
+    });
+    let merged = slot
+        .value
+        .reduced
+        .lock()
+        .unwrap()
+        .merge_hosted_snapshot(host.to_snapshot_since(false, 5))
+        .unwrap();
+    push_acp_snapshot_since(&slot.value, false, Some(merged.changed_from));
+    line.clear();
+    reader.read_line(&mut line).unwrap();
+    assert!(line.contains("\"delta\""), "镜像重建后应回到增量帧：{line}");
+    let frame = decode_frame(&mut mirror, &line);
+    assert!(frame["snapshot"]["entries"].to_string().contains("B 的回答"));
+}
+
+#[test]
 fn unchanged_tool_debug_is_not_copied_into_later_snapshots() {
     let sess = make_acp_session("acp-tool-debug", AcpSessionState::default());
     let (server, client) = UnixStream::pair().unwrap();

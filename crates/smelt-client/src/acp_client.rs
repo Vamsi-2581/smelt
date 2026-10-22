@@ -889,7 +889,9 @@ mod tests {
             sender.full(&frame);
             return frame.to_string();
         }
-        let delta = sender.encode(&frame, 0, &snapshot.entries, 0, snapshot.entries.len(), 0);
+        let delta = sender
+            .encode(&frame, 0, &snapshot.entries, 0, snapshot.entries.len(), 0)
+            .unwrap();
         serde_json::json!({ "delta": delta }).to_string()
     }
 
