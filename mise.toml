@@ -2,5 +2,8 @@
 [tools]
 # 改版本时，把新 SDK 迁移出的平台工程改动（Podfile.lock 等）一起提交，见 mobile/README.md。
 flutter = "3.47.3"
+# CocoaPods 装在这份 Ruby 下。macOS 自带的 Ruby 2.6 编不了它依赖的原生扩展（头文件目录与 SDK 对不上），
+# 所以单独钉一份；改版本后要 `mise install -f gem:cocoapods` 重装，旧的扩展是按旧 Ruby 编的。
+ruby = "3.4.11"
 # 与 mobile/ios/Podfile.lock 末尾的 COCOAPODS 版本保持一致。
 "gem:cocoapods" = "1.17.0"

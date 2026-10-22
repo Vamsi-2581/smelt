@@ -4,9 +4,10 @@ Flutter client for Smelt remote ACP conversations and live terminal sessions.
 
 ## Flutter SDK version
 
-The Flutter version (and the CocoaPods version iOS builds use) is pinned in
-the repository root `mise.toml`; CI installs from the same file. Install
-[mise](https://mise.jdx.dev), activate it in your shell, then once per checkout:
+The Flutter version (and the CocoaPods version iOS builds use, plus the Ruby it
+runs on) is pinned in the repository root `mise.toml`; CI installs from the same
+file. Install [mise](https://mise.jdx.dev), activate it in your shell, then once
+per checkout:
 
 ```sh
 mise trust && mise install
