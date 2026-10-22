@@ -318,7 +318,7 @@ fn maintenance_groups(
                     .icon_size()
                     .label("帮助文档 ↗")
                     .on_click(|_, _window, cx| {
-                        cx.open_url("https://smelt.onoo.io/");
+                        cx.open_url(DOCS_URL);
                     }),
             )
             .child(

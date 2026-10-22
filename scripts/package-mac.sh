@@ -10,6 +10,13 @@
 # 产物：
 #   dist/Smelt.app     —— 可双击运行的应用
 #   dist/Smelt.dmg     —— 分发件（定制拖拽安装窗口；--no-dmg 时不产生）
+#
+# 自己分发安装包时可设的环境变量：
+#   SMELT_UPDATE_URL            这个包本身的下载地址，写进包里，装好后不会把自己当成新版本
+#   以下三项在编译时生效，要配合 --build（或自己带着它们 cargo build --release）：
+#   SMELT_UPDATE_MANIFEST_URL   更新清单地址，`{channel}` 换成 dev / prod；不设则查 GitHub Releases
+#   SMELT_FEEDBACK_URL          「反馈问题」的链接；不设则是 GitHub issues
+#   SMELT_DOCS_URL              「帮助文档」的链接；不设则是 smelt.onoo.io
 set -euo pipefail
 
 APP_NAME="Smelt"

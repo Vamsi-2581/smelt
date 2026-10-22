@@ -1,4 +1,5 @@
-//! 在线更新：查 GitHub Releases、静默下载新版 zip、退出时把 `.app` 换成新版本。
+//! 在线更新：查 GitHub Releases（或打包时指定的更新清单）、静默下载新版 zip、退出时把
+//! `.app` 换成新版本。
 //!
 //! 不碰 GPUI，纯文件/网络操作，方便独立验证。这里没有 tokio 运行时，`reqwest`
 //! 得在临时 current-thread 运行时里 `block_on`（调用方负责套
@@ -20,6 +21,13 @@ const APP_NAME: &str = "Smelt";
 const RELEASES_API: &str = "https://api.github.com/repos/smelt-ai/smelt/releases?per_page=20";
 /// 自更新用的 App 压缩包，`release.yml` 和 dmg 一起传到 Release 上。
 const UPDATE_ASSET: &str = "Smelt.app.zip";
+/// 打包时可选指定的更新清单地址，`{channel}` 换成通道名（`dev` / `prod`）。设了就不查
+/// GitHub Releases，改读这份清单：自己分发安装包的打包方用它把更新指向自己的服务器。
+/// 清单格式是 `{"version": "0.9.0", "url": "https://…/Smelt.app.zip"}`。
+const UPDATE_MANIFEST_URL: Option<&str> = match option_env!("SMELT_UPDATE_MANIFEST_URL") {
+    Some(url) if !url.is_empty() => Some(url),
+    _ => None,
+};
 const BUNDLED_RELEASE_URL_FILE: &str = "Contents/Resources/SmeltUpdateURL";
 const UPDATE_STATE_DIR: &str = ".smelt";
 const UPDATE_LOCK_FILE: &str = "update.lock";
@@ -30,7 +38,8 @@ const INSTALLER_NAME: &str = "smelt-installer";
 /// 下载进度上报节流：攒够这么多字节才推一次事件，别让每个 chunk 都触发一次重绘。
 const PROGRESS_REPORT_STEP: u64 = 512 * 1024;
 
-/// 更新通道。都从 GitHub Releases 取，区别只在认不认预发布（tag 带 `-` 的 rc 版）。
+/// 更新通道。从 GitHub Releases 取时，区别只在认不认预发布（tag 带 `-` 的 rc 版）；
+/// 打包时指定了更新清单的，两个通道各读各的清单。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateChannel {
@@ -48,6 +57,14 @@ impl UpdateChannel {
         match self {
             Self::Dev => "内测版",
             Self::Prod => "生产版",
+        }
+    }
+
+    /// 填进更新清单地址 `{channel}` 的名字，和存盘的写法一致。
+    const fn slug(self) -> &'static str {
+        match self {
+            Self::Dev => "dev",
+            Self::Prod => "prod",
         }
     }
 }
@@ -268,6 +285,78 @@ struct GithubAsset {
 
 /// 查指定通道最新的发布，返回版本展示文本和 ZIP 下载地址。
 pub async fn fetch_latest(channel: UpdateChannel) -> anyhow::Result<UpdateCandidate> {
+    match UPDATE_MANIFEST_URL {
+        Some(template) => fetch_manifest(&manifest_url(template, channel)).await,
+        None => fetch_github_release(channel).await,
+    }
+}
+
+fn manifest_url(template: &str, channel: UpdateChannel) -> String {
+    template.replace("{channel}", channel.slug())
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateManifest {
+    #[serde(default)]
+    version: Option<serde_json::Value>,
+    url: String,
+}
+
+/// 读打包时指定的更新清单。清单只维护该通道当前指向的 ZIP。
+async fn fetch_manifest(manifest_url: &str) -> anyhow::Result<UpdateCandidate> {
+    validate_download_url(manifest_url)?;
+    let resp = reqwest::Client::new()
+        .get(manifest_url)
+        .header("User-Agent", "smelt-updater")
+        .header("Accept", "application/json")
+        .send()
+        .await?
+        .error_for_status()?;
+    validate_download_url(resp.url().as_str())?;
+    let manifest: UpdateManifest = resp.json().await?;
+    let download_url = manifest.url.trim().to_string();
+    if download_url.is_empty() {
+        anyhow::bail!("{manifest_url} 缺少 url");
+    }
+    validate_download_url(&download_url)?;
+
+    let version = manifest
+        .version
+        .as_ref()
+        .and_then(manifest_version_text)
+        .filter(|v| !v.is_empty() && v != "0")
+        .unwrap_or_else(|| release_label_from_url(&download_url));
+    Ok(UpdateCandidate {
+        version,
+        url: download_url,
+    })
+}
+
+fn manifest_version_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) => Some(value.trim().to_string()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+/// 清单没给版本号时，拿下载地址最后一段当展示文本。
+fn release_label_from_url(download_url: &str) -> String {
+    url::Url::parse(download_url)
+        .ok()
+        .and_then(|url| {
+            url.path_segments().and_then(|mut segments| {
+                segments
+                    .rfind(|segment| !segment.is_empty())
+                    .map(str::to_string)
+            })
+        })
+        .map(|value| value.trim_end_matches(".zip").to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "更新包".to_string())
+}
+
+async fn fetch_github_release(channel: UpdateChannel) -> anyhow::Result<UpdateCandidate> {
     let releases: Vec<GithubRelease> = reqwest::Client::new()
         .get(RELEASES_API)
         .header("User-Agent", "smelt-updater")
@@ -2009,15 +2098,15 @@ mod tests {
     use super::{
         ApplyingRecoveryState, BundleUseState, CheckOutcome, GithubRelease, InstallerAttempt,
         StagedUpdate, StagedUpdatePhase, UpdateCandidate, UpdateChannel, UpdateFailure,
-        UpdateState, UpdateStatus, acquire_app_runtime_lease_at,
+        UpdateManifest, UpdateState, UpdateStatus, acquire_app_runtime_lease_at,
         acquire_installer_runtime_lease_at, app_fingerprint, begin_staged_update_in_state,
         classify_applying_recovery, classify_bundle_use_output, clear_installer_attempt_in_state,
         clear_preparing_update_in_state, decide_check_outcome, decide_failed_update_check,
         discard_failed_update_locked, failed_update_to_replace, installer_attempt_from_state,
-        is_update_available, is_valid_update_id, load_update_state_locked, pick_release,
-        promote_staged_update_in_state, reconcile_update_state_locked,
-        record_installer_failure_in_state, safe_component, same_update, save_update_state_locked,
-        validate_download_url,
+        is_update_available, is_valid_update_id, load_update_state_locked, manifest_url,
+        manifest_version_text, pick_release, promote_staged_update_in_state,
+        reconcile_update_state_locked, record_installer_failure_in_state, release_label_from_url,
+        safe_component, same_update, save_update_state_locked, validate_download_url,
     };
     use std::path::PathBuf;
 
@@ -2397,6 +2486,31 @@ mod tests {
             pick_release(&releases, UpdateChannel::Dev).map(|c| c.version),
             Some("0.9.0-rc.4".into())
         );
+    }
+
+    #[test]
+    fn manifest_url_names_the_channel() {
+        let template = "https://example.test/update.{channel}.json";
+        assert_eq!(
+            manifest_url(template, UpdateChannel::Dev),
+            "https://example.test/update.dev.json"
+        );
+        assert_eq!(
+            manifest_url(template, UpdateChannel::Prod),
+            "https://example.test/update.prod.json"
+        );
+    }
+
+    #[test]
+    fn manifest_accepts_numeric_placeholder_version() {
+        let manifest: UpdateManifest =
+            serde_json::from_str(r#"{"version":0,"url":"https://example.test/releases/35039"}"#)
+                .unwrap();
+        assert_eq!(
+            manifest_version_text(manifest.version.as_ref().unwrap()),
+            Some("0".into())
+        );
+        assert_eq!(release_label_from_url(&manifest.url), "35039");
     }
 
     #[test]

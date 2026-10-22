@@ -1873,9 +1873,7 @@ impl Workspace {
                                             PopupMenuItem::new("帮助文档")
                                                 .icon(IconName::BookOpen)
                                                 .on_click(|_ev, _window, cx| {
-                                                    cx.open_url(
-                                                        "https://smelt.onoo.io/",
-                                                    );
+                                                    cx.open_url(crate::settings::DOCS_URL);
                                                 }),
                                         )
                                         .item(

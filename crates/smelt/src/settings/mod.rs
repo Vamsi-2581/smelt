@@ -42,7 +42,22 @@ pub(crate) use nav::{
 pub(super) use remote::*;
 
 /// 「反馈问题」入口统一跳转的链接。应用菜单 / 侧栏用户菜单 / 设置页三处共用。
-pub const FEEDBACK_URL: &str = "https://github.com/smelt-ai/smelt/issues/new/choose";
+/// 打包时设 `SMELT_FEEDBACK_URL` 换成自己的反馈渠道。
+pub const FEEDBACK_URL: &str = build_time_url(
+    option_env!("SMELT_FEEDBACK_URL"),
+    "https://github.com/smelt-ai/smelt/issues/new/choose",
+);
+
+/// 「帮助文档」入口的链接，侧栏用户菜单和设置页共用。打包时设 `SMELT_DOCS_URL` 换掉。
+pub const DOCS_URL: &str = build_time_url(option_env!("SMELT_DOCS_URL"), "https://smelt.onoo.io/");
+
+/// 打包时没设或设成空串，都用开源版的默认地址。
+const fn build_time_url(value: Option<&'static str>, default: &'static str) -> &'static str {
+    match value {
+        Some(url) if !url.is_empty() => url,
+        _ => default,
+    }
+}
 
 #[cfg(test)]
 pub(super) use remote::qr_png_for_url;
@@ -205,7 +220,8 @@ pub fn apply_window_opacity(_window: &Window, _opacity: f32) {}
 
 /// 在线更新配置（全局单例，存 SQLite KV）。
 ///
-/// 通道只决定认不认 GitHub 上的预发布；更新流程本身仍由 updater 统一处理。
+/// 通道只决定更新源给哪一路包（GitHub 上认不认预发布，或打包时指定的哪份清单）；
+/// 更新流程本身仍由 updater 统一处理。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UpdateSettings {
     #[serde(default)]
