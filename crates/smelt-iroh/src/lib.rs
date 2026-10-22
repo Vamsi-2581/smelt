@@ -20,7 +20,8 @@ mod system_dns;
 /// 客户端解析配对串、拼拨号地址要用到，免得各自直接依赖 iroh。
 pub use iroh::EndpointId;
 
-/// 用户配置的 relay。Smelt 不提供默认值，避免在未告知用户时访问第三方基础设施。
+/// 用户配置的自建 relay。没配时用 n0 的公共 relay 和 DNS 地址发现（见
+/// [`runtime::bind_runtime_endpoint`]）；配了就只用它，也不向 n0 发布地址。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RelaySettings {
     pub url: RelayUrl,
