@@ -19,6 +19,8 @@ pub struct PiMcpPreset {
     pub timeout_secs: Option<u64>,
     /// 要配套安装的 Chrome 扩展的应用商店页，能力库里给个按钮直接打开。
     pub extension_url: Option<&'static str>,
+    /// 装了远程桌面的机器上换用这一套（同一个 `id`、`name`），见 [`Self::for_machine`]。
+    pub on_remote_desktop: Option<&'static PiMcpPreset>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +57,7 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
         exposure: Some("direct"),
         timeout_secs: None,
         extension_url: None,
+        on_remote_desktop: None,
     },
     // REA（github.com/morluto/rea）本机逆向分析。用 Smelt 自带的 Bun 跑它的 package
     // runner（`bun x`），不要求用户装 Node、也不全局安装：包只进 Bun 的下载缓存。
@@ -73,6 +76,7 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
         exposure: None,
         timeout_secs: Some(120),
         extension_url: None,
+        on_remote_desktop: None,
     },
     // Agent360 Browser MCP（github.com/Agent360dk/browser-mcp）驱动用户已登录的 Chrome，
     // 另需装它的 Chrome 扩展。和 REA 一样用自带 Bun 的 `bun x --bun`、钉死版本；入口
@@ -94,8 +98,10 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
         extension_url: Some(
             "https://chromewebstore.google.com/detail/agent360-browser-mcp/jdehgalffmffhfhmmhaokfbfnafnmgcl",
         ),
+        on_remote_desktop: None,
     },
-    // Playwright MCP（github.com/microsoft/playwright-mcp）用 `--extension` 接用户正在用的
+    // Playwright MCP（github.com/microsoft/playwright-mcp）。同一个包，按这台机器有没有
+    // 远程桌面换接法（见 `on_remote_desktop`）：没有就用 `--extension` 接用户正在用的
     // Chrome，沿用已有的登录状态，需装它的 Chrome 扩展。不加这个参数它会另开一份按项目目录
     // 区分的浏览器配置，换个项目就得重新登录。连接时扩展会弹页面让用户确认；跳过确认要的
     // token 每人不同，不写进预设。同样走自带 Bun 的 `bun x --bun`、钉死版本（上游文档写的
@@ -115,33 +121,44 @@ pub const PI_MCP_PRESETS: &[PiMcpPreset] = &[
         extension_url: Some(
             "https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm",
         ),
-    },
-    // 远程桌面（设计文档 D9）里常驻的 Chrome：调试端口只绑本机 9222，Playwright MCP 用
-    // `--cdp-endpoint` 直接接上，不要扩展、也没有连接确认。人在远程桌面里看的是同一个
-    // 浏览器，遇到验证码、付款随时接管。`install.sh --with-desktop` 装好桌面后自动加上，
-    // 没装远程桌面的机器上连不上。版本和上面的 `playwright` 一致。
-    PiMcpPreset {
-        id: "desktop-chrome",
-        name: "远程桌面的 Chrome",
-        summary: "操作这台机器远程桌面里常驻的 Chrome，沿用里面已登录的状态；遇到验证码、付款，人在远程桌面里接管。要先用 install.sh --with-desktop 装好远程桌面。用 Smelt 自带的 Bun 运行。",
-        description: "Browser automation with Playwright in the always-on Chrome on this machine's remote desktop, keeping its signed-in sessions: navigate, click, type, fill forms, read accessibility snapshots and take screenshots. A person can watch and take over the same browser from the remote desktop",
-        transport: PiMcpPresetTransport::Stdio {
-            command: crate::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH,
-            args: &[
-                "x",
-                "--bun",
-                "@playwright/mcp@0.0.83",
-                "--cdp-endpoint",
-                "http://127.0.0.1:9222",
-            ],
-        },
-        exposure: Some("deferred"),
-        timeout_secs: None,
-        extension_url: None,
+        on_remote_desktop: Some(&PLAYWRIGHT_ON_REMOTE_DESKTOP),
     },
 ];
 
+// 远程桌面（设计文档 D9）里常驻的 Chrome：调试端口只绑本机 9222，Playwright MCP 用
+// `--cdp-endpoint` 直接接上，不要扩展、也没有连接确认。人在远程桌面里看的是同一个
+// 浏览器，遇到验证码、付款随时接管。`install.sh --with-desktop` 装好桌面后自动加上。
+const PLAYWRIGHT_ON_REMOTE_DESKTOP: PiMcpPreset = PiMcpPreset {
+    id: "playwright",
+    name: "Playwright 浏览器",
+    summary: "操作这台机器远程桌面里常驻的 Chrome，沿用里面已登录的状态：打开网页、点击填表、读页面结构、截图；遇到验证码、付款，人在远程桌面里接管。用 Smelt 自带的 Bun 运行。",
+    description: "Browser automation with Playwright in the always-on Chrome on this machine's remote desktop, keeping its signed-in sessions: navigate, click, type, fill forms, read accessibility snapshots and take screenshots. A person can watch and take over the same browser from the remote desktop",
+    transport: PiMcpPresetTransport::Stdio {
+        command: crate::agent_paths::MANAGED_BUN_LAUNCHER_HOME_PATH,
+        args: &[
+            "x",
+            "--bun",
+            "@playwright/mcp@0.0.83",
+            "--cdp-endpoint",
+            "http://127.0.0.1:9222",
+        ],
+    },
+    exposure: Some("deferred"),
+    timeout_secs: None,
+    extension_url: None,
+    on_remote_desktop: None,
+};
+
 impl PiMcpPreset {
+    /// 这台机器上实际用的那一套。`remote_desktop` 由运行时那台机器判断
+    /// （`smelt_paths::remote_desktop_installed`），客户端用握手里报上来的同一个结果。
+    pub fn for_machine(&'static self, remote_desktop: bool) -> &'static PiMcpPreset {
+        match self.on_remote_desktop {
+            Some(variant) if remote_desktop => variant,
+            _ => self,
+        }
+    }
+
     pub fn config(&self) -> Value {
         let mut entry = Map::new();
         match self.transport {

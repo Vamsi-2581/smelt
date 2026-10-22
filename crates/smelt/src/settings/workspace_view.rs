@@ -58,6 +58,10 @@ impl Workspace {
                 .pi_library_config()
                 .map(|config| config.mcp_servers.clone())
                 .unwrap_or_else(|| Err(self.pi_library_pending_text())),
+            pi_mcp_remote_desktop: crate::runtimes::runtime_has_desktop(
+                self.pi_library_runtime(),
+                cx,
+            ),
             pi_mcp_login: self.pi_mcp_login.clone(),
             pi_mcp_pending_remove: self.pi_mcp_pending_remove.clone(),
             pi_mcp_error: self.pi_mcp_error.clone(),

@@ -175,12 +175,19 @@ fn normalize_url(url: &str) -> String {
     url::Url::parse(url.trim()).map_or_else(|_| url.trim().to_string(), |url| url.to_string())
 }
 
+/// 写哪一套由这台机器决定：装了远程桌面的，浏览器类预设接那里常驻的 Chrome。
 pub fn add_pi_mcp_preset(id: &str) -> Result<(), String> {
-    add_pi_mcp_preset_at(&pi_agent_dir(), id)
+    add_pi_mcp_preset_at(&pi_agent_dir(), id, smelt_paths::remote_desktop_installed())
 }
 
-pub fn add_pi_mcp_preset_at(agent_dir: &Path, id: &str) -> Result<(), String> {
-    let preset = find_preset(id).ok_or_else(|| format!("没有内置的 MCP 服务器 {id}"))?;
+pub fn add_pi_mcp_preset_at(
+    agent_dir: &Path,
+    id: &str,
+    remote_desktop: bool,
+) -> Result<(), String> {
+    let preset = find_preset(id)
+        .ok_or_else(|| format!("没有内置的 MCP 服务器 {id}"))?
+        .for_machine(remote_desktop);
     edit_servers(agent_dir, |servers| {
         if servers.contains_key(preset.id) {
             return Err(format!("mcp.json 里已经有名为 {} 的服务器", preset.id));
@@ -292,7 +299,7 @@ mod tests {
     #[test]
     fn presets_run_on_the_managed_bun() {
         let dir = tempfile::tempdir().unwrap();
-        add_pi_mcp_preset_at(dir.path(), "desktop-chrome").unwrap();
+        add_pi_mcp_preset_at(dir.path(), "playwright", true).unwrap();
         let servers = load_pi_mcp_servers_at(dir.path()).unwrap();
         assert!(uses_managed_bun(&servers));
 
@@ -385,7 +392,7 @@ mod tests {
         )
         .unwrap();
 
-        add_pi_mcp_preset_at(&dir, "figma").unwrap();
+        add_pi_mcp_preset_at(&dir, "figma", false).unwrap();
 
         let doc = read(&dir);
         assert_eq!(doc["autoEnableCodemode"], Value::Bool(false));
@@ -395,7 +402,7 @@ mod tests {
         assert_eq!(figma["oauth"]["clientName"], "Claude Code");
         assert_eq!(figma["exposure"], "direct");
         assert!(
-            add_pi_mcp_preset_at(&dir, "figma").is_err(),
+            add_pi_mcp_preset_at(&dir, "figma", false).is_err(),
             "重复添加会覆盖用户改过的条目，必须拒绝"
         );
         std::fs::remove_dir_all(dir).ok();
@@ -404,7 +411,7 @@ mod tests {
     #[test]
     fn adding_rea_writes_a_pinned_stdio_entry() {
         let dir = temp_dir();
-        add_pi_mcp_preset_at(&dir, "rea").unwrap();
+        add_pi_mcp_preset_at(&dir, "rea", false).unwrap();
 
         let rea = &read(&dir)["mcpServers"]["rea"];
         assert_eq!(rea["command"], "~/.smelt/runtime/bin/bun");
@@ -438,7 +445,7 @@ mod tests {
     #[test]
     fn adding_agent360_browser_writes_a_pinned_deferred_stdio_entry() {
         let dir = temp_dir();
-        add_pi_mcp_preset_at(&dir, "browser-mcp").unwrap();
+        add_pi_mcp_preset_at(&dir, "browser-mcp", false).unwrap();
 
         let browser = &read(&dir)["mcpServers"]["browser-mcp"];
         assert_eq!(browser["command"], "~/.smelt/runtime/bin/bun");
@@ -461,7 +468,7 @@ mod tests {
     #[test]
     fn adding_playwright_writes_a_pinned_deferred_stdio_entry() {
         let dir = temp_dir();
-        add_pi_mcp_preset_at(&dir, "playwright").unwrap();
+        add_pi_mcp_preset_at(&dir, "playwright", false).unwrap();
 
         let playwright = &read(&dir)["mcpServers"]["playwright"];
         assert_eq!(playwright["command"], "~/.smelt/runtime/bin/bun");
@@ -484,11 +491,11 @@ mod tests {
     }
 
     #[test]
-    fn adding_desktop_chrome_connects_to_the_local_debugging_port() {
+    fn playwright_on_a_remote_desktop_connects_to_the_local_debugging_port() {
         let dir = temp_dir();
-        add_pi_mcp_preset_at(&dir, "desktop-chrome").unwrap();
+        add_pi_mcp_preset_at(&dir, "playwright", true).unwrap();
 
-        let chrome = &read(&dir)["mcpServers"]["desktop-chrome"];
+        let chrome = &read(&dir)["mcpServers"]["playwright"];
         assert_eq!(chrome["command"], "~/.smelt/runtime/bin/bun");
         assert_eq!(
             chrome["args"],
@@ -502,14 +509,21 @@ mod tests {
             "接 smelt-chrome 只绑本机的调试端口，和人在远程桌面里看的是同一个 Chrome"
         );
         assert_eq!(chrome["exposure"], "deferred");
-        assert!(
-            find_preset("desktop-chrome")
-                .unwrap()
-                .extension_url
-                .is_none(),
-            "走调试端口，不需要扩展"
-        );
+        let preset = find_preset("playwright").unwrap().for_machine(true);
+        assert_eq!(preset.id, "playwright", "换接法不换服务器名");
+        assert!(preset.extension_url.is_none(), "走调试端口，不需要扩展");
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// 只有浏览器类预设分机器；其余的在远程桌面上照原样写。
+    #[test]
+    fn presets_without_a_remote_desktop_variant_ignore_the_machine() {
+        for preset in PI_MCP_PRESETS {
+            if preset.on_remote_desktop.is_none() {
+                assert_eq!(preset.for_machine(true), preset, "{}", preset.id);
+            }
+            assert_eq!(preset.for_machine(false), preset, "{}", preset.id);
+        }
     }
 
     #[test]
@@ -531,7 +545,7 @@ mod tests {
     #[test]
     fn disabling_writes_false_and_enabling_drops_the_key() {
         let dir = temp_dir();
-        add_pi_mcp_preset_at(&dir, "figma").unwrap();
+        add_pi_mcp_preset_at(&dir, "figma", false).unwrap();
 
         set_pi_mcp_server_enabled_at(&dir, "figma", false).unwrap();
         assert_eq!(

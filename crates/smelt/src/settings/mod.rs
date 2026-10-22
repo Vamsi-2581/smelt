@@ -1249,6 +1249,8 @@ struct SettingsRenderSnapshot {
     pi_auth_show_all: bool,
     /// `~/.pi/agent/mcp.json` 里的服务器。文件很小，每次刷新快照时重读，外部改动也能跟上。
     pi_mcp_servers: Result<Vec<smelt_model::pi_mcp::PiMcpServer>, String>,
+    /// 能力库那台机器装了远程桌面：浏览器类预设在那里接远程桌面里的 Chrome。
+    pi_mcp_remote_desktop: bool,
     pi_mcp_login: Option<String>,
     pi_mcp_pending_remove: Option<String>,
     pi_mcp_error: Option<String>,

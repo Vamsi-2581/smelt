@@ -30,6 +30,13 @@ pub fn smelt_home() -> Option<PathBuf> {
     )
 }
 
+/// 装没装远程桌面：`install.sh --with-desktop` 会把虚拟屏幕的启动脚本放进
+/// `~/.smelt/desktop/bin`。只认 Linux，macOS 上的本机运行时没有这套。
+pub fn remote_desktop_installed() -> bool {
+    cfg!(target_os = "linux")
+        && smelt_home().is_some_and(|home| home.join("desktop/bin/display").is_file())
+}
+
 /// 纯函数形式，便于用例覆盖分支而不去动进程级环境变量。
 fn resolve(
     explicit: Option<OsString>,

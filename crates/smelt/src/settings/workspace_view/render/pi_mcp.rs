@@ -28,7 +28,12 @@ pub(super) fn pi_mcp_page(
                 .px_6()
                 .py_6()
                 .gap_8()
-                .child(presets_section(&entity, servers, palette))
+                .child(presets_section(
+                    &entity,
+                    servers,
+                    snapshot.pi_mcp_remote_desktop,
+                    palette,
+                ))
                 .child(servers_section(&entity, snapshot, servers, palette))
                 .child(footer(&entity, &snapshot.pi_paths.mcp, palette)),
         )
@@ -60,9 +65,16 @@ fn row_detail(text: impl Into<SharedString>, palette: Palette) -> Div {
         .child(text.into())
 }
 
-fn presets_section(entity: &Entity<Workspace>, servers: &[PiMcpServer], palette: Palette) -> Div {
+fn presets_section(
+    entity: &Entity<Workspace>,
+    servers: &[PiMcpServer],
+    remote_desktop: bool,
+    palette: Palette,
+) -> Div {
     let mut list = card(palette);
     for (index, preset) in PI_MCP_PRESETS.iter().enumerate() {
+        // 添加时运行时按同一个判断写入，这里显示的就是会写进去的那一套。
+        let preset = preset.for_machine(remote_desktop);
         let added = servers.iter().any(|server| server.name == preset.id);
         list = list.child(row(index, palette).child(preset_row(entity, preset, added, palette)));
     }

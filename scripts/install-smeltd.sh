@@ -464,7 +464,7 @@ user_phase() {
 
   wait_for_runtime
   if ((WITH_DESKTOP)); then
-    "$BIN/smeltd" mcp add desktop-chrome
+    "$BIN/smeltd" mcp add playwright
   fi
   # 配对串要带上中继，所以先设中继再配对。
   if [[ -n "$RELAY" ]]; then
