@@ -9,7 +9,6 @@
 //! - Copilot: `~/.copilot/session-state/<session_id>/`（`workspace.yaml` + `events.jsonl`）
 //! - Pi: `~/.pi/agent/sessions/**/<session>.jsonl`（可由 `PI_CODING_AGENT_DIR` /
 //!   `PI_CODING_AGENT_SESSION_DIR` 或 `settings.json` 的 `sessionDir` 覆盖）
-//! - dsh: 原生 profile 的 session persistence（JSONL 后端可提供本地预览）
 
 pub use smelt_model::session_history::*;
 
@@ -33,27 +32,13 @@ fn parse_rfc3339(s: &str) -> Option<DateTime<Utc>> {
 
 type ListSessions = fn(&str, Option<&str>) -> Vec<SessionSummary>;
 type LoadSessionDetail = fn(&Path) -> Option<SessionDetail>;
-type AcpIndexPath = fn(Option<&str>, &str) -> PathBuf;
 
-/// Provider 可选的 ACP `session/list` 索引能力。能力对象同时持有合成路径策略，
-/// 调用方不需要先检查布尔值、再假设路径生成器必然存在。
-pub(crate) struct AcpSessionIndex {
-    path: AcpIndexPath,
-}
-
-impl AcpSessionIndex {
-    pub(crate) fn path(&self, profile_id: Option<&str>, resume_id: &str) -> PathBuf {
-        (self.path)(profile_id, resume_id)
-    }
-}
-
-/// 一种 Agent 的历史数据 Provider。列表、详情和可选的 ACP live index 在同一个
-/// 注册点声明，调用方只负责传上下文，不再按 Agent 身份分发到具体解析器。
+/// 一种 Agent 的历史数据 Provider。列表和详情在同一个注册点声明，调用方只负责
+/// 传上下文，不再按 Agent 身份分发到具体解析器。
 pub(crate) struct SessionHistoryProvider {
     pub agent: HistorySourceKind,
     list_sessions: ListSessions,
     load_detail: LoadSessionDetail,
-    acp_session_index: Option<AcpSessionIndex>,
 }
 
 impl SessionHistoryProvider {
@@ -68,18 +53,6 @@ impl SessionHistoryProvider {
     fn load_detail(&self, path: &Path) -> Option<SessionDetail> {
         (self.load_detail)(path)
     }
-
-    pub(crate) fn acp_session_index(&self) -> Option<&AcpSessionIndex> {
-        self.acp_session_index.as_ref()
-    }
-}
-
-fn dsh_acp_index_path(profile_id: Option<&str>, resume_id: &str) -> PathBuf {
-    crate::agent_kind::dsh_sessions_root()
-        .unwrap_or_else(std::env::temp_dir)
-        .join(".acp-index")
-        .join(profile_id.unwrap_or("default"))
-        .join(resume_id.replace(['/', '\\'], "_"))
 }
 
 /// 历史 Provider 注册表。顺序必须与 `HistorySourceKind::ALL` 一致；完整性测试守住
@@ -92,64 +65,47 @@ pub(crate) static SESSION_HISTORY_PROVIDERS: &[SessionHistoryProvider] = &[
         agent: HistorySourceKind::Conversation(ConversationAgentKind::Claude),
         list_sessions,
         load_detail: load_session_detail,
-        acp_session_index: None,
     },
     SessionHistoryProvider {
         agent: HistorySourceKind::Conversation(ConversationAgentKind::Copilot),
         list_sessions: list_copilot_sessions,
         load_detail: load_copilot_session_detail,
-        acp_session_index: None,
     },
     SessionHistoryProvider {
         agent: HistorySourceKind::Conversation(ConversationAgentKind::Codex),
         list_sessions: list_codex_sessions,
         load_detail: load_codex_session_detail,
-        acp_session_index: None,
     },
     SessionHistoryProvider {
         agent: HistorySourceKind::Conversation(ConversationAgentKind::Grok),
         list_sessions: list_grok_sessions,
         load_detail: load_grok_session_detail,
-        acp_session_index: None,
     },
     SessionHistoryProvider {
         agent: HistorySourceKind::Conversation(ConversationAgentKind::Cursor),
         list_sessions: list_cursor_sessions,
         load_detail: load_cursor_session_detail,
-        acp_session_index: None,
     },
     SessionHistoryProvider {
         agent: HistorySourceKind::Conversation(ConversationAgentKind::OpenCode),
         list_sessions: list_opencode_sessions,
         load_detail: load_opencode_session_detail,
-        acp_session_index: None,
     },
     SessionHistoryProvider {
         agent: HistorySourceKind::Conversation(ConversationAgentKind::Kiro),
         list_sessions: list_kiro_sessions,
         load_detail: load_kiro_session_detail,
-        acp_session_index: None,
     },
     SessionHistoryProvider {
         agent: HistorySourceKind::Conversation(ConversationAgentKind::Pi),
         list_sessions: list_pi_sessions,
         load_detail: load_pi_session_detail,
-        acp_session_index: None,
-    },
-    SessionHistoryProvider {
-        agent: HistorySourceKind::Conversation(ConversationAgentKind::Dsh),
-        list_sessions: list_dsh_sessions,
-        load_detail: load_dsh_session_detail,
-        acp_session_index: Some(AcpSessionIndex {
-            path: dsh_acp_index_path,
-        }),
     },
     // 只有 TUI、没有 ACP，但会话实打实落在 `~/.gemini/antigravity-cli/`。
     SessionHistoryProvider {
         agent: HistorySourceKind::TerminalOnly(TerminalAgentKind::Antigravity),
         list_sessions: list_antigravity_sessions,
         load_detail: load_antigravity_session_detail,
-        acp_session_index: None,
     },
 ];
 
@@ -1766,400 +1722,6 @@ fn parse_pi_session_detail(text: &str) -> Option<SessionDetail> {
     Some(SessionDetail { turns, model })
 }
 
-// ===================== 交接 =====================
-
-// ---- DeepSeek Harness (dsh) ------------------------------------------------
-
-/// dsh 的 JSONL 持久化把项目目录名编码成 `--<slug>--`：路径分隔符（`/` `\` `:`）
-/// 连续压成一个 `-`，`[A-Za-z0-9._-]` 之外的字符转义成 `~XXXX`（大写十六进制、
-/// 补足四位），开头的 `-` 全部去掉，空串退化成 `root`，再截断到 251 字节。
-///
-/// 这里是重实现而不是扫目录反查：会话根下同一个 cwd 只有一个项目目录，直接算出
-/// 名字比列一层目录再逐个解码便宜，也不会被同级的无关目录干扰。规则跟着上游
-/// `packages/session/session-persistence-jsonl/src/format.ts` 的 `projectKey`，
-/// 是**存档格式契约**，改了等于认不出既有历史。
-fn dsh_project_key(cwd: &str) -> String {
-    let mut readable = String::new();
-    let mut separator_run = false;
-    for ch in cwd.chars() {
-        if ch == '/' || ch == '\\' || ch == ':' {
-            if !separator_run {
-                readable.push('-');
-            }
-            separator_run = true;
-        } else if ch != '~' && (ch.is_ascii_alphanumeric() || ch == '.' || ch == '_' || ch == '-') {
-            readable.push(ch);
-            separator_run = false;
-        } else {
-            // 上游用 `charCodeAt`，也就是 UTF-16 码元；ASCII 之外必须按码元逐个
-            // 转义，否则中文路径算出来的目录名对不上。
-            let mut buf = [0u16; 2];
-            for unit in ch.encode_utf16(&mut buf) {
-                readable.push_str(&format!("~{:04X}", unit));
-            }
-            separator_run = false;
-        }
-    }
-    let slug = readable.trim_start_matches('-');
-    let slug = if slug.is_empty() { "root" } else { slug };
-    let slug: String = slug.chars().take(251).collect();
-    format!("--{slug}--")
-}
-
-/// 会话目录名用同一套 `~XXXX` 转义；解回 session id 才能拿去发 `session/load`。
-/// 解不出（畸形转义）就返回 None，跳过这一条而不是猜。
-fn dsh_decode_segment(segment: &str) -> Option<String> {
-    if !segment.contains('~') {
-        return Some(segment.to_string());
-    }
-    let mut units: Vec<u16> = Vec::new();
-    let bytes = segment.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'~' {
-            let hex = segment.get(i + 1..i + 5)?;
-            units.push(u16::from_str_radix(hex, 16).ok()?);
-            i += 5;
-        } else {
-            // 未转义的一定是 ASCII 安全字符，按单字节推进不会切断多字节序列。
-            units.push(bytes[i] as u16);
-            i += 1;
-        }
-    }
-    String::from_utf16(&units).ok()
-}
-
-/// dsh 的默认会话根由原生 DSH_HOME 决定；`override_dir` 给显式 persistence
-/// 根使用，原样当作根。
-fn dsh_sessions_root(cwd: &str, override_dir: Option<&str>) -> PathBuf {
-    match override_dir {
-        Some(dir) => PathBuf::from(dir),
-        None => crate::agent_kind::dsh_sessions_root()
-            .unwrap_or_else(|| Path::new(cwd).join(".sessions")),
-    }
-}
-
-/// 新版 dsh 事件把消息内容平铺在 `data` 下（顶层只有 type/seq/time），老档
-/// 直接平铺在顶层，两处都读。
-fn dsh_event_data(event: &Value) -> &Value {
-    event.get("data").unwrap_or(event)
-}
-
-/// 事件时间戳（毫秒）：新版用 `time`，老档用 `timestamp`。
-fn dsh_event_timestamp(event: &Value) -> Option<i64> {
-    event
-        .get("time")
-        .or_else(|| event.get("timestamp"))
-        .and_then(Value::as_i64)
-}
-
-/// 真实用户消息才算一轮；agent 注入的 system-reminder / 运行时上下文等
-/// `user/message` 也带 `source.kind`，不该刷进历史。老档没有 `source` 视为真。
-fn dsh_is_real_user_message(event: &Value) -> bool {
-    match dsh_event_data(event)
-        .get("source")
-        .and_then(|s| s.get("kind"))
-        .and_then(Value::as_str)
-    {
-        Some("user") | None => true,
-        Some(_) => false,
-    }
-}
-
-/// 列出某个工作目录下的 dsh 会话。
-///
-pub fn list_dsh_sessions(cwd: &str, override_dir: Option<&str>) -> Vec<SessionSummary> {
-    let project = dsh_sessions_root(cwd, override_dir).join(dsh_project_key(cwd));
-    let mut out = std::fs::read_dir(project)
-        .into_iter()
-        .flatten()
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let session_dir = entry.path();
-            let (log_path, text) = read_local_dsh_log(&session_dir)?;
-            summarize_dsh_session(&session_dir, log_path, &text, cwd)
-        })
-        .collect::<Vec<_>>();
-    out.sort_by_key(|session| Reverse(session.last_active_at));
-    out
-}
-
-pub fn list_dsh_sessions_with(
-    fs: &dyn FileSystem,
-    cwd: &str,
-    override_dir: Option<&str>,
-) -> Vec<SessionSummary> {
-    let project = dsh_sessions_root(cwd, override_dir).join(dsh_project_key(cwd));
-    let mut out = Vec::new();
-    for session_dir in read_dir_ok(fs, &project) {
-        if let Some(summary) = summarize_dsh_session_with(fs, &session_dir, cwd) {
-            out.push(summary);
-        }
-    }
-    out.sort_by_key(|s| Reverse(s.last_active_at));
-    out
-}
-
-fn summarize_dsh_session_with(
-    fs: &dyn FileSystem,
-    session_dir: &Path,
-    want_cwd: &str,
-) -> Option<SessionSummary> {
-    let log_path = session_dir.join("session.jsonl");
-    let text = fs.read_to_string(&log_path).ok()?;
-    summarize_dsh_session(session_dir, log_path, &text, want_cwd)
-}
-
-fn read_local_dsh_log(session_dir: &Path) -> Option<(PathBuf, String)> {
-    let plain = session_dir.join("session.jsonl");
-    if let Ok(text) = std::fs::read_to_string(&plain) {
-        return Some((plain, text));
-    }
-    let compressed = session_dir.join("session.jsonl.zstd");
-    let bytes = std::fs::read(&compressed).ok()?;
-    let decoded = zstd::stream::decode_all(bytes.as_slice()).ok()?;
-    String::from_utf8(decoded)
-        .ok()
-        .map(|text| (compressed, text))
-}
-
-fn summarize_dsh_session(
-    session_dir: &Path,
-    log_path: PathBuf,
-    text: &str,
-    want_cwd: &str,
-) -> Option<SessionSummary> {
-    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
-    let header: Value = serde_json::from_str(lines.next()?).ok()?;
-    if header.get("type").and_then(|v| v.as_str()) != Some("session") {
-        return None;
-    }
-    // 头里带 cwd 就以它为准；老档没有这个字段时退回目录归属，反正项目目录就是
-    // 按 cwd 算出来的。
-    if let Some(logged) = header.get("cwd").and_then(|v| v.as_str())
-        && logged != want_cwd
-    {
-        return None;
-    }
-    let resume_id = header
-        .get("id")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .or_else(|| {
-            session_dir
-                .file_name()
-                .and_then(|s| s.to_str())
-                .and_then(dsh_decode_segment)
-        })?;
-    let started_at = header
-        .get("createdAt")
-        .and_then(Value::as_i64)
-        .and_then(DateTime::from_timestamp_millis);
-
-    let mut title = String::new();
-    let mut message_count = 0usize;
-    let mut total_tokens = 0u64;
-    let mut last_active_at = started_at;
-    for line in lines {
-        let Ok(event): Result<Value, _> = serde_json::from_str(line) else {
-            continue; // 半行（进程被杀在写盘中间）不该让整份会话消失
-        };
-        if let Some(ms) = dsh_event_timestamp(&event)
-            && let Some(at) = DateTime::from_timestamp_millis(ms)
-        {
-            last_active_at = Some(at);
-        }
-        match event.get("type").and_then(|v| v.as_str()) {
-            Some("user/message") if dsh_is_real_user_message(&event) => {
-                message_count += 1;
-                if title.is_empty() {
-                    title = dsh_message_text(&event);
-                }
-            }
-            Some("assistant/message") => {
-                message_count += 1;
-                total_tokens += dsh_usage_total(&event);
-            }
-            Some("session/title") => {
-                if let Some(t) = dsh_event_data(&event).get("title").and_then(Value::as_str)
-                    && !t.trim().is_empty()
-                {
-                    title = t.to_string();
-                }
-            }
-            _ => {}
-        }
-    }
-    // 空会话（开了没说话）退回 session id，和 Grok 那版一个口径——列表里
-    // 一片同名的「未命名会话」区分不开，id 至少还能对上。
-    let agent_title = if title.trim().is_empty() {
-        resume_id.clone()
-    } else {
-        truncate(title.trim(), 80)
-    };
-    Some(SessionSummary {
-        path: log_path,
-        title: agent_title.clone(),
-        agent_title,
-        custom_title: None,
-        resume_id,
-        started_at,
-        last_active_at,
-        message_count,
-        total_tokens,
-    })
-}
-
-/// 读一份 dsh 会话的正文，用于历史预览与会话交接。
-///
-/// `path` 是 `list_dsh_sessions` 给出的 `session.jsonl` 本身（不是目录），跟
-/// Claude 那版一样，其他几家给的是目录——形状不统一是既有约定，`SessionSummary`
-/// 的 `path` 注释里已经写明。
-pub fn load_dsh_session_detail(path: &Path) -> Option<SessionDetail> {
-    let text = if path.extension().and_then(|extension| extension.to_str()) == Some("zstd") {
-        let bytes = std::fs::read(path).ok()?;
-        String::from_utf8(zstd::stream::decode_all(bytes.as_slice()).ok()?).ok()?
-    } else {
-        std::fs::read_to_string(path).ok()?
-    };
-    parse_dsh_session_detail(&text)
-}
-
-pub fn load_dsh_session_detail_with(fs: &dyn FileSystem, path: &Path) -> Option<SessionDetail> {
-    let text = fs.read_to_string(path).ok()?;
-    parse_dsh_session_detail(&text)
-}
-
-fn parse_dsh_session_detail(text: &str) -> Option<SessionDetail> {
-    let mut turns: Vec<Turn> = Vec::new();
-    let mut model: Option<String> = None;
-    // 一轮里的工具调用要挂到"上一条 assistant 文本"上，和其他几家的口径一致；
-    // dsh 的 `tool/call` 是独立事件，不是消息里的块。
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(row) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let timestamp = dsh_event_timestamp(&row).and_then(DateTime::from_timestamp_millis);
-        match row.get("type").and_then(|v| v.as_str()) {
-            Some("user/message") => {
-                // 合成注入的 user/message 不展示，只留真实用户轮。
-                if !dsh_is_real_user_message(&row) {
-                    continue;
-                }
-                let text = dsh_message_text(&row);
-                if text.trim().is_empty() {
-                    continue;
-                }
-                turns.push(Turn::message(true, timestamp, text));
-            }
-            Some("assistant/message") => {
-                if model.is_none() {
-                    model = dsh_message_model(&row);
-                }
-                turns.push(Turn::message(false, timestamp, dsh_message_text(&row)));
-            }
-            Some("tool/call") => {
-                let Some((name, args)) = dsh_tool_call_parts(&row) else {
-                    continue;
-                };
-                // 工具挂到最近一条 assistant 轮；没有的话补一条空的，免得
-                // "这段动过哪些文件"因为文本为空就整段丢失。
-                if !turns.last().is_some_and(|turn| !turn.is_user) {
-                    turns.push(Turn::message(false, timestamp, String::new()));
-                }
-                let Some(turn) = turns.last_mut() else {
-                    continue;
-                };
-                turn.tools.push(name);
-                push_unique_paths(&mut turn.tool_paths, tool_path_args(&args));
-            }
-            _ => {}
-        }
-    }
-    turns.retain(|turn| !turn.text.trim().is_empty() || !turn.tools.is_empty());
-    Some(SessionDetail { turns, model })
-}
-
-/// 取一条 dsh 消息里的纯文本。新版正文在 `data.message.content`（assistant）或
-/// `data.content`（user），老档平铺在 `message.content`；`content` 是 ContentBlock
-/// 数组，图片/工具块没有 `text`，跳过即可。
-fn dsh_message_text(event: &Value) -> String {
-    let data = dsh_event_data(event);
-    let Some(blocks) = data
-        .get("message")
-        .and_then(|m| m.get("content"))
-        .and_then(Value::as_array)
-        .or_else(|| data.get("content").and_then(Value::as_array))
-    else {
-        return String::new();
-    };
-    let mut out = String::new();
-    for block in blocks {
-        if block.get("type").and_then(|v| v.as_str()) == Some("text")
-            && let Some(text) = block.get("text").and_then(|v| v.as_str())
-        {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(text);
-        }
-    }
-    out
-}
-
-/// 新版模型信息在 `data.message.source.model`，老档在 `message.model`/`model`。
-fn dsh_message_model(event: &Value) -> Option<String> {
-    let data = dsh_event_data(event);
-    data.get("message")
-        .and_then(|m| m.get("source"))
-        .and_then(|s| s.get("model"))
-        .or_else(|| data.get("message").and_then(|m| m.get("model")))
-        .or_else(|| data.get("model"))
-        .or_else(|| event.get("message").and_then(|m| m.get("model")))
-        .or_else(|| event.get("model"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-}
-
-/// 一条 `tool/call` 的名字与参数。新版参数是 JSON 字符串（`data.arguments`），
-/// 老档直接是对象（`args`）。
-fn dsh_tool_call_parts(event: &Value) -> Option<(String, Value)> {
-    let data = dsh_event_data(event);
-    let name = data.get("name").and_then(Value::as_str)?.to_string();
-    let args = if let Some(json) = data.get("arguments").and_then(Value::as_str) {
-        serde_json::from_str(json).unwrap_or(Value::Null)
-    } else {
-        data.get("args").cloned().unwrap_or(Value::Null)
-    };
-    Some((name, args))
-}
-
-/// dsh 的四个计数是**互斥**的（缓存命中单独记，不折进 `inputTokens`），
-/// 所以「本会话总量」是四项相加，不会重复计。
-fn dsh_usage_total(event: &Value) -> u64 {
-    let data = dsh_event_data(event);
-    let Some(usage) = data
-        .get("usage")
-        .or_else(|| event.get("usage"))
-        .or_else(|| data.get("message").and_then(|m| m.get("usage")))
-    else {
-        return 0;
-    };
-    [
-        "inputTokens",
-        "outputTokens",
-        "cacheReadTokens",
-        "cacheWriteTokens",
-    ]
-    .iter()
-    .filter_map(|key| usage.get(*key).and_then(Value::as_u64))
-    .sum()
-}
-
 // ===================== Antigravity =====================
 
 /// Antigravity 的时间戳形如 `2026-09-17 01:34:53.561993+00:00`——用空格分隔日期与
@@ -2287,218 +1849,9 @@ mod tests {
             HistorySourceKind::ALL.contains(&source),
             "应已登记为历史来源"
         );
-        assert!(source.is_bare_kind(), "应能作为裸种类出现在历史 tab");
         assert_eq!(source.acp(), None, "没有 ACP，不能当迁移目标");
         assert_eq!(source.terminal(), Some(TerminalAgentKind::Antigravity));
         assert_eq!(source.id(), "antigravity");
-        assert!(history_provider(source).acp_session_index().is_none());
-    }
-
-    #[test]
-    fn acp_live_index_is_a_provider_capability() {
-        for agent in ConversationAgentKind::ALL {
-            let index = history_provider(agent.into()).acp_session_index();
-            assert_eq!(
-                index.is_some(),
-                agent == ConversationAgentKind::Dsh,
-                "{}",
-                agent.id()
-            );
-            if let Some(index) = index {
-                let path = index.path(Some("team"), "session/a\\b");
-                assert_eq!(
-                    path.file_name().and_then(|name| name.to_str()),
-                    Some("session_a_b")
-                );
-            }
-        }
-    }
-
-    /// 项目目录名是存档格式契约（上游 `projectKey`）：分隔符压成一个 `-`、
-    /// 开头的 `-` 去掉、非安全字符按 UTF-16 码元转义。算错了等于认不出历史。
-    #[test]
-    fn dsh_project_key_follows_the_upstream_encoding() {
-        assert_eq!(
-            dsh_project_key("/workspace/project"),
-            "--workspace-project--"
-        );
-        // 连续分隔符只产生一个 `-`；Windows 盘符里的 `:` 同样算分隔符。
-        assert_eq!(dsh_project_key("C:\\a\\\\b"), "--C-a-b--");
-        // 全是分隔符时 slug 被 trim 空，退化成 root。
-        assert_eq!(dsh_project_key("/"), "--root--");
-        // 非 ASCII 按 UTF-16 码元逐个转义（"中" = U+4E2D）。
-        assert_eq!(dsh_project_key("/中"), "--~4E2D--");
-    }
-
-    #[test]
-    fn dsh_segment_decoding_round_trips_and_refuses_garbage() {
-        assert_eq!(dsh_decode_segment("plain-id"), Some("plain-id".to_string()));
-        assert_eq!(dsh_decode_segment("a~002Fb"), Some("a/b".to_string()));
-        // 截断的转义序列宁可整条跳过，也不要猜出一个错的 session id。
-        assert_eq!(dsh_decode_segment("a~00"), None);
-    }
-
-    #[test]
-    fn dsh_sessions_are_listed_and_read_from_the_workspace_log() {
-        let fs = MemFs::new();
-        let cwd = "/workspace/project";
-        let root = "/sessions-root";
-        let log = PathBuf::from(root)
-            .join(dsh_project_key(cwd))
-            .join("sess-1")
-            .join("session.jsonl");
-        write(
-            &fs,
-            &log,
-            concat!(
-                r#"{"type":"session","version":1,"id":"sess-1","createdAt":1700000000000,"cwd":"/workspace/project","delegationDepth":0}"#,
-                "\n",
-                r#"{"type":"user/message","timestamp":1700000001000,"message":{"content":[{"type":"text","text":"给我加个测试"}]}}"#,
-                "\n",
-                r#"{"type":"tool/call","timestamp":1700000002000,"name":"str_replace_editor","args":{"path":"/workspace/project/src/lib.rs"}}"#,
-                "\n",
-                r#"{"type":"assistant/message","timestamp":1700000003000,"message":{"content":[{"type":"text","text":"加好了"},{"type":"image","data":"x"}],"model":"deepseek-v4-pro"},"usage":{"inputTokens":10,"outputTokens":5,"cacheReadTokens":3,"cacheWriteTokens":2}}"#,
-                "\n",
-                "{ 这行是半截 JSON",
-            ),
-        );
-
-        let sessions = list_dsh_sessions_with(&fs, cwd, Some(root));
-        assert_eq!(sessions.len(), 1);
-        let summary = &sessions[0];
-        assert_eq!(summary.resume_id, "sess-1");
-        assert_eq!(summary.agent_title, "给我加个测试");
-        assert_eq!(summary.message_count, 2);
-        // 四个计数互斥，总量是相加：10 + 5 + 3 + 2。
-        assert_eq!(summary.total_tokens, 20);
-        assert_eq!(
-            summary.started_at,
-            DateTime::from_timestamp_millis(1700000000000)
-        );
-        // 半截 JSON 不该让最后一次活动时间倒退回头部时间。
-        assert_eq!(
-            summary.last_active_at,
-            DateTime::from_timestamp_millis(1700000003000)
-        );
-
-        let detail = load_dsh_session_detail_with(&fs, &log).unwrap();
-        assert_eq!(detail.model.as_deref(), Some("deepseek-v4-pro"));
-        assert_eq!(detail.turns.len(), 3);
-        assert!(detail.turns[0].is_user);
-        // `tool/call` 先于 assistant 文本到达，挂在自己那一轮上。
-        assert_eq!(detail.turns[1].tools, ["str_replace_editor"]);
-        assert_eq!(
-            detail.turns[1].tool_paths,
-            ["/workspace/project/src/lib.rs"]
-        );
-        assert_eq!(detail.turns[2].text, "加好了");
-    }
-
-    /// 原生 deepseek-harness 实际落盘的新格式：
-    /// 字段在 `data` 下、时间用 `time`、正文在 `data.message.content`，工具参数是
-    /// JSON 字符串。合成注入的 user/message 不该刷成历史轮次。
-    #[test]
-    fn dsh_sessions_parse_the_installed_runtime_format() {
-        let fs = MemFs::new();
-        let cwd = "/workspace/project";
-        let root = "/sessions-root";
-        let log = PathBuf::from(root)
-            .join(dsh_project_key(cwd))
-            .join("sess-9")
-            .join("session.jsonl");
-        write(
-            &fs,
-            &log,
-            concat!(
-                r#"{"type":"session","version":0,"id":"sess-9","createdAt":1700000000000,"cwd":"/workspace/project","delegationDepth":0}"#,
-                "\n",
-                r#"{"type":"session/title","seq":8,"time":1700000000900,"data":{"title":"你好","messageSeqs":[4]}}"#,
-                "\n",
-                r#"{"type":"user/message","seq":4,"time":1700000001000,"data":{"id":"u-1","role":"user","content":[{"type":"text","text":"你好"}],"source":{"kind":"user"}}}"#,
-                "\n",
-                r#"{"type":"user/message","seq":5,"time":1700000001000,"data":{"content":[{"type":"text","text":"<system-reminder>..."}],"source":{"kind":"agent-instructions"}}}"#,
-                "\n",
-                r#"{"type":"assistant/message","seq":9,"time":1700000003000,"data":{"turn":1,"step":1,"message":{"role":"assistant","content":[{"type":"reasoning","text":"think"},{"type":"text","text":"加好了"}],"source":{"kind":"model","model":"deepseek-v4-flash"}},"usage":{"inputTokens":10,"outputTokens":5}}}"#,
-                "\n",
-                r#"{"type":"tool/call","seq":10,"time":1700000004000,"data":{"turn":1,"step":1,"callId":"c1","name":"str_replace_editor","arguments":"{\"file_path\":\"/workspace/project/src/lib.rs\"}"}}"#,
-                "\n",
-                r#"{"type":"turn/end","seq":11,"time":1700000005000,"data":{"turn":1,"reason":{"kind":"completed"}}}"#,
-            ),
-        );
-
-        let sessions = list_dsh_sessions_with(&fs, cwd, Some(root));
-        assert_eq!(sessions.len(), 1);
-        let summary = &sessions[0];
-        assert_eq!(summary.resume_id, "sess-9");
-        // session/title 优先于首条用户文本。
-        assert_eq!(summary.agent_title, "你好");
-        assert_eq!(summary.message_count, 2);
-        assert_eq!(summary.total_tokens, 15);
-        assert_eq!(
-            summary.last_active_at,
-            DateTime::from_timestamp_millis(1700000005000)
-        );
-
-        let detail = load_dsh_session_detail_with(&fs, &log).unwrap();
-        assert_eq!(detail.model.as_deref(), Some("deepseek-v4-flash"));
-        assert_eq!(detail.turns.len(), 2);
-        assert_eq!(detail.turns[0].text, "你好");
-        // 合成 user/message 被过滤，assistant 只保留 text 块，工具挂到它上面。
-        assert_eq!(detail.turns[1].text, "加好了");
-        assert_eq!(detail.turns[1].tools, ["str_replace_editor"]);
-        assert_eq!(
-            detail.turns[1].tool_paths,
-            ["/workspace/project/src/lib.rs"]
-        );
-    }
-
-    /// 别的工作目录的会话不该出现在这个列表里。
-    #[test]
-    fn dsh_listing_rejects_a_log_belonging_to_another_cwd() {
-        let fs = MemFs::new();
-        let cwd = "/workspace/project";
-        let root = "/sessions-root";
-        let log = PathBuf::from(root)
-            .join(dsh_project_key(cwd))
-            .join("sess-2")
-            .join("session.jsonl");
-        write(
-            &fs,
-            &log,
-            r#"{"type":"session","version":1,"id":"sess-2","createdAt":1,"cwd":"/somewhere/else","delegationDepth":0}"#,
-        );
-        assert!(list_dsh_sessions_with(&fs, cwd, Some(root)).is_empty());
-    }
-
-    #[test]
-    fn dsh_listing_and_detail_support_the_default_zstd_log() {
-        let cwd = "/workspace/project";
-        let root = std::env::temp_dir().join(format!("smelt-dsh-zstd-{}", uuid::Uuid::new_v4()));
-        let log = root
-            .join(dsh_project_key(cwd))
-            .join("sess-3")
-            .join("session.jsonl.zstd");
-        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
-        let source = [
-            r#"{"type":"session","version":1,"id":"sess-3","createdAt":1700000000000,"cwd":"/workspace/project","delegationDepth":0}"#,
-            r#"{"type":"user/message","seq":0,"time":1700000001000,"data":{"source":{"kind":"user"},"message":{"content":[{"type":"text","text":"hello"}]}}}"#,
-            r#"{"type":"assistant/message","seq":1,"time":1700000002000,"data":{"message":{"content":[{"type":"text","text":"world"}]}}}"#,
-        ]
-        .join("\n");
-        std::fs::write(
-            &log,
-            zstd::stream::encode_all(source.as_bytes(), 1).unwrap(),
-        )
-        .unwrap();
-
-        let sessions = list_dsh_sessions(cwd, root.to_str());
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].path, log);
-        let detail = load_dsh_session_detail(&sessions[0].path).unwrap();
-        assert_eq!(detail.turns.len(), 2);
-        assert_eq!(detail.turns[0].text, "hello");
-        assert_eq!(detail.turns[1].text, "world");
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

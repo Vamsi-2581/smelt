@@ -365,37 +365,6 @@ mod runtime_detection_tests {
         ));
     }
 
-    /// dsh 没有 CLI，但有一个确定的入口文件——探测结果必须能说"没搭好"。
-    ///
-    /// 这里曾经无条件返回 true：设置页显示就绪，启动却停在"启动中"不动，
-    /// 真正的原因（运行时目录不存在）一个字也到不了用户面前。
-    #[test]
-    fn dsh_reports_missing_managed_runtime() {
-        let mut diagnostics = AcpRuntimeDiagnostics::default();
-        assert!(
-            !acp_agent_detected(ConversationAgentKind::Dsh, Some(&diagnostics)),
-            "受管运行时缺失时 dsh 必须显示成未就绪"
-        );
-
-        diagnostics.record_agent(ConversationAgentKind::Dsh, available("dsh-acp-rich"));
-        assert!(
-            acp_agent_detected(ConversationAgentKind::Dsh, Some(&diagnostics)),
-            "运行时就位后 dsh 必须显示成已就绪"
-        );
-    }
-
-    /// dsh 的就绪与否只由它自己的探测决定，不受别家 CLI 装没装影响。
-    #[test]
-    fn dsh_detection_is_independent_of_terminal_clis() {
-        let mut diagnostics = AcpRuntimeDiagnostics::default();
-        diagnostics.record_terminal(TerminalAgentKind::Claude, available("claude"));
-        diagnostics.record_terminal(TerminalAgentKind::Codex, available("codex"));
-        assert!(!acp_agent_detected(
-            ConversationAgentKind::Dsh,
-            Some(&diagnostics)
-        ));
-    }
-
     #[test]
     fn built_in_pi_dialog_runtime_is_independent_of_pi_terminal_cli() {
         let mut diagnostics = AcpRuntimeDiagnostics::default();

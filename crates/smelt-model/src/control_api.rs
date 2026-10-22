@@ -820,24 +820,6 @@ pi_calls! {
         -> crate::pi_auth_service::LoginEventsResult;
     PiAuthLoginAnswer => PiAuthLoginAnswer(crate::pi_auth_service::LoginAnswerParams) -> EmptyParams;
     PiAuthLoginCancel => PiAuthLoginCancel(crate::pi_auth_service::LoginIdParams) -> EmptyParams;
-    /// 能力库里 DeepSeek Harness 相关的全部展示数据。
-    DshConfigGet => DshConfigGet(EmptyParams) -> crate::dsh_service::DshConfig;
-    DshConfigEnsureFile => DshConfigEnsureFile(crate::dsh_service::EnsureConfigFileParams)
-        -> crate::dsh_service::EnsureConfigFileResult;
-    /// 每条路由支持哪些推理强度（起一个完整 dsh 运行时，几秒）。
-    DshModelsCapabilities => DshModelsCapabilities(EmptyParams) -> crate::agent_kind::DshModelCapabilities;
-    DshModelsSaveDefault => DshModelsSaveDefault(crate::dsh_service::SaveDefaultModelParams)
-        -> crate::dsh_service::DshConfig;
-    DshProvidersDiscoverModels => DshProvidersDiscoverModels(crate::agent_kind::DshDiscoveryRequest)
-        -> crate::agent_kind::DshDiscoveryReport;
-    /// 保存自定义 provider；模型列表为空时先问端点，并标成自动维护。
-    DshProvidersSaveCustom => DshProvidersSaveCustom(crate::dsh_service::SaveCustomProviderParams)
-        -> DshSaveCustomProviderResult;
-    DshProvidersRefreshAuto => DshProvidersRefreshAuto(EmptyParams) -> EmptyParams;
-    DshPluginsList => DshPluginsList(crate::dsh_service::ProfileParams) -> crate::dsh_service::PluginsResult;
-    /// 安装、更新或卸载一个插件（pnpm，可能要几分钟），完了回带清单。
-    DshPluginsRun => DshPluginsRun(crate::dsh_service::PluginActionParams)
-        -> crate::dsh_service::PluginActionResult;
     /// 当前全部账户和缓存里的额度。
     QuotaGet => QuotaGet(EmptyParams) -> crate::quota_service::QuotaSnapshot;
     /// 查一轮额度（全部或一家）并更新缓存。每家一次网络往返。
@@ -989,8 +971,3 @@ pub struct SubagentTranscriptResult {
     pub total: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct DshSaveCustomProviderResult {
-    pub auto: bool,
-    pub config: crate::dsh_service::DshConfig,
-}

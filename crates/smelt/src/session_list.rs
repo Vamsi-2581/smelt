@@ -1172,7 +1172,7 @@ impl Workspace {
                 let title = titles.get(ix).map(|(_, t)| t.clone()).unwrap_or_default();
                 let status = statuses.get(ix).copied().unwrap_or(AgentStatus::Idle);
                 let provider = self.sessions[ix].provider_kind(cx);
-                // ACP 身份优先：只有 ACP 的 agent（dsh）在终端表里查不到，
+                // ACP 身份优先：只有 ACP 的 agent 在终端表里查不到，
                 // 走 `provider` 会把它显示成一个普通终端。
                 let acp_provider = self.sessions[ix].acp_kind(cx);
                 let provider_label: &'static str = acp_provider

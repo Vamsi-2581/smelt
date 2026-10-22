@@ -10990,10 +10990,8 @@ dependencies = [
  "libc",
  "reqwest 0.12.28",
  "rusqlite",
- "semver",
  "serde",
  "serde_json",
- "serde_yaml",
  "sha2 0.10.9",
  "shell-words",
  "similar",
@@ -11008,7 +11006,6 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
- "zstd",
 ]
 
 [[package]]

@@ -13,7 +13,6 @@ pub enum SettingsSection {
     AppearanceTheme,
     AppearanceTerminal,
     AppearanceWindow,
-    DshModel,
     AgentRuntime,
     AgentLaunch,
     AgentWorkspace,
@@ -40,7 +39,6 @@ impl SettingsSection {
             Self::AppearanceTheme => "appearance-theme".into(),
             Self::AppearanceTerminal => "appearance-terminal".into(),
             Self::AppearanceWindow => "appearance-window".into(),
-            Self::DshModel => "dsh-model".into(),
             Self::AgentRuntime => "agent-runtime".into(),
             Self::AgentLaunch => "agent-launch".into(),
             Self::AgentWorkspace => "agent-workspace".into(),
@@ -184,31 +182,6 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
             keywords: &["Agent", "智能体", "AI"],
             default_open: true,
             children: vec![
-                leaf(
-                    "DeepSeek Harness",
-                    IconName::Cpu,
-                    SettingsSection::DshModel,
-                    &[
-                        "DeepSeek",
-                        "DSH",
-                        "Harness",
-                        "模型",
-                        "model",
-                        "凭据",
-                        "API",
-                        "API key",
-                        "API 密钥",
-                        "API 地址",
-                        "密钥",
-                        "token",
-                        "provider",
-                        "供应商",
-                        "网关",
-                        "endpoint",
-                        "base url",
-                        "插件",
-                    ],
-                ),
                 leaf(
                     "Agent 运行环境",
                     IconName::Bot,
@@ -530,7 +503,6 @@ mod tests {
         assert_eq!(
             child_titles(&nav, SettingsCategoryId::Agent),
             [
-                "DeepSeek Harness",
                 "Agent 运行环境",
                 "新建与启动",
                 "对话与工作区",
@@ -610,24 +582,13 @@ mod tests {
     fn search_understands_user_tasks_and_multiple_terms() {
         let nav = settings_nav();
 
-        assert_eq!(
+        assert!(
             child_titles(
                 &filter_settings_nav(&nav, "模型"),
                 SettingsCategoryId::Agent,
-            ),
-            ["DeepSeek Harness"],
+            )
+            .is_empty(),
             "分类标题里的一个宽泛词不能把整组结果都留下"
-        );
-        assert_eq!(
-            titles(&filter_settings_nav(&nav, "API key")),
-            ["模型与 Agent"]
-        );
-        assert_eq!(
-            child_titles(
-                &filter_settings_nav(&nav, "API key"),
-                SettingsCategoryId::Agent,
-            ),
-            ["DeepSeek Harness"]
         );
         assert_eq!(
             child_titles(
@@ -684,8 +645,7 @@ mod tests {
             .map(|child| child.section.clone())
             .collect::<Vec<_>>();
 
-        assert_eq!(visible_destinations.len(), 14);
-        assert!(visible_destinations.contains(&SettingsSection::DshModel));
+        assert_eq!(visible_destinations.len(), 13);
         assert!(visible_destinations.contains(&SettingsSection::Shortcuts));
     }
 

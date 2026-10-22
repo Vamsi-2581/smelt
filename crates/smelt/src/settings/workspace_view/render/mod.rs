@@ -14,7 +14,6 @@ use gpui_component::tag::Tag;
 mod agent;
 mod appearance;
 mod collaboration;
-mod dsh_model;
 mod maintenance;
 mod pi_auth;
 mod pi_mcp;
@@ -232,8 +231,7 @@ fn section_page(
     // 这几页改的是本机运行时上的配置（引擎、启动项、对话命令、CLI）。
     let local_runtime_only = matches!(
         selected,
-        SettingsSection::DshModel
-            | SettingsSection::AgentRuntime
+        SettingsSection::AgentRuntime
             | SettingsSection::AgentLaunch
             | SettingsSection::AgentWorkspace
     );
@@ -241,7 +239,6 @@ fn section_page(
         SettingsSection::AppearanceTheme => appearance::theme_page(entity, snapshot, cx),
         SettingsSection::AppearanceTerminal => appearance::terminal_page(entity, snapshot, cx),
         SettingsSection::AppearanceWindow => appearance::window_page(entity, snapshot, cx),
-        SettingsSection::DshModel => dsh_model::dsh_model_page(entity, snapshot, cx),
         SettingsSection::AgentRuntime => agent::runtime_page(entity, snapshot, cx),
         SettingsSection::AgentLaunch => agent::launch_page(entity, snapshot, cx),
         SettingsSection::AgentWorkspace => agent::workspace_page(entity, snapshot, cx),

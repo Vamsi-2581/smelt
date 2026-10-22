@@ -273,7 +273,7 @@ impl Workspace {
         .detach();
     }
 
-    /// 只发给本机运行时的调用：智能体编辑器、记忆、DSH 这些只认本机。
+    /// 只发给本机运行时的调用：智能体编辑器、记忆这些只认本机。
     pub(crate) fn run_local_call<C>(
         &mut self,
         params: C::Params,

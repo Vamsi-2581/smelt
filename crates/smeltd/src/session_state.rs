@@ -420,7 +420,7 @@ mod agent_event_reducer_tests {
 
         let mut named = event(AgentEventKind::SessionTitleChanged);
         named.conversation_id = Some("conv-1".into());
-        named.conversation_title = Some("Compare Pi and DSH Harness".into());
+        named.conversation_title = Some("Compare Pi and Codex".into());
         apply_agent_event(&mut state, &named);
 
         let mut same = event(AgentEventKind::ToolFinished);
@@ -428,7 +428,7 @@ mod agent_event_reducer_tests {
         apply_agent_event(&mut state, &same);
         assert_eq!(
             state.title.as_deref(),
-            Some("Compare Pi and DSH Harness"),
+            Some("Compare Pi and Codex"),
             "同一段对话的后续事件不该清掉标题"
         );
 

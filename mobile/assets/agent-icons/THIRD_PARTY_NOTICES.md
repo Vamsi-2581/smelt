@@ -8,10 +8,9 @@ gpui 和 Flutter 的打包器只认自己目录下的文件；声明在这里重
 `every_kind_has_an_icon_in_the_desktop_and_mobile_bundles` 拦住。
 
 `agent-claude.svg`、`agent-codex.svg`、`agent-grok.svg`、`agent-cursor.svg`、
-`agent-opencode.svg`、`agent-kiro.svg` 和 `agent-dsh.svg` 来自
+`agent-opencode.svg` 和 `agent-kiro.svg` 来自
 [LobeHub Icons](https://github.com/lobehub/lobe-icons) 的静态 SVG 集合，该集合以
-MIT License 发布。DeepSeek 名称与商标归 DeepSeek 所有；Kiro 名称与商标归
-Amazon / AWS 所有。
+MIT License 发布。Kiro 名称与商标归 Amazon / AWS 所有。
 
 `agent-copilot.svg` 使用 GitHub 提供的 `GitHub_Invertocat_Black.svg` 资源，
 仅将填充色表达为 `currentColor` 以适配 Smelt 的深浅主题。图标所对应的产品名称

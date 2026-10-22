@@ -1,9 +1,6 @@
 //! 问一个端点「你提供哪些模型」，直接走 HTTP。
 //!
-//! **为什么不复用 dsh 那条发现链路。** dsh 的发现要起一个完整 dsh 运行时
-//! （`dsh-discover-models.mjs`），前提是本机装了 dsh profile 和 Smelt Host
-//! bundle。只用 Pi 的用户没有这些，让 Pi 的模型配置依赖 dsh 装没装，是把两个
-//! 本来无关的东西绑在一起。列模型这件事本身就是一次 `GET /models`，直接发。
+//! 列模型这件事本身就是一次 `GET /models`，直接发，不起任何 Node 运行时。
 //!
 //! **为什么按协议分派而不是统一发一个请求。** 认证头和响应形状是协议规定的：
 //! OpenAI 系是 `Authorization: Bearer` + `{data:[{id}]}`，Anthropic 是

@@ -4,9 +4,6 @@
 
 use std::collections::BTreeMap;
 
-mod dsh;
-pub use dsh::*;
-
 /// 全自动任务的 ACP session config 参数映射。各家 agent 的参数名和行为不同，
 /// 这里结构化描述，避免 controller/runtime 在外部重复写 provider match。
 #[derive(Clone, Copy, Debug, Default)]
@@ -22,7 +19,7 @@ pub struct TaskAgentParams {
 }
 
 /// 各家 CLI/TUI 把历史 session id 拼进启动命令的语法。`None` 表示没有可在终端
-/// 里继续的 CLI（例如只有 ACP 桥的 dsh）。
+/// 里继续的 CLI。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CliResumeSyntax {
     /// `--resume {id}`
@@ -272,9 +269,6 @@ pub struct ConversationAgentDescriptor {
     pub task_params: TaskAgentParams,
     /// 终端 CLI 续接历史会话的语法。`None` = 没有对应 CLI，调用方应藏入口。
     pub cli_resume: Option<CliResumeSyntax>,
-    /// 能否作为裸种类出现在新建菜单 / 历史 tab / 启动命令设置里。
-    /// `false` 表示必须走 workspace profile（dsh 原生 profile），不要再列一个空槽。
-    pub bare_kind: bool,
     /// 全自动任务要改启动命令时的补丁；多数 adapter 只靠 session config。
     pub task_cli: TaskCliPatch,
     /// 新对话的模型和推理档位由引擎自己的配置决定（Pi：`~/.pi/agent/settings.json`，
@@ -305,7 +299,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
             full_access_mode: Some("bypassPermissions"),
         },
         cli_resume: Some(CliResumeSyntax::Flag),
-        bare_kind: true,
         task_cli: TaskCliPatch::None,
         engine_owns_model_defaults: false,
     },
@@ -328,7 +321,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
             full_access_mode: None,
         },
         cli_resume: Some(CliResumeSyntax::FlagEquals),
-        bare_kind: true,
         task_cli: TaskCliPatch::Append {
             full_access: "--allow-all",
             full_access_aliases: &["--yolo"],
@@ -354,7 +346,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
             full_access_mode: Some("agent-full-access"),
         },
         cli_resume: Some(CliResumeSyntax::Subcommand),
-        bare_kind: true,
         task_cli: TaskCliPatch::None,
         engine_owns_model_defaults: false,
     },
@@ -377,7 +368,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
             full_access_mode: None,
         },
         cli_resume: Some(CliResumeSyntax::Flag),
-        bare_kind: true,
         task_cli: TaskCliPatch::AfterMarker {
             marker: "grok agent",
             full_access: "--always-approve",
@@ -404,7 +394,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
             full_access_mode: None,
         },
         cli_resume: Some(CliResumeSyntax::Flag),
-        bare_kind: true,
         // `--force` / `--yolo` 是顶层 flag，必须插在 `acp` 子命令前，否则
         // 否则无人值守任务会停在 ACP 审批卡上。
         task_cli: TaskCliPatch::AfterMarker {
@@ -436,7 +425,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
             full_access_mode: None,
         },
         cli_resume: Some(CliResumeSyntax::SessionFlag),
-        bare_kind: true,
         // `--auto` 只属于 TUI 默认命令：`opencode --auto acp` 会把 `acp` 当项目名，
         // `opencode acp --auto` 会被 yargs 拒绝。全权限由上面的进程级配置表达，
         // 这里不再给命令行叠一个无效 flag。
@@ -467,7 +455,6 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
             full_access_mode: None,
         },
         cli_resume: Some(CliResumeSyntax::ResumeIdFlag),
-        bare_kind: true,
         task_cli: TaskCliPatch::Append {
             full_access: "--trust-all-tools",
             full_access_aliases: &["-a"],
@@ -496,38 +483,8 @@ pub static CONVERSATION_AGENTS: &[ConversationAgentDescriptor] = &[
             full_access_mode: Some("bypassPermissions"),
         },
         cli_resume: Some(CliResumeSyntax::SessionFlag),
-        bare_kind: true,
         task_cli: TaskCliPatch::None,
         engine_owns_model_defaults: true,
-    },
-    ConversationAgentDescriptor {
-        id: "dsh",
-        label: "DeepSeek Harness",
-        short_label: "DeepSeek",
-        config_key: "acp_dsh_cmd",
-        // 官方 `@deepseek-ai/dsh-acp` 是 automation-only 的，明说不上图片、不上
-        // 工具呈现；smelt 走的是自己写的 `@smelt-ai/dsh-acp-rich` 桥，
-        // `promptCapabilities.image` 由它按 `ctx.attachments` 是否composed 如实
-        // 上报。参考 profile 里 attachments 是有的，所以这里是 true。
-        accepts_images: true,
-        default_cmd: default_acp_dsh_cmd,
-        previous_default_cmds: &[],
-        managed_adapter: None,
-        default_env: &[],
-        homebrew_cask: None,
-        npm_package: None,
-        // dsh 的 ACP 面还没有 thinking / fast / 全权限这几个 session config 参数：
-        // 推理强度在 profile 的 `llm-deepseek` 里配，权限在 `sandbox-policy` 里配，
-        // 都是启动期的事，不是每轮可切的 session config。
-        task_params: TaskAgentParams {
-            thinking_key: None,
-            fast_mode_key: None,
-            full_access_mode: None,
-        },
-        cli_resume: None,
-        bare_kind: false,
-        task_cli: TaskCliPatch::None,
-        engine_owns_model_defaults: false,
     },
 ];
 
@@ -551,12 +508,11 @@ pub enum ConversationAgentKind {
     OpenCode,
     Kiro,
     Pi,
-    Dsh,
 }
 
 impl ConversationAgentKind {
     /// 新建菜单 / 设置页的排列顺序。
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 8] = [
         Self::Claude,
         Self::Copilot,
         Self::Codex,
@@ -565,7 +521,6 @@ impl ConversationAgentKind {
         Self::OpenCode,
         Self::Kiro,
         Self::Pi,
-        Self::Dsh,
     ];
 
     /// 这一家的静态属性。变体序号即表下标，见 `CONVERSATION_AGENTS` 的顺序约定。
@@ -661,11 +616,6 @@ impl ConversationAgentKind {
         self.descriptor().cli_resume
     }
 
-    /// 能否作为裸种类出现在新建菜单 / 历史 tab / 启动命令设置里。
-    pub fn is_bare_kind(self) -> bool {
-        self.descriptor().bare_kind
-    }
-
     /// 侧栏/菜单用的本地 SVG 资源路径，约定 `smelt-icons/agent-<id>.svg`。
     pub fn icon_asset(self) -> String {
         format!("smelt-icons/agent-{}.svg", self.id())
@@ -678,10 +628,9 @@ impl ConversationAgentKind {
 
     /// 能否注册为一个本机无人值守 ACP runtime。
     ///
-    /// 只要是裸种类且本机有对应 CLI 就可报；DSH 必须绑 native profile，
-    /// 不能注册一条空的 `dsh` runtime。Antigravity 只有 TUI、不在这张 ACP 表里。
+    /// 本机有对应 CLI 就可报。Antigravity 只有 TUI、不在这张 ACP 表里。
     pub fn supports_headless_runtime(self) -> bool {
-        self.is_bare_kind() && self.terminal().is_some()
+        self.terminal().is_some()
     }
 
     /// 探测本机是否已装、并作为 `RuntimeSpec.type` 上报时用的 CLI 文件名。
@@ -1001,14 +950,10 @@ impl TerminalAgentKind {
 impl ConversationAgentKind {
     /// 这家 ACP agent 在终端表里的对应项，两张表按 `id` 对齐。
     ///
-    /// **返回 Option 是实话**：两张表本来就不是同一个集合。Antigravity 只有 TUI
-    /// 没有 ACP；反过来 DeepSeek Harness 的 Smelt 入口必须绑定到一个原生
-    /// profile，不能退化成不带 profile 身份的基础槽位。
-    ///
-    /// 之前这里是 `From`，认不出就 `unwrap_or(Claude)` 兜底。全集重合时那个兜底
-    /// 永远走不到，加进来一个只有 ACP 的 agent 之后它就成了一颗哑弹：dsh 会被
-    /// 静默当成 Claude，「在终端里继续」会去起一个根本无关的 CLI。所以这里由
-    /// 调用方显式处理「没有终端对应项」。
+    /// **返回 Option 是实话**：两张表本来就不是同一个集合，Antigravity 只有 TUI
+    /// 没有 ACP。只有 ACP 的 agent 若用 `unwrap_or(Claude)` 之类兜底，会被静默
+    /// 当成 Claude，「在终端里继续」会去起一个根本无关的 CLI。所以这里由调用方
+    /// 显式处理「没有终端对应项」。
     pub fn terminal(self) -> Option<TerminalAgentKind> {
         TerminalAgentKind::from_id(self.id())
     }
@@ -1039,7 +984,7 @@ pub enum HistorySourceKind {
 impl HistorySourceKind {
     /// 历史页来源 tab 的出厂顺序：先全部 ACP 种类（保持原有排列），再挂纯终端来源。
     /// 纯终端来源必须显式登记——不是所有 TUI 都在本机留下可解析的 transcript。
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 9] = [
         Self::Conversation(ConversationAgentKind::Claude),
         Self::Conversation(ConversationAgentKind::Copilot),
         Self::Conversation(ConversationAgentKind::Codex),
@@ -1048,7 +993,6 @@ impl HistorySourceKind {
         Self::Conversation(ConversationAgentKind::OpenCode),
         Self::Conversation(ConversationAgentKind::Kiro),
         Self::Conversation(ConversationAgentKind::Pi),
-        Self::Conversation(ConversationAgentKind::Dsh),
         Self::TerminalOnly(TerminalAgentKind::Antigravity),
     ];
 
@@ -1091,19 +1035,11 @@ impl HistorySourceKind {
         }
     }
 
-    /// 这个来源的终端 CLI 身份。`None` = 没有可在终端里续接的 CLI（如 dsh）。
+    /// 这个来源的终端 CLI 身份。`None` = 没有可在终端里续接的 CLI。
     pub fn terminal(self) -> Option<TerminalAgentKind> {
         match self {
             Self::Conversation(kind) => kind.terminal(),
             Self::TerminalOnly(kind) => Some(kind),
-        }
-    }
-
-    /// 能否作为裸种类出现在历史 tab 里。纯终端来源既然被登记进来，就是能读历史的。
-    pub fn is_bare_kind(self) -> bool {
-        match self {
-            Self::Conversation(kind) => kind.is_bare_kind(),
-            Self::TerminalOnly(_) => true,
         }
     }
 
@@ -1306,16 +1242,6 @@ pub fn default_acp_pi_cmd() -> String {
     SMELT_PI_AGENT_COMMAND.to_string()
 }
 
-pub fn default_acp_dsh_cmd() -> String {
-    "dsh-acp-rich".to_string()
-}
-
-impl AcpProfile {
-    pub fn is_native_dsh(&self) -> bool {
-        self.kind() == Some(ConversationAgentKind::Dsh) && self.id.starts_with("dsh-native-")
-    }
-}
-
 /// ACP 启动规格：命令本体保留现有的空白分词语义，环境变量单独结构化存储，
 /// 避免把带空格的值硬塞回 `VAR=value cmd` 这种不可靠的字符串拼接。
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1342,7 +1268,7 @@ impl ConversationLaunchSpec {
 /// 只允许由启动 smelt 的那个环境提供的变量名：它们决定进程怎么起、代码和指令
 /// 从哪加载、怎么连网络。设置页那个框是「传给 agent 的环境」，不是「改写 smelt
 /// 自己的运行环境」——放任改 `PATH` 会让 agent 命令解析失败，且报错完全指不到
-/// 这个框上。dsh 的 `.env` 加载器出于同样理由维护了同一类名单。
+/// 这个框上。
 const LAUNCH_ONLY_ENV: &[&str] = &[
     "PATH",
     "HOME",
@@ -1356,8 +1282,7 @@ const LAUNCH_ONLY_ENV: &[&str] = &[
     "BASH_ENV",
 ];
 
-/// 变量名是否合法：POSIX shell 标识符。dsh 的 credential 引用（`apiKeyEnv`）
-/// 用的是同一套规则，两边对不上会变成「设置里填了、agent 侧解析不到」。
+/// 变量名是否合法：POSIX shell 标识符。
 fn is_env_name(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
@@ -1430,10 +1355,6 @@ pub struct AcpProfile {
     /// workspace 目录，允许 `~` 开头（展开逻辑跟 build_agent 共用一份，见
     /// `crate::workspace_override`）。
     pub workspace_dir: String,
-    /// 原生 DSH profile 的启动规格，由运行时列 profile 时按它那台机器上桥的安装情况
-    /// 算好（见 `native_dsh_profiles`）。其余 profile 为空。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_launch: Option<ConversationLaunchSpec>,
 }
 
 impl AcpProfile {
@@ -1461,12 +1382,6 @@ impl AcpProfile {
     /// 作为独立环境变量保留原样（包括空格），由下游统一处理兼容旧字符串前缀。
     pub fn launch_spec(&self) -> Result<ConversationLaunchSpec, String> {
         let kind = self.required_kind()?;
-        if kind == ConversationAgentKind::Dsh && self.id.starts_with("dsh-native-") {
-            return self
-                .native_launch
-                .clone()
-                .ok_or_else(|| format!("原生 DSH profile `{}` 缺少运行时给出的启动规格", self.id));
-        }
         Ok(kind
             .default_launch()
             .with_env(self.env_var()?, self.workspace_dir.clone()))
@@ -1474,9 +1389,6 @@ impl AcpProfile {
 
     /// 兼容旧调用方的字符串命令。保留到 GUI/daemon 全链路升级完成为止。
     pub fn command(&self) -> Result<String, String> {
-        if self.is_native_dsh() {
-            return Ok(self.launch_spec()?.command);
-        }
         let kind = self.required_kind()?;
         Ok(format!(
             "{}={} {}",
@@ -1527,13 +1439,6 @@ mod tests {
         }
     }
 
-    /// dsh 是第一个只有 ACP、没有终端 CLI 的 agent；这条守着 `terminal()` 不被
-    /// 顺手改回一个总能返回值的 `From`。
-    #[test]
-    fn dsh_has_no_terminal_counterpart() {
-        assert_eq!(ConversationAgentKind::Dsh.terminal(), None);
-    }
-
     #[test]
     fn cli_resume_syntax_matches_each_agents_tui() {
         assert_eq!(
@@ -1568,7 +1473,6 @@ mod tests {
             ConversationAgentKind::Pi.cli_resume_syntax(),
             Some(CliResumeSyntax::SessionFlag)
         );
-        assert_eq!(ConversationAgentKind::Dsh.cli_resume_syntax(), None);
         for kind in ConversationAgentKind::ALL {
             assert_eq!(
                 kind.cli_resume_syntax().is_some(),
@@ -1576,17 +1480,6 @@ mod tests {
                 "{} 的续接语法应和有没有终端 CLI 一致",
                 kind.id()
             );
-        }
-    }
-
-    #[test]
-    fn only_profile_hosted_agents_are_hidden_from_bare_kind_menus() {
-        for kind in ConversationAgentKind::ALL {
-            if kind == ConversationAgentKind::Dsh {
-                assert!(!kind.is_bare_kind());
-            } else {
-                assert!(kind.is_bare_kind());
-            }
         }
     }
 
@@ -1641,14 +1534,13 @@ mod tests {
             ConversationAgentKind::Codex,
             ConversationAgentKind::OpenCode,
             ConversationAgentKind::Pi,
-            ConversationAgentKind::Dsh,
         ] {
             assert_eq!(kind.task_cli(), TaskCliPatch::None);
         }
     }
 
     #[test]
-    fn bare_cli_agents_support_headless_runtime_except_profile_hosted() {
+    fn cli_agents_support_headless_runtime() {
         for kind in [
             ConversationAgentKind::Claude,
             ConversationAgentKind::Copilot,
@@ -1677,8 +1569,6 @@ mod tests {
             ConversationAgentKind::Kiro.headless_runtime_cli(),
             Some("kiro-cli")
         );
-        assert!(!ConversationAgentKind::Dsh.supports_headless_runtime());
-        assert_eq!(ConversationAgentKind::Dsh.headless_runtime_cli(), None);
         let ids: Vec<_> = ConversationAgentKind::headless_runtime_kinds()
             .map(ConversationAgentKind::id)
             .collect();
@@ -1760,7 +1650,7 @@ mod tests {
         assert_eq!(
             ids,
             [
-                "claude", "copilot", "codex", "grok", "cursor", "opencode", "kiro", "pi", "dsh"
+                "claude", "copilot", "codex", "grok", "cursor", "opencode", "kiro", "pi"
             ]
         );
         assert_eq!(
@@ -1773,8 +1663,7 @@ mod tests {
                 "acp_cursor_cmd",
                 "acp_opencode_cmd",
                 "acp_kiro_cmd",
-                "acp_pi_cmd",
-                "acp_dsh_cmd"
+                "acp_pi_cmd"
             ]
         );
 
@@ -1801,8 +1690,6 @@ mod tests {
         }
         assert_eq!(ConversationAgentKind::Claude.label(), "Claude Code");
         assert_eq!(ConversationAgentKind::Copilot.short_label(), "Copilot");
-        assert_eq!(ConversationAgentKind::Dsh.label(), "DeepSeek Harness");
-        assert_eq!(ConversationAgentKind::Dsh.short_label(), "DeepSeek");
         assert_eq!(
             ConversationAgentKind::Codex.default_cmd(),
             default_acp_codex_cmd()
@@ -2132,7 +2019,6 @@ mod tests {
     #[test]
     fn profile_launch_spec_keeps_workspace_path_with_spaces_in_one_env_value() {
         let profile = AcpProfile {
-            native_launch: None,
             id: "claude-quant".to_string(),
             kind_id: "claude".to_string(),
             label: "Claude Quant".to_string(),
@@ -2155,7 +2041,6 @@ mod tests {
     #[test]
     fn pi_profile_uses_the_agent_directory_override_for_tui_and_acp() {
         let profile = AcpProfile {
-            native_launch: None,
             id: "pi-team".to_string(),
             kind_id: "pi".to_string(),
             label: "Pi Team".to_string(),
@@ -2174,7 +2059,6 @@ mod tests {
     #[test]
     fn unknown_profile_kind_cannot_be_launched_as_claude() {
         let profile = AcpProfile {
-            native_launch: None,
             id: "future-profile".to_string(),
             kind_id: "future-agent".to_string(),
             label: "Future Agent".to_string(),
@@ -2228,7 +2112,7 @@ mod env_lines_tests {
         for bad in ["1KEY=v", "A-B=v", "A B=v"] {
             assert!(
                 parse_env_lines(bad).is_err(),
-                "`{bad}` 不是合法的 shell 标识符，dsh 的 apiKeyEnv 解析不到"
+                "`{bad}` 不是合法的 shell 标识符"
             );
         }
     }

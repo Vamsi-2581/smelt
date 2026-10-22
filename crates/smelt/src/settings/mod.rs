@@ -26,7 +26,6 @@ use crate::{Workspace, liquid_glass, terminal, terminal_view, updater};
 
 mod agent_hooks;
 mod bundled_helpers;
-mod dsh_config;
 mod memory;
 mod nav;
 mod pi_auth;
@@ -974,44 +973,6 @@ pub struct ProfileInputs {
     _subs: Vec<Subscription>,
 }
 
-/// 插件管理面板的状态。
-///
-/// 面板一次只服务一个 profile：管理动作会真实改写该 profile 的依赖树，同时开多个
-/// 只会让「这条报错是谁的」变得说不清。切 profile 直接换掉整个面板。
-/// 插件面板能发起的三件事。
-///
-/// 安装与更新是**不同的 pnpm 命令**，不能合成一个布尔：`add` 见现装版本已满足
-/// manifest 里的范围就直接不动，用它做更新等于什么都没做。
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum DshPluginAction {
-    Install,
-    Update,
-    Remove,
-}
-
-#[derive(Clone)]
-pub struct DshPluginManager {
-    pub profile: String,
-    /// 包名输入框，供安装/升级使用。
-    pub spec: Entity<gpui_component::input::InputState>,
-    /// 已加载的清单；None 表示还没读过。
-    pub plugins: Option<Result<Vec<smelt_model::agent_kind::DshPlugin>, String>>,
-    /// 正在执行的动作描述，非 None 时禁用所有按钮。
-    pub busy: Option<String>,
-    /// 上一次动作的结果。
-    pub message: Option<(String, bool)>,
-}
-
-#[derive(Clone)]
-pub struct DshModelEditor {
-    model: Entity<gpui_component::input::InputState>,
-    base_url: Entity<gpui_component::input::InputState>,
-    api_key: Entity<gpui_component::input::InputState>,
-    reasoning_effort: String,
-    configured_api_key_env: String,
-    credential_configured: bool,
-}
-
 #[derive(Clone)]
 pub struct PiModelEditor {
     pub provider: Entity<gpui_component::input::InputState>,
@@ -1044,31 +1005,7 @@ pub struct PiCustomProviderEditor {
     pub credential_configured: bool,
 }
 
-#[derive(Clone)]
-pub struct DshCustomModelEditor {
-    id: Entity<gpui_component::input::InputState>,
-    name: Entity<gpui_component::input::InputState>,
-    context_window: Entity<gpui_component::input::InputState>,
-    max_tokens: Entity<gpui_component::input::InputState>,
-}
-
-#[derive(Clone)]
-pub struct DshCustomProviderEditor {
-    previous_id: Option<String>,
-    id: Entity<gpui_component::input::InputState>,
-    display_name: Entity<gpui_component::input::InputState>,
-    api_key: Entity<gpui_component::input::InputState>,
-    base_url: Entity<gpui_component::input::InputState>,
-    api: String,
-    models: Vec<DshCustomModelEditor>,
-    /// 「获取模型列表」的进度与结果；`None` 表示还没点过。
-    discovery: Option<ModelDiscoveryState>,
-    configured_api_key_env: String,
-    credential_configured: bool,
-}
-
-/// 模型发现的进度。dsh 侧要起一个完整 dsh 进程再加一次网络往返（约 3-4 秒），
-/// Pi 侧是一次直连 HTTP。
+/// 模型发现的进度：一次直连 HTTP。
 #[derive(Clone)]
 pub enum ModelDiscoveryState {
     Loading,
@@ -1150,256 +1087,7 @@ impl PiLoginView {
     }
 }
 
-#[derive(Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeDshModelSettings {
-    default_model: NativeDshDefaultModel,
-    deepseek: NativeDshDeepSeekSettings,
-    credential_configured: bool,
-    #[serde(default)]
-    custom_providers: Vec<NativeDshCustomProvider>,
-}
-
-#[derive(Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct NativeDshDefaultModel {
-    provider: String,
-    model: String,
-    reasoning_effort: String,
-}
-
-#[derive(Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct NativeDshDeepSeekSettings {
-    // dsh 自己的 settings.yaml 用的就是 `baseURL`，camelCase 规则会算出
-    // `baseUrl`，对不上。这里显式钉住助手的实际键名。
-    #[serde(rename = "baseURL")]
-    base_url: String,
-    api_key_env: String,
-    reasoning_effort: String,
-}
-
-#[derive(Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct NativeDshCustomProvider {
-    id: String,
-    display_name: String,
-    api: String,
-    #[serde(rename = "baseURL")]
-    base_url: String,
-    api_key_env: String,
-    credential_configured: bool,
-    #[serde(default)]
-    models: Vec<NativeDshCustomModel>,
-}
-
-#[derive(Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct NativeDshCustomModel {
-    id: String,
-    name: String,
-    context_window: Option<u64>,
-    max_tokens: Option<u64>,
-}
-
-/// 画"推理强度"那一栏。
-///
-/// 独立成函数有两个理由，都不是风格问题：一是设置页那条渲染链已经长到让 rustc
-/// 在解析期爆栈，就地再嵌一层 match 直接编译不过；二是这一栏的四种状态是这次
-/// 改动的全部要点，摊开在几千行链式调用中间没人看得见。
-fn render_dsh_effort_section(
-    view: DshEffortView,
-    current: String,
-    workspace: Entity<Workspace>,
-    fg: gpui::Hsla,
-    muted: gpui::Hsla,
-    danger_fg: gpui::Hsla,
-) -> gpui::AnyElement {
-    let heading = div()
-        .text_xs()
-        .font_semibold()
-        .text_color(fg)
-        .child("推理强度");
-    let note = |color: gpui::Hsla, text: String| div().text_xs().text_color(color).child(text);
-
-    let body = match view {
-        // 查询要起一个完整 dsh 运行时，有几秒空窗。说一声，别让这一栏凭空出现。
-        DshEffortView::Loading => {
-            note(muted, "正在读取该模型支持的档位…".to_string()).into_any_element()
-        }
-        // 说明"没有"，而不是什么都不画：一栏静默消失，用户只会当成界面坏了。
-        DshEffortView::Unavailable => note(
-            muted,
-            "当前模型没有可调的推理强度，将使用助手默认值。".to_string(),
-        )
-        .into_any_element(),
-        DshEffortView::Unknown(error) => note(
-            muted,
-            format!("未能读取该模型支持的档位（{error}）；保持现有设置不变。"),
-        )
-        .into_any_element(),
-        DshEffortView::Choices {
-            efforts,
-            default_effort,
-        } => {
-            // 存着的值不在广告列表里，多半是换过 baseURL 或中转：那条设置照样会
-            // 被发出去，所以必须说出来，而不是让按钮全部显示未选中了事。
-            let stale = !current.is_empty() && !efforts.iter().any(|effort| effort.id == current);
-            let buttons = efforts.into_iter().map(|effort| {
-                let entity = workspace.clone();
-                let value = effort.id.clone();
-                let selected = current == effort.id;
-                let label = if default_effort.as_deref() == Some(effort.id.as_str()) {
-                    format!("{}（默认）", effort.name)
-                } else {
-                    effort.name.clone()
-                };
-                Button::new(format!("dsh-reasoning-{}", effort.id))
-                    .choice()
-                    .compact()
-                    .selected(selected)
-                    .label(label)
-                    .on_click(move |_, _, cx| {
-                        let value = value.clone();
-                        entity.update(cx, |workspace, cx| {
-                            workspace.set_native_dsh_reasoning_effort(value, cx);
-                        });
-                    })
-            });
-            v_flex()
-                .gap_1()
-                .child(h_flex().gap_2().children(buttons))
-                .children(stale.then(|| {
-                    note(
-                        danger_fg,
-                        format!("已保存的「{current}」不在该模型支持的档位内，请重新选择。"),
-                    )
-                }))
-                .into_any_element()
-        }
-    };
-
-    v_flex()
-        .gap_1()
-        .child(heading)
-        .child(body)
-        .into_any_element()
-}
-
-/// 交互式表单目前只覆盖这一条内置路由；自定义 provider 走另一个编辑器。
-const NATIVE_DSH_EDITABLE_PROVIDER: &str = "deepseek-official";
-
-/// 能力查询的进度。查询要起一个完整 dsh 进程（约 3-4 秒），不能同步做。
-#[derive(Clone)]
-pub enum NativeDshCapabilityState {
-    Loading,
-    Ready(smelt_model::agent_kind::DshModelCapabilities),
-    Failed(String),
-}
-
-/// 推理强度那一栏该画什么。
-///
-/// 四种情况分开，是因为对用户它们是四件不同的事：等一下、这条路由没这个旋钮、
-/// 没问出来、这些是可选项。以前只有"画四个按钮"一种，于是后三种全被伪装成了
-/// 第四种。
-#[derive(Clone)]
-enum DshEffortView {
-    Loading,
-    /// 助手明确没有广告推理强度——不是没问到，是这条路由没有这个能力。
-    Unavailable,
-    /// 问失败了。和 `Unavailable` 分开：一个是答案，一个是没有答案。
-    Unknown(String),
-    Choices {
-        efforts: Vec<smelt_model::agent_kind::DshEffort>,
-        default_effort: Option<String>,
-    },
-}
-
-/// 模型那一栏的候选来源。
-///
-/// 和 `DshEffortView` 同一套契约：拿不到就说拿不到，绝不编一个候选列表出来。
-/// 输入框始终保留——助手广告的是它此刻在提供的路由，用户完全可能想填一个尚未
-/// 出现在目录里的模型 ID。
-#[derive(Clone)]
-enum DshModelChoicesView {
-    Loading,
-    /// 问到了，但这条 provider 一个模型都没有。
-    Unavailable,
-    Unknown(String),
-    Choices(Vec<smelt_model::agent_kind::DshModelCapability>),
-}
-
-/// 画「可选模型」那一排。
-///
-/// 和 effort 一样抽成自由函数：这条渲染链已经长到让 rustc 在解析期爆栈，就地
-/// 再嵌一层 match 编译不过。
-fn render_dsh_model_choices_section(
-    view: DshModelChoicesView,
-    current: String,
-    editor_model: Entity<gpui_component::input::InputState>,
-    fg: gpui::Hsla,
-    muted: gpui::Hsla,
-) -> gpui::AnyElement {
-    let note = |color: gpui::Hsla, text: String| div().text_xs().text_color(color).child(text);
-
-    let heading = div()
-        .text_xs()
-        .font_semibold()
-        .text_color(fg)
-        .child("可选模型");
-
-    let body = match view {
-        DshModelChoicesView::Loading => {
-            note(muted, "正在读取助手正在提供的模型…".to_string()).into_any_element()
-        }
-        DshModelChoicesView::Unavailable => note(
-            muted,
-            "助手当前没有提供可选模型，请直接填写模型 ID。".to_string(),
-        )
-        .into_any_element(),
-        DshModelChoicesView::Unknown(error) => note(
-            muted,
-            format!("未能读取可选模型（{error}）；请直接填写模型 ID。"),
-        )
-        .into_any_element(),
-        DshModelChoicesView::Choices(models) => {
-            let buttons = models.into_iter().map(move |model| {
-                let selected = current == model.id;
-                let value = model.id.clone();
-                let state = editor_model.clone();
-                Button::new(format!("dsh-model-choice-{}", model.id))
-                    .choice()
-                    .compact()
-                    .selected(selected)
-                    .label(model.label().to_string())
-                    .on_click(move |_, window, cx| {
-                        let value = value.clone();
-                        state.update(cx, |state, cx| state.set_value(value, window, cx));
-                    })
-            });
-            v_flex()
-                .gap_1()
-                .child(h_flex().gap_2().flex_wrap().children(buttons))
-                .child(note(
-                    muted,
-                    "点击填入上方「默认模型」，仍需按「保存」生效。".to_string(),
-                ))
-                .into_any_element()
-        }
-    };
-
-    v_flex()
-        .gap_1()
-        .child(heading)
-        .child(body)
-        .into_any_element()
-}
-
 /// 画自定义 provider 的模型发现结果。
-/// 发现结果区块。dsh 和 Pi 共用：两边问的是同一件事，措辞和交互没有理由不同。
-///
-/// `adopt` 用函数指针而不是在函数里判断是哪一侧——加第三种 harness 时这里不该
-/// 再长出一个 match。`id_prefix` 只为让两侧的按钮 id 不撞。
 #[allow(clippy::too_many_arguments)]
 fn render_model_discovery_section(
     id_prefix: &'static str,
@@ -1550,19 +1238,6 @@ struct SettingsRenderSnapshot {
         Entity<gpui_component::input::InputState>,
         Entity<gpui_component::input::InputState>,
     )>,
-    dsh_plugin_manager: Option<DshPluginManager>,
-    dsh_model_editor: Option<DshModelEditor>,
-    dsh_custom_provider_editor: Option<DshCustomProviderEditor>,
-    dsh_model_editor_error: Option<String>,
-    /// 推理强度栏该画什么；`None` 表示表单没打开。
-    dsh_effort_view: Option<DshEffortView>,
-    /// 可选模型栏该画什么；`None` 表示表单没打开。
-    dsh_model_choices_view: Option<DshModelChoicesView>,
-    native_dsh_model_settings: Option<Result<NativeDshModelSettings, String>>,
-    dsh_settings: Result<smelt_model::agent_kind::DshSettingsSummary, String>,
-    dsh_profiles: Vec<AcpProfile>,
-    dsh_missing_profiles: Vec<smelt_model::dsh_service::DshMissingProfile>,
-    dsh_paths: smelt_model::dsh_service::DshConfigPaths,
     pi_model_editor: Option<PiModelEditor>,
     pi_custom_provider_editor: Option<PiCustomProviderEditor>,
     /// Pi 内置 provider 的登录状态；`None` 表示这台机器上还没问过。

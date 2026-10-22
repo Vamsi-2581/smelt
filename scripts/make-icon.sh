@@ -70,7 +70,7 @@ rm -rf "$ICONSET"
 # AppKit 侧 setTemplate: 按 alpha 通道着色，自动适配深浅色菜单栏。
 echo "▶ 渲染 agent 菜单栏 logo …"
 AGENT_ICON_DIR="$ROOT/crates/smelt/assets/icons"
-for a in claude copilot codex grok antigravity cursor opencode kiro pi crush dsh; do
+for a in claude copilot codex grok antigravity cursor opencode kiro pi crush; do
   rsvg-convert -w 32 -h 32 "$AGENT_ICON_DIR/agent-$a.svg" -o "$ASSETS/agent-$a.png"
   echo "   saved $ASSETS/agent-$a.png"
 done

@@ -1,9 +1,6 @@
 //! 自定义 provider 的对话协议，以及「问端点要模型列表」这件事的共享类型。
 //!
-//! **为什么放在这里而不是各自的设置模块。** dsh 和 Pi 的自定义 provider 都由
-//! pi-ai 承载，认的是同一个 `Api` 联合类型。两边原先各写死一份候选列表，结果
-//! 是加了 `openai-responses` 只进了 dsh、Pi 那边选不到——协议本身没有 harness
-//! 之分，列表就不该有两份。
+//! Pi 的自定义 provider 由 pi-ai 承载，认的是它的 `Api` 联合类型。
 //!
 //! 这里刻意只收录 pi-ai 的 `KnownApi`。用户仍可通过直接编辑配置文件用别的值，
 //! 界面不拦；但界面**推荐**的必须是我们知道对端认识的。
@@ -40,8 +37,7 @@ pub fn normalize_provider_api(api: &str) -> &'static str {
 
 /// 端点报告的一个模型。
 ///
-/// dsh 的 Node 发现桥和 Pi 的直连发现都产出它：字段是两边的交集，也是配置里
-/// 真正要落盘的那几项。
+/// Pi 的直连发现产出它：字段是配置里真正要落盘的那几项。
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiscoveredModel {

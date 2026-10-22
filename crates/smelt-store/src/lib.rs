@@ -41,8 +41,7 @@ mod workspace_document;
 
 pub use snapshots::{
     AgentAcpConfigMemoryRecord, AgentAcpEnvRecord, AgentConversationCommandRecord,
-    AgentDefinitionRecord, AgentProfileRecord, AgentUiSnapshot, AutoModelHarness,
-    HistoryTitleRecord, HistoryTitleSnapshot, LaunchEntryRecord, LaunchSnapshot,
+    AgentDefinitionRecord, AgentProfileRecord, AgentUiSnapshot, HistoryTitleRecord, HistoryTitleSnapshot, LaunchEntryRecord, LaunchSnapshot,
     MemoryMetaSnapshot, MemorySettingsRecord, MemoryTrust, MemoryUsageRecord, PairedDevice,
     PublishedSessionRecord, PublishedSessionSnapshot, PublishedWorkspaceMenuSnapshot,
     QuotaCacheQuota, QuotaCacheSnapshot, QuotaCacheStatusRecord, QuotaCacheWindowRecord,
@@ -61,7 +60,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 23;
+pub const STORE_SCHEMA_VERSION: u32 = 24;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -594,20 +593,13 @@ impl Store {
         imp::put_quota_cache_snapshot(&self.backend, snapshot)
     }
 
-    /// 模型目录由 Smelt 维护的 provider，按 id 排序。
-    pub fn auto_model_providers(
-        &self,
-        harness: AutoModelHarness,
-    ) -> Result<Vec<String>, StoreError> {
-        imp::auto_model_providers(&self.backend, harness)
+    /// 模型目录由 Smelt 维护的 Pi 自定义 provider，按 id 排序。
+    pub fn auto_model_providers(&self) -> Result<Vec<String>, StoreError> {
+        imp::auto_model_providers(&self.backend)
     }
 
-    pub fn put_auto_model_providers(
-        &self,
-        harness: AutoModelHarness,
-        providers: &[String],
-    ) -> Result<(), StoreError> {
-        imp::put_auto_model_providers(&self.backend, harness, providers)
+    pub fn put_auto_model_providers(&self, providers: &[String]) -> Result<(), StoreError> {
+        imp::put_auto_model_providers(&self.backend, providers)
     }
 
     pub fn get_workspace_menu_snapshot(
@@ -932,22 +924,18 @@ mod imp {
         Ok(record)
     }
 
-    pub(super) fn auto_model_providers(
-        backend: &Backend,
-        harness: super::AutoModelHarness,
-    ) -> Result<Vec<String>, StoreError> {
+    pub(super) fn auto_model_providers(backend: &Backend) -> Result<Vec<String>, StoreError> {
         read(backend, |connection| {
-            crate::config::read_auto_model_providers(connection, harness)
+            crate::config::read_auto_model_providers(connection)
         })
     }
 
     pub(super) fn put_auto_model_providers(
         backend: &Backend,
-        harness: super::AutoModelHarness,
         providers: &[String],
     ) -> Result<(), StoreError> {
         write(backend, |transaction| {
-            crate::config::write_auto_model_providers(transaction, harness, providers)
+            crate::config::write_auto_model_providers(transaction, providers)
         })
     }
 
@@ -1738,6 +1726,16 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 23 {
+            apply_v24_drop_deepseek_harness(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            // 没有冻结的 v23 形状：删完 DSH 数据、重建完 auto_model_provider 后与当前形状逐字一致，就说明原来正是 v23。
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 22 {
             apply_v23_drop_cross_agent_messaging(&transaction)?;
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
@@ -2128,6 +2126,20 @@ mod imp {
             .any(|table| table == "peer_message_command")
         {
             transaction.execute_batch(crate::schema::MIGRATE_V22_TO_V23)?;
+        }
+        apply_v24_drop_deepseek_harness(transaction)
+    }
+
+    /// v24 删掉 DeepSeek Harness 的全部数据，`auto_model_provider` 去掉 `harness` 列。
+    /// 已经没有 `harness` 列的库跳过。
+    fn apply_v24_drop_deepseek_harness(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        if table_columns(transaction, "auto_model_provider")?
+            .iter()
+            .any(|column| column == "harness")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V23_TO_V24)?;
         }
         Ok(())
     }
@@ -3172,15 +3184,11 @@ mod imp {
     ) -> Result<super::MemorySettingsRecord, E> {
         Err(StoreError::SqliteDisabledOnMobile.into())
     }
-    pub(super) fn auto_model_providers(
-        _backend: &Backend,
-        _harness: super::AutoModelHarness,
-    ) -> Result<Vec<String>, StoreError> {
+    pub(super) fn auto_model_providers(_backend: &Backend) -> Result<Vec<String>, StoreError> {
         unsupported()
     }
     pub(super) fn put_auto_model_providers(
         _backend: &Backend,
-        _harness: super::AutoModelHarness,
         _providers: &[String],
     ) -> Result<(), StoreError> {
         unsupported()
@@ -4238,7 +4246,7 @@ mod tests {
                 })
             );
             assert_eq!(
-                store.auto_model_providers(AutoModelHarness::Pi).unwrap(),
+                store.auto_model_providers().unwrap(),
                 ["deepseek", "token-x"]
             );
             let theme = store.get_terminal_theme_snapshot().unwrap().unwrap();
@@ -4662,6 +4670,98 @@ mod tests {
             )
             .unwrap();
         assert_eq!(event_tables, 0);
+        drop(connection);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v23_database_drops_deepseek_harness_data() {
+        let dir = temp_dir("v23-migration");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(crate::schema::CREATE_SCHEMA)
+            .unwrap();
+        // 当前形状换回带 harness 列的 auto_model_provider，就是一个 v23 库。
+        connection
+            .execute_batch(
+                "DROP TABLE auto_model_provider;
+                 CREATE TABLE auto_model_provider (
+                   harness TEXT NOT NULL CHECK (harness IN ('dsh', 'pi')),
+                   provider TEXT NOT NULL,
+                   PRIMARY KEY (harness, provider)
+                 ) WITHOUT ROWID;
+                 INSERT INTO auto_model_provider(harness, provider)
+                   VALUES ('dsh', 'sub2api'), ('pi', 'token-x');
+                 INSERT INTO session_group(id, position) VALUES ('g-dsh', 0), ('g-pi', 1);
+                 INSERT INTO session(id, group_id, kind, position) VALUES
+                   ('s-dsh', 'g-dsh', 'acp', 0),
+                   ('t-dsh', 'g-dsh', 'terminal', 1),
+                   ('s-pi', 'g-pi', 'acp', 0);
+                 INSERT INTO acp_detail(session_id, agent, launch_command) VALUES
+                   ('s-dsh', 'dsh', 'dsh-acp-rich'),
+                   ('s-pi', 'pi', 'smelt-pi');
+                 INSERT INTO history_title(agent, resume_id, custom_title, updated_at_ms) VALUES
+                   ('dsh', 'r1', 'DSH', 1), ('pi', 'r2', 'Pi', 1);
+                 INSERT INTO agent_acp_command(command_key, command) VALUES
+                   ('acp_dsh_cmd', 'dsh-acp-rich'), ('acp_pi_cmd', 'smelt-pi');
+                 INSERT INTO agent_acp_env(engine_kind_id, name, value) VALUES
+                   ('dsh', 'K', 'v'), ('pi', 'K', 'v');
+                 INSERT INTO agent_profile(id, kind_id, label, workspace_dir, position) VALUES
+                   ('dsh-native-team', 'dsh', 'team', '', 0);
+                 INSERT INTO agent_definition(
+                   id, name, description, engine_kind_id, prompt, plugins_json,
+                   context_folders_json, context_links_json, position
+                 ) VALUES
+                   ('a-dsh', 'D', '', 'dsh', '', X'5B5D', X'5B5D', X'5B5D', 0),
+                   ('a-pi', 'P', '', 'pi', '', X'5B5D', X'5B5D', X'5B5D', 1);
+                 INSERT INTO default_conversation_agent(id, agent_definition_id) VALUES (1, 'a-dsh');
+                 INSERT INTO new_session_pin(position, action_key) VALUES
+                   (0, 'conversation:dsh'),
+                   (1, 'conversation:dsh:profile:dsh-native-team'),
+                   (2, 'conversation:agent:a-dsh'),
+                   (3, 'conversation:agent:a-pi');",
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 23).unwrap();
+        drop(connection);
+
+        drop(Store::open_or_create(&path).unwrap());
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let strings = |sql: &str| -> Vec<String> {
+            connection
+                .prepare(sql)
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            strings("SELECT id FROM session_group ORDER BY id"),
+            ["g-pi"],
+            "DSH 对话连同里面的终端整段删掉"
+        );
+        assert_eq!(strings("SELECT id FROM session ORDER BY id"), ["s-pi"]);
+        assert_eq!(strings("SELECT agent FROM history_title"), ["pi"]);
+        assert_eq!(
+            strings("SELECT command_key FROM agent_acp_command"),
+            ["acp_pi_cmd"]
+        );
+        assert_eq!(strings("SELECT engine_kind_id FROM agent_acp_env"), ["pi"]);
+        assert!(strings("SELECT id FROM agent_profile").is_empty());
+        assert_eq!(strings("SELECT id FROM agent_definition"), ["a-pi"]);
+        assert!(strings("SELECT agent_definition_id FROM default_conversation_agent").is_empty());
+        assert_eq!(
+            strings("SELECT action_key FROM new_session_pin"),
+            ["conversation:agent:a-pi"]
+        );
+        assert_eq!(
+            strings("SELECT provider FROM auto_model_provider"),
+            ["token-x"],
+            "Pi 的名单保留，DSH 的删掉"
+        );
         drop(connection);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -6561,19 +6661,9 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
         assert_eq!(loaded.iroh_relay, "relay.example");
 
         store
-            .put_auto_model_providers(AutoModelHarness::Dsh, &["sub2api".into(), "a".into()])
+            .put_auto_model_providers(&["sub2api".into(), "a".into()])
             .unwrap();
-        assert_eq!(
-            store.auto_model_providers(AutoModelHarness::Dsh).unwrap(),
-            ["a", "sub2api"]
-        );
-        assert!(
-            store
-                .auto_model_providers(AutoModelHarness::Pi)
-                .unwrap()
-                .is_empty(),
-            "两家的名单互不串"
-        );
+        assert_eq!(store.auto_model_providers().unwrap(), ["a", "sub2api"]);
 
         let theme = TerminalThemeSnapshot {
             version: 1,

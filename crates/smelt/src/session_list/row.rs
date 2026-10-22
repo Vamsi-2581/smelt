@@ -15,8 +15,7 @@ pub(super) fn provider_icon(agent: Option<TerminalAgentKind>) -> Icon {
     }
 }
 
-/// ACP agent 的图标。两张表不是同一个集合——dsh 只有 ACP 桥，终端表里查不到它，
-/// 所以直接按稳定存档 id 取资源（`smelt-icons/agent-<id>.svg`）。
+/// ACP agent 的图标。两张表不是同一个集合，所以直接按稳定存档 id 取资源（`smelt-icons/agent-<id>.svg`）。
 pub(super) fn acp_provider_icon(agent: ConversationAgentKind) -> Icon {
     Icon::empty().path(agent.icon_asset())
 }

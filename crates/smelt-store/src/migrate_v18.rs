@@ -6,7 +6,7 @@
 //! 不搬，随 `kv` 一起删掉。单项解析不了就跳过这一项，不让整次升级失败。
 
 use crate::{
-    AutoModelHarness, MemorySettingsRecord, PublishedWorkspaceMenuSnapshot, QuotaCacheQuota,
+    MemorySettingsRecord, PublishedWorkspaceMenuSnapshot, QuotaCacheQuota,
     QuotaCacheSnapshot, QuotaCacheStatusRecord, QuotaCacheWindowRecord, RemoteConfigSnapshot,
     StoreError, TerminalThemeSnapshot, WorkspaceMenuProjectRecord, WorkspaceMenuSessionRecord,
 };
@@ -38,7 +38,7 @@ pub(crate) struct V17RuntimeState {
     memory_settings: Option<MemorySettingsRecord>,
     remote_config: Option<RemoteConfigSnapshot>,
     terminal_theme: Option<TerminalThemeSnapshot>,
-    auto_models: Vec<(AutoModelHarness, Vec<String>)>,
+    pi_auto_models: Vec<String>,
     quota_cache: Option<QuotaCacheSnapshot>,
     workspace_menu: Option<PublishedWorkspaceMenuSnapshot>,
     launch_version: Option<u32>,
@@ -134,15 +134,8 @@ pub(crate) fn read_v17_state(connection: &Connection) -> Result<V17RuntimeState,
             search_hit_current: color("search_hit_current", "searchHitCurrent"),
         }
     });
-    for (harness, scope) in [
-        (AutoModelHarness::Dsh, "dsh_auto_models"),
-        (AutoModelHarness::Pi, "pi_auto_models"),
-    ] {
-        if let Some(object) = scoped_object(connection, scope)? {
-            state
-                .auto_models
-                .push((harness, string_list(object.get("providers"))));
-        }
+    if let Some(object) = scoped_object(connection, "pi_auto_models")? {
+        state.pi_auto_models = string_list(object.get("providers"));
     }
     state.quota_cache =
         scoped_object(connection, "quota_cache")?.map(|object| quota_cache(&object));
@@ -238,8 +231,12 @@ pub(crate) fn write_v18_state(
     if let Some(theme) = &state.terminal_theme {
         crate::config::write_terminal_theme_snapshot(transaction, theme)?;
     }
-    for (harness, providers) in &state.auto_models {
-        crate::config::write_auto_model_providers(transaction, *harness, providers)?;
+    // v18 的表还带 `harness` 列（v24 去掉），不能用按当前形状写的 `config` 函数。
+    for provider in &state.pi_auto_models {
+        transaction.execute(
+            "INSERT OR IGNORE INTO auto_model_provider(harness, provider) VALUES ('pi', ?1)",
+            [provider],
+        )?;
     }
     if let Some(quota) = &state.quota_cache {
         crate::config::write_quota_cache_snapshot(transaction, quota)?;

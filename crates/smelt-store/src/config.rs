@@ -1,7 +1,7 @@
 //! 运行时的设置与缓存：每项一张单行表（`id = 1`），列表另放子表，按 `position` 保序。
 
 use crate::{
-    AutoModelHarness, MemorySettingsRecord, PublishedWorkspaceMenuSnapshot, QuotaCacheQuota,
+    MemorySettingsRecord, PublishedWorkspaceMenuSnapshot, QuotaCacheQuota,
     QuotaCacheSnapshot, QuotaCacheStatusRecord, QuotaCacheWindowRecord, RemoteConfigSnapshot,
     StoreError, TerminalThemeSnapshot, WorkspaceCatalogWriter, WorkspaceMenuProjectRecord,
     WorkspaceMenuSessionRecord,
@@ -317,28 +317,23 @@ pub(crate) fn write_terminal_theme_snapshot(
 
 pub(crate) fn read_auto_model_providers(
     connection: &Connection,
-    harness: AutoModelHarness,
 ) -> Result<Vec<String>, StoreError> {
-    let mut statement = connection
-        .prepare("SELECT provider FROM auto_model_provider WHERE harness = ?1 ORDER BY provider")?;
-    let rows = statement.query_map([harness.as_str()], |row| row.get(0))?;
+    let mut statement =
+        connection.prepare("SELECT provider FROM auto_model_provider ORDER BY provider")?;
+    let rows = statement.query_map([], |row| row.get(0))?;
     rows.collect::<Result<Vec<String>, _>>()
         .map_err(StoreError::from)
 }
 
 pub(crate) fn write_auto_model_providers(
     transaction: &Transaction<'_>,
-    harness: AutoModelHarness,
     providers: &[String],
 ) -> Result<(), StoreError> {
-    transaction.execute(
-        "DELETE FROM auto_model_provider WHERE harness = ?1",
-        [harness.as_str()],
-    )?;
+    transaction.execute("DELETE FROM auto_model_provider", [])?;
     for provider in providers {
         transaction.execute(
-            "INSERT OR IGNORE INTO auto_model_provider(harness, provider) VALUES (?1, ?2)",
-            params![harness.as_str(), provider],
+            "INSERT OR IGNORE INTO auto_model_provider(provider) VALUES (?1)",
+            [provider],
         )?;
     }
     Ok(())

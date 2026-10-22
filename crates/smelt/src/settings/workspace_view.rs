@@ -47,33 +47,6 @@ impl Workspace {
                 .as_ref()
                 .map(|inputs| inputs.rows.clone())
                 .unwrap_or_default(),
-            dsh_plugin_manager: self.dsh_plugin_manager.clone(),
-            dsh_model_editor: self.dsh_model_editor.clone(),
-            dsh_custom_provider_editor: self.dsh_custom_provider_editor.clone(),
-            dsh_model_editor_error: self.dsh_model_editor_error.clone(),
-            dsh_effort_view: self.native_dsh_effort_view(cx),
-            dsh_model_choices_view: self.native_dsh_model_choices_view(cx),
-            native_dsh_model_settings: self.dsh_native_model_settings.clone(),
-            dsh_settings: self
-                .dsh_config
-                .as_ref()
-                .map(|config| config.settings_summary.clone())
-                .unwrap_or_else(|| Err(self.dsh_config_pending_text())),
-            dsh_profiles: self
-                .dsh_config
-                .as_ref()
-                .map(|config| config.profiles.clone())
-                .unwrap_or_default(),
-            dsh_missing_profiles: self
-                .dsh_config
-                .as_ref()
-                .map(|config| config.missing_profiles.clone())
-                .unwrap_or_default(),
-            dsh_paths: self
-                .dsh_config
-                .as_ref()
-                .map(|config| config.paths.clone())
-                .unwrap_or_default(),
             pi_model_editor: self.pi_model_editor.clone(),
             pi_custom_provider_editor: self.pi_custom_provider_editor.clone(),
             pi_auth_providers: self.pi_auth_providers.clone(),
@@ -235,7 +208,6 @@ impl Workspace {
                         workspace.ensure_appearance_controls(window, cx);
                         workspace.ensure_launch_inputs(window, cx);
                         workspace.ensure_profile_inputs(window, cx);
-                        workspace.reload_native_dsh_model_settings(cx);
                         if cx
                             .try_global::<AcpRuntimeState>()
                             .is_some_and(|state| state.diagnostics.is_none() && !state.refreshing)

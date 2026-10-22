@@ -1,28 +1,80 @@
 //! 哪些 Pi 自定义 provider 的模型目录由 Smelt 照端点维护。
 //!
-//! 标记的语义、存法和 dsh 那边完全一样（见 [`crate::auto_model_store`]），差别
-//! 只有两处：名单存在自己的文件里（同名 provider 在两边是两回事），以及问端点
-//! 走 [`crate::pi_model_discovery`] 的直连 HTTP，不需要任何 Node 运行时。
+//! 「用户没手填模型 = 目录交给我们照端点刷新」：名单存在运行时的库里，问端点走
+//! [`crate::pi_model_discovery`] 的直连 HTTP，不需要任何 Node 运行时。
 //!
 //! **为什么「自动」不等于「不写模型」。** Pi 从 `models.json` 里解析 provider
 //! 的模型列表，写空等于这个 provider 一个模型都选不了。所以文件里永远是一份具
 //! 体列表，自动只是说这份列表由 Smelt 在启动时刷新，而不是由用户手打。这也顺带
 //! 保证离线可用：拉不到就沿用上次那份。
 
-pub use crate::auto_model_store::AutoModelStore as PiAutoModelStore;
+use std::collections::BTreeSet;
 
-const HARNESS: smelt_store::AutoModelHarness = smelt_store::AutoModelHarness::Pi;
+/// 一份「哪些 provider 的目录是自动的」名单。
+///
+/// 用 `BTreeSet` 是为了写盘顺序稳定，避免每次启动都产生一次无意义的 diff。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PiAutoModelStore {
+    providers: BTreeSet<String>,
+}
+
+impl PiAutoModelStore {
+    pub fn is_auto(&self, provider: &str) -> bool {
+        self.providers.contains(provider)
+    }
+
+    /// 所有自动维护目录的 provider，按 id 排序。
+    pub fn auto_providers(&self) -> Vec<String> {
+        self.providers.iter().cloned().collect()
+    }
+
+    pub fn set_auto(&mut self, provider: &str, auto: bool) {
+        if auto {
+            self.providers.insert(provider.to_string());
+        } else {
+            self.providers.remove(provider);
+        }
+    }
+
+    /// 改名时把标记带过去。设置页允许改 provider id，标记不跟着走的话，用户会得到
+    /// 一个「以为自动、其实再也不刷新」的 provider——比不支持改名更糟。
+    pub fn rename(&mut self, from: &str, to: &str) {
+        if from == to || !self.is_auto(from) {
+            return;
+        }
+        self.set_auto(from, false);
+        self.set_auto(to, true);
+    }
+}
 
 pub fn load() -> PiAutoModelStore {
-    crate::auto_model_store::load(HARNESS)
+    let Ok(store) = crate::sqlite_state::default_sqlite_store() else {
+        return PiAutoModelStore::default();
+    };
+    PiAutoModelStore {
+        providers: store
+            .auto_model_providers()
+            .unwrap_or_default()
+            .into_iter()
+            .collect(),
+    }
 }
 
 pub fn save(store: &PiAutoModelStore) {
-    crate::auto_model_store::save(HARNESS, store);
+    if let Ok(sqlite) = crate::sqlite_state::default_sqlite_store() {
+        let _ = sqlite.put_auto_model_providers(&store.auto_providers());
+    }
 }
 
+/// 读改写一次。调用点都是「翻一个标记」这种小改动，各自 load/save 容易漏掉其中一半。
+/// 没有实际变化就不落盘，免得每次启动都白写一遍。
 pub fn update(mutate: impl FnOnce(&mut PiAutoModelStore)) {
-    crate::auto_model_store::update(HARNESS, mutate);
+    let mut store = load();
+    let before = store.clone();
+    mutate(&mut store);
+    if store != before {
+        save(&store);
+    }
 }
 
 /// 一个 provider 的刷新结果。
@@ -123,6 +175,42 @@ fn refresh_one(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remembers_marked_providers() {
+        let mut store = PiAutoModelStore::default();
+        store.set_auto("sub2api", true);
+
+        assert!(store.is_auto("sub2api"));
+        assert!(!store.is_auto("other"));
+        assert_eq!(store.auto_providers(), vec!["sub2api".to_string()]);
+    }
+
+    #[test]
+    fn clearing_something_never_set_is_not_an_error() {
+        let mut store = PiAutoModelStore::default();
+        store.set_auto("ghost", false);
+
+        assert_eq!(store, PiAutoModelStore::default());
+    }
+
+    #[test]
+    fn rename_carries_the_mark() {
+        let mut store = PiAutoModelStore::default();
+        store.set_auto("old", true);
+        store.rename("old", "new");
+
+        assert!(!store.is_auto("old"));
+        assert!(store.is_auto("new"));
+    }
+
+    #[test]
+    fn renaming_a_manual_provider_does_not_make_it_auto() {
+        let mut store = PiAutoModelStore::default();
+        store.rename("old", "new");
+
+        assert!(!store.is_auto("new"));
+    }
 
     /// 没有任何标记时不该去碰配置文件，更不该发请求。
     #[test]

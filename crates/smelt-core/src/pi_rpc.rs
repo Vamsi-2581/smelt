@@ -551,7 +551,7 @@ fn spawn_process(
     let path = environment
         .remove("PATH")
         .unwrap_or_else(crate::acp_conn::extended_search_path);
-    command.env("PATH", crate::agent_kind::prepend_dsh_cli_shim(&path));
+    command.env("PATH", path);
     command.envs(environment);
     // 会话身份与 capability token 必须由 daemon 决定；用户在旧式命令
     // 前缀或配置 env 中写了同名变量也不能覆盖。

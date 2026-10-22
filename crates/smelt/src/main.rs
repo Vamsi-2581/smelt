@@ -1181,10 +1181,9 @@ impl Session {
         }
     }
 
-    /// 状态栏菜单项的 logo 标识。ACP 身份优先：一个只能 ACP 跑的 agent（dsh）
-    /// 在终端表里没有变体，`provider_kind` 对它只能给 None，用它选图标就会把
-    /// dsh 显示成通用终端方块。两张表的 id 是同一套（有不变量测试守着），所以
-    /// 同一家 agent 无论哪条路径跑，拿到的都是同一枚 logo。
+    /// 状态栏菜单项的 logo 标识。ACP 身份优先：只能 ACP 跑的 agent 在终端表里
+    /// 没有变体，`provider_kind` 对它只能给 None。两张表的 id 是同一套（有不变量
+    /// 测试守着），所以同一家 agent 无论哪条路径跑，拿到的都是同一枚 logo。
     pub(crate) fn agent_icon_id(&self, cx: &App) -> Option<&'static str> {
         self.acp_kind(cx)
             .map(|kind| kind.id())
@@ -1197,7 +1196,7 @@ impl Session {
     pub(crate) fn provider_kind(&self, cx: &App) -> Option<settings::TerminalAgentKind> {
         match &self.kind {
             SessionKind::Term { active, .. } => pane_provider_kind(active, cx),
-            // 只有 ACP 的 agent（dsh）在终端表里没有对应项。这里返回 None 而不是
+            // 只有 ACP 的 agent 在终端表里没有对应项。这里返回 None 而不是
             // 硬凑一个，侧栏的标签与图标由 `acp_kind()` 单独给出。
             SessionKind::Conversation(view) => view.read(cx).agent_kind().terminal(),
         }
@@ -2563,22 +2562,6 @@ struct Workspace {
     launch_inputs: Option<settings::LaunchInputs>,
     /// 手动添加 workspace 列表编辑器（设置页「Agent 集成」分组懒创建）。
     profile_inputs: Option<settings::ProfileInputs>,
-    /// 原生 DSH 凭据写入表单；值只驻留内存，保存后立即清空。
-    /// 原生 DSH 插件管理面板；未展开时为 None。
-    dsh_plugin_manager: Option<settings::DshPluginManager>,
-    /// 原生 DSH DeepSeek 模型设置表单；API key 仅在输入控件内存中保留至保存或取消。
-    dsh_model_editor: Option<settings::DshModelEditor>,
-    /// 原生 DSH 自定义 Provider 表单；与官方 DeepSeek 配置分开呈现。
-    dsh_custom_provider_editor: Option<settings::DshCustomProviderEditor>,
-    /// 原生 DSH Provider 摘要缓存；仅在打开设置或显式修改后刷新。
-    dsh_native_model_settings: Option<Result<settings::NativeDshModelSettings, String>>,
-    /// 运行时给的 DeepSeek Harness 配置快照。渲染只读它。
-    dsh_config: Option<smelt_model::dsh_service::DshConfig>,
-    dsh_config_error: Option<String>,
-    /// 读取的代数：晚回来的旧读取不能盖掉更新的快照。
-    dsh_config_generation: u64,
-    /// 交互式原生 DSH 模型表单无法打开或保存时的持久可见错误。
-    dsh_model_editor_error: Option<String>,
     /// 原生 Pi 模型设置表单。
     pi_model_editor: Option<settings::PiModelEditor>,
     /// 原生 Pi 自定义 Provider 表单。
@@ -2614,11 +2597,6 @@ struct Workspace {
     pi_plugin_pending_delete: Option<String>,
     /// 插件导入 / 删除的最近一次错误。
     pi_plugin_error: Option<String>,
-    /// 每条路由实际支持的推理强度。`None` 表示还没问过。
-    ///
-    /// 问一次要起一个完整 dsh 运行时（数秒），所以是异步填的，界面在填好前不画
-    /// 强度选择器——宁可晚几秒出现，也不先摆一排可能发一次失败一次的档位。
-    dsh_model_capabilities: Option<settings::NativeDshCapabilityState>,
     /// 设置面板的有状态组件（懒创建）：不透明度滑块 + 界面字号滑块 + 终端字号滑块 + 背景色取色器
     /// + 背景图透明度滑块。
     opacity_slider: Option<Entity<SliderState>>,
@@ -3192,15 +3170,6 @@ impl Workspace {
             history_project_root: None,
             launch_inputs: None,
             profile_inputs: None,
-            dsh_plugin_manager: None,
-            dsh_model_editor: None,
-            dsh_custom_provider_editor: None,
-            dsh_native_model_settings: None,
-            dsh_config: None,
-            dsh_config_error: None,
-            dsh_config_generation: 0,
-            dsh_model_editor_error: None,
-            dsh_model_capabilities: None,
             pi_model_editor: None,
             pi_custom_provider_editor: None,
             pi_auth_providers: None,
@@ -4207,7 +4176,7 @@ fn command_program(command: &str) -> Option<&str> {
 }
 
 fn command_matches_agent(command: &str, agent: settings::HistorySourceKind) -> bool {
-    // 没有终端对应项的 agent（dsh）永远匹配不上任何启动项——不是"匹配所有"。
+    // 没有终端对应项的 agent 永远匹配不上任何启动项——不是"匹配所有"。
     agent
         .terminal()
         .is_some_and(|terminal| command_program(command) == Some(terminal.cli_program()))
@@ -4246,7 +4215,7 @@ fn shell_quote(value: &str) -> String {
 
 /// 各家 CLI/TUI 的历史恢复语法不同，但都使用同一个 canonical session id。
 ///
-/// 返回 None 表示这家压根没有可在终端里继续的 CLI（dsh 只有 ACP 桥），调用方
+/// 返回 None 表示这家压根没有可在终端里继续的 CLI，调用方
 /// 该把入口藏起来，而不是拿一条拼不出来的命令去起终端。
 fn cli_resume_command(
     agent: settings::HistorySourceKind,
@@ -4371,7 +4340,7 @@ fn open_workspace_window(cx: &mut App, window_bg: WindowBackgroundAppearance) ->
 /// 所以这里也按 id 建表，而不是一串手写的 `if path == ...`。
 ///
 /// 那串 if 链是「加一家 agent 要改的第 N 个地方」里最容易漏的一个：漏了不报错、
-/// 不 panic，只是侧栏那一格空着——dsh 接进来时正是这么漏的。查表 + 下面那条
+/// 不 panic，只是侧栏那一格空着。查表 + 下面那条
 /// 遍历所有 agent 的不变量测试，把「漏登记」从上线后才发现变成编译测试失败。
 const AGENT_ICON_SVG: &[(&str, &[u8])] = &[
     ("claude", include_bytes!("../assets/icons/agent-claude.svg")),
@@ -4393,7 +4362,6 @@ const AGENT_ICON_SVG: &[(&str, &[u8])] = &[
     ("kiro", include_bytes!("../assets/icons/agent-kiro.svg")),
     ("pi", include_bytes!("../assets/icons/agent-pi.svg")),
     ("crush", include_bytes!("../assets/icons/agent-crush.svg")),
-    ("dsh", include_bytes!("../assets/icons/agent-dsh.svg")),
 ];
 
 /// 组件库没有垃圾桶：`Delete` 是带 X 的退格键，`CircleX` 是带圈的关。
@@ -4756,9 +4724,9 @@ fn main() {
             if cx.global::<settings::AgentHostState>().agent_hooks_enabled {
                 settings::reconcile_agent_hooks(cx);
             }
-            // 运行时已经连上：请它照端点刷新 Pi、dsh 里标记为「自动」的自定义 provider
+            // 运行时已经连上：请它照端点刷新 Pi 里标记为「自动」的自定义 provider
             // 的模型目录。用户没手填模型就是把这份目录交给我们维护，中转网关上下线模型
-            // 不该要他再来点一次。dsh 要起 Node 子进程，几秒级，都放后台。
+            // 不该要他再来点一次。放后台跑。
             cx.background_executor()
                 .spawn(async {
                     use smelt_runtime_client::protocol::control::EmptyParams;
@@ -4768,12 +4736,6 @@ fn main() {
                     >(EmptyParams::default(), timeout)
                     {
                         eprintln!("[pi] 刷新自动模型目录失败：{}", runtime_call::error_text(error));
-                    }
-                    if let Err(error) = runtime_call::call::<
-                        smelt_model::control_api::DshProvidersRefreshAuto,
-                    >(EmptyParams::default(), timeout)
-                    {
-                        eprintln!("[dsh] 刷新自动模型目录失败：{}", runtime_call::error_text(error));
                     }
                 })
                 .detach();

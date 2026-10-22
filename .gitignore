@@ -23,20 +23,8 @@ __pycache__/
 /plugins/*/gpui-kit.d.ts
 /plugins/*/jsconfig.json
 
-# dsh 桥 `@smelt-ai/dsh-acp-rich` 已经独立成仓（github.com/smelt-ai/dsh-acp-rich），
-# 本地一般就 clone 在 plugins/ 下面，不入主仓。
-/plugins/dsh-acp-rich/
-
 # 本地手测用的一次性文件
 /mermaid-test.md
-
-# dsh 实测（`dsh_live_tests`，见 crates/smelt-core/src/acp_conn.rs）跑起来的
-# harness 会话库。桥的 profile 里 `root: './.sessions'` 曾相对**进程 cwd** 解析，
-# 而 smelt 把 agent 子进程的 cwd 设成用户的项目目录，于是同一份 profile 会往每个
-# 打开过的项目里写这两个目录。已在桥仓修掉（bin 启动前 chdir 到 profile 所在目录，
-# 相对路径改为相对配置文件解析）。这两条留着，是防旧版桥还装在机器上。
-/.sessions/
-/.sessions-index/
 
 # TS 包（packages/pi-agent）的依赖树，不入库。
 packages/*/node_modules/

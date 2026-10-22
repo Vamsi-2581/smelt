@@ -1,12 +1,11 @@
 # 第三方图标资源
 
 `agent-claude.svg`、`agent-codex.svg`、`agent-grok.svg`、`agent-cursor.svg`、
-`agent-opencode.svg`、`agent-kiro.svg` 和 `agent-dsh.svg` 来自
+`agent-opencode.svg` 和 `agent-kiro.svg` 来自
 [LobeHub Icons](https://github.com/lobehub/lobe-icons) 的静态 SVG 集合，该集合以
-MIT License 发布。`assets/agent-dsh.png` 与 `assets/agent-kiro.png` 由同一份 SVG
-光栅化为菜单栏所需的 32×32 单色蒙版，只保留 alpha 通道（着色由 Smelt 按会话状态在
-运行时完成），未改动图形本身。DeepSeek 名称与商标归 DeepSeek 所有；Kiro 名称与商标
-归 Amazon / AWS 所有。
+MIT License 发布。`assets/agent-kiro.png` 由同一份 SVG 光栅化为菜单栏所需的 32×32
+单色蒙版，只保留 alpha 通道（着色由 Smelt 按会话状态在运行时完成），未改动图形本身。
+Kiro 名称与商标归 Amazon / AWS 所有。
 
 `agent-copilot.svg` 使用 GitHub 提供的 `GitHub_Invertocat_Black.svg` 资源，
 仅将填充色表达为 `currentColor` 以适配 Smelt 的深浅主题。图标所对应的产品名称

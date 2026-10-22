@@ -140,7 +140,6 @@ mod control;
 mod conversation_image;
 mod subagent_transcript;
 mod devices;
-mod dsh_control;
 mod event_hub;
 mod files_control;
 mod git_control;

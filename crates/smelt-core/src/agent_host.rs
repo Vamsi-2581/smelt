@@ -49,14 +49,12 @@ fn from_snapshot(snapshot: smelt_store::AgentUiSnapshot) -> AgentHostSettings {
             .profiles
             .into_iter()
             .map(|profile| AcpProfile {
-                native_launch: None,
                 id: profile.id,
                 kind_id: profile.kind_id,
                 label: profile.label,
                 workspace_dir: profile.workspace_dir,
             })
             .collect(),
-        native_dsh_profiles: Vec::new(),
         agents: Vec::new(),
         default_conversation_agent: None,
     }
@@ -154,7 +152,6 @@ fn load_on(store: &smelt_store::Store) -> Result<AgentHostSettings, String> {
     }
     settings.agents = crate::agent_definition_store::list_agent_definitions_on(store)
         .map_err(|e| e.to_string())?;
-    settings.native_dsh_profiles = crate::agent_kind::native_dsh_profiles();
     settings.default_conversation_agent = crate::default_conversation::load_on(store);
     Ok(settings)
 }
@@ -346,7 +343,6 @@ mod tests {
 
     fn profile(id: &str, label: &str) -> AcpProfile {
         AcpProfile {
-            native_launch: None,
             id: id.into(),
             kind_id: "claude".into(),
             label: label.into(),

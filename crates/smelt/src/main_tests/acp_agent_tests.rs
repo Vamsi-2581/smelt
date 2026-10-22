@@ -385,20 +385,6 @@ fn cli_resume_command_quotes_shell_arguments() {
     );
 }
 
-/// dsh 没有可在终端里继续的 CLI，它只有 ACP 桥。这里必须是 None——拼出一条
-/// 别家的命令会把用户带进一个完全无关的 agent。
-#[test]
-fn cli_resume_command_has_no_answer_for_an_acp_only_agent() {
-    assert_eq!(
-        cli_resume_command(ConversationAgentKind::Dsh.into(), "", "history-1"),
-        None
-    );
-    assert!(!command_matches_agent(
-        "dsh",
-        ConversationAgentKind::Dsh.into()
-    ));
-}
-
 /// 只有 TUI 的 agent 照样能在终端里续接——这正是它唯一的续接路径，不能因为
 /// 它没有 ACP 就连 CLI 续接一起丢掉。实测 `agy --help`：`--conversation <id>`。
 #[test]

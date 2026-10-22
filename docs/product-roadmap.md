@@ -78,7 +78,7 @@ Bun 1.4.3 仍按 generation 下载到 `~/.smelt/runtime`，`~/.smelt/runtime/bin
 
 能力与权限语义（尤其 `request_permission`）**逐家实测**，不假设「接了 ACP = 会弹权限门」。
 
-- [x] **可配置的 agent 列表**（替单一 `acp_cmd`）：出厂八家裸 agent + profile-only DSH，用户可增 custom，每项含名称/启动命令（静态注册表 `CONVERSATION_AGENTS` + `ConversationCommands`，按 agent id 存储）
+- [x] **可配置的 agent 列表**（替单一 `acp_cmd`）：出厂八家 agent，用户可增 custom，每项含名称/启动命令（静态注册表 `CONVERSATION_AGENTS` + `ConversationCommands`，按 agent id 存储）
 - [x] Claude 适配器锁定版本并由 `ensure_bun` 拉取；Codex 走标准 `codex-acp` 通道
 - [x] Pi 原生 RPC 驱动：编译好的 `smelt-pi`、锁定依赖、流式/工具/权限/取消/恢复、模型与推理配置
 - [x] 侧栏选用哪家 agent；会话记住选的是谁；UI 标注「适配器（smelt 代管）/ 原生（需本机 CLI）」

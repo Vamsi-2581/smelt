@@ -150,9 +150,6 @@ pub(crate) fn history_source_tabs(
 ) -> Vec<HistorySourceTab> {
     let mut tabs = Vec::new();
     for kind in HistorySourceKind::ALL {
-        if !kind.is_bare_kind() {
-            continue;
-        }
         // 智能体上下文只允许当前引擎；引擎总是一个 ACP 种类，所以纯终端
         // 来源在这种上下文里天然不匹配。
         if restrict_to_kind.is_none_or(|only| kind.acp() == Some(only)) {
@@ -1320,10 +1317,7 @@ fn migration_menu(
 ) -> gpui_component::menu::PopupMenu {
     let config = cx.global::<crate::settings::AgentHostState>().clone();
     let mut menu = menu.separator().item(PopupMenuItem::label("迁移到"));
-    for target_agent in ConversationAgentKind::ALL
-        .into_iter()
-        .filter(|agent| agent.is_bare_kind())
-    {
+    for target_agent in ConversationAgentKind::ALL {
         if target_agent == source.agent && source_profile_id.is_none() {
             continue;
         }
@@ -1504,7 +1498,6 @@ mod tests {
     #[test]
     fn history_resume_profile_launch_uses_current_agent_command() {
         let profile = AcpProfile {
-            native_launch: None,
             id: "quant".into(),
             kind_id: "claude".into(),
             label: "Quant".into(),
@@ -1617,19 +1610,13 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_project_lists_bare_kinds_and_skips_profile_bound_agents() {
+    fn ordinary_project_lists_every_history_source_without_profiles() {
         let tabs = history_source_tabs(None, []);
-        assert!(!tabs.is_empty());
-        assert!(tabs.iter().all(|tab| tab.kind.is_bare_kind()));
+        assert_eq!(tabs.len(), crate::settings::HistorySourceKind::ALL.len());
         assert!(tabs.iter().all(|tab| tab.profile_id.is_none()));
         assert!(
             tabs.iter()
                 .any(|tab| tab.kind == ConversationAgentKind::Pi.into())
-        );
-        assert!(
-            !tabs
-                .iter()
-                .any(|tab| tab.kind == ConversationAgentKind::Dsh.into())
         );
         // 只有 TUI 的 agent 同样要出现在历史 tab 里：能不能读历史与有没有 ACP 无关。
         assert!(tabs.iter().any(|tab| tab.kind

@@ -105,7 +105,6 @@ String agentDisplayName(String agent) {
     'opencode': 'OpenCode',
     'kiro': 'Kiro',
     'crush': 'Crush',
-    'dsh': 'DSH',
     'antigravity': 'Antigravity',
   };
   final known = names[key];

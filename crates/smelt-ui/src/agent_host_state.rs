@@ -135,10 +135,6 @@ pub struct AgentHostState {
     pub acp_cmds: ConversationCommands,
     /// 各家 ACP agent 额外注入的环境变量，按 agent id 存。
     ///
-    /// 用途是把普通 ACP adapter 的额外环境变量结构化保存。原生 dsh profile
-    /// 不读取这里：它的凭据和设置必须继续由 dsh 自己管理，两个 Host 才会看到
-    /// 完全相同的运行时配置。
-    ///
     /// 单独一个嵌套键（不像命令那样平铺）：这是新字段，没有历史键名包袱，嵌套
     /// 能让"加一家 agent"继续只改 `CONVERSATION_AGENTS` 一张表。未知 id 原样保留，
     /// 降级运行时不会把别的版本写的配置吃掉。
@@ -150,10 +146,6 @@ pub struct AgentHostState {
     /// 在所有项目与 workspace 间共享最近选择；不同 agent 的私有 value id 不串用。
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub acp_config_memory: BTreeMap<String, Vec<(String, String)>>,
-    /// Profiles discovered from native `$DSH_HOME/profiles`. They are runtime
-    /// facts, not Smelt settings, so they never enter the agent UI snapshot.
-    #[serde(skip)]
-    native_dsh_profiles: Vec<AcpProfile>,
     /// 手动添加的 workspace（同一家 agent 可以有好几个，比如 Claude 的默认
     /// `.claude` 和自定义的 `.claude-quant` 并存）。基础 agent 槽位不变、
     /// 走各自默认路径；这里只装"额外"的。
@@ -215,14 +207,11 @@ impl AgentHostState {
     }
 
     pub fn find_profile(&self, id: &str) -> Option<&AcpProfile> {
-        self.profiles
-            .iter()
-            .chain(&self.native_dsh_profiles)
-            .find(|p| p.id == id)
+        self.profiles.iter().find(|p| p.id == id)
     }
 
     pub fn all_profiles(&self) -> impl Iterator<Item = &AcpProfile> {
-        self.profiles.iter().chain(&self.native_dsh_profiles)
+        self.profiles.iter()
     }
 
     /// 某个 agent 当前生效的额外环境变量。
@@ -302,17 +291,6 @@ impl AgentHostState {
     /// 唯一接缝。会话侧一律走这里，不要再自己 `from_command(acp_cmd_for(..))`
     /// ——那样拼出来的规格永远少了环境变量，且漏一处就是"设置里填了不生效"。
     pub fn acp_launch_for(&self, agent: ConversationAgentKind) -> ConversationLaunchSpec {
-        // DSH 的运行时事实（模型、凭据、插件与 profile）只属于原生 dsh。
-        // “适配器 DSH”是主界面未选择额外 workspace 时的默认入口，因此也必须
-        // 指向已经安装 Smelt Host 的原生 profile，而不能退回历史私有运行时。
-        if !agent.is_bare_kind()
-            && let Some(launch) = self
-                .native_dsh_profiles
-                .first()
-                .and_then(|profile| profile.launch_spec().ok())
-        {
-            return launch;
-        }
         let mut launch = agent.default_launch();
         launch.command = self.acp_cmd_for(agent);
         // 用户显式配置优先于出厂覆盖；这样既默认全权限，也保留降权和自定义
@@ -334,19 +312,14 @@ impl AgentHostState {
             )
         })?;
         let mut launch = profile.launch_spec()?;
-        let native_dsh = profile.is_native_dsh();
-        if !native_dsh {
-            launch.command = self.acp_cmd_for(kind);
-        }
+        launch.command = self.acp_cmd_for(kind);
         // workspace 目录那条环境变量是 profile 的立身之本，不能被用户配的同名
         // 变量顶掉；其余按 kind 继承并允许显式覆盖出厂环境，这样既能默认全权限，
         // 也能在设置里把某个 OpenCode workspace 降权。
-        if !native_dsh {
-            let workspace_env = profile.env_var()?;
-            for (name, value) in self.acp_env_for(kind) {
-                if name != workspace_env {
-                    launch.env.insert(name, value);
-                }
+        let workspace_env = profile.env_var()?;
+        for (name, value) in self.acp_env_for(kind) {
+            if name != workspace_env {
+                launch.env.insert(name, value);
             }
         }
         Ok(launch)
@@ -456,7 +429,6 @@ impl Default for AgentHostState {
             acp_cmds: ConversationCommands::with_defaults(),
             acp_env: BTreeMap::new(),
             acp_config_memory: BTreeMap::new(),
-            native_dsh_profiles: Vec::new(),
             profiles: Vec::new(),
             agents: Vec::new(),
             automations: Vec::new(),
@@ -500,7 +472,6 @@ impl AgentHostState {
             env: self.acp_env.clone(),
             config_memory: self.acp_config_memory.clone(),
             profiles: self.profiles.clone(),
-            native_dsh_profiles: self.native_dsh_profiles.clone(),
             agents: self.agents.clone(),
             default_conversation_agent: self.default_conversation_agent.clone(),
         }
@@ -518,7 +489,6 @@ impl AgentHostState {
         self.acp_env = settings.env;
         self.acp_config_memory = settings.config_memory;
         self.profiles = settings.profiles;
-        self.native_dsh_profiles = settings.native_dsh_profiles;
         self.agents = settings.agents;
         self.default_conversation_agent = settings.default_conversation_agent;
         self.runtime_loaded = true;
@@ -913,17 +883,17 @@ mod tests {
     fn launch_spec_carries_the_env_from_settings() {
         let mut config = AgentHostState::default();
         config.set_acp_env_for(
-            ConversationAgentKind::Dsh,
-            BTreeMap::from([("DEEPSEEK_API_KEY".into(), "sk-abc".into())]),
+            ConversationAgentKind::Codex,
+            BTreeMap::from([("OPENAI_API_KEY".into(), "sk-abc".into())]),
         );
 
-        let launch = config.acp_launch_for(ConversationAgentKind::Dsh);
+        let launch = config.acp_launch_for(ConversationAgentKind::Codex);
         assert_eq!(
             launch.command,
-            config.acp_cmd_for(ConversationAgentKind::Dsh)
+            config.acp_cmd_for(ConversationAgentKind::Codex)
         );
         assert_eq!(
-            launch.env.get("DEEPSEEK_API_KEY").map(String::as_str),
+            launch.env.get("OPENAI_API_KEY").map(String::as_str),
             Some("sk-abc")
         );
 
@@ -1098,10 +1068,10 @@ mod tests {
     fn clearing_the_env_drops_the_key_instead_of_storing_an_empty_map() {
         let mut config = AgentHostState::default();
         config.set_acp_env_for(
-            ConversationAgentKind::Dsh,
+            ConversationAgentKind::Codex,
             BTreeMap::from([("K".to_string(), "v".to_string())]),
         );
-        config.set_acp_env_for(ConversationAgentKind::Dsh, BTreeMap::new());
+        config.set_acp_env_for(ConversationAgentKind::Codex, BTreeMap::new());
 
         assert!(config.acp_env.is_empty());
         assert_eq!(
@@ -1110,12 +1080,11 @@ mod tests {
         );
     }
 
-    /// workspace profile 继承 kind 的环境变量（给 dsh 配一次 key，它的每个
+    /// workspace profile 继承 kind 的环境变量（给某家配一次 key，它的每个
     /// workspace 都能用），但 profile 自己那条数据目录变量不能被顶掉。
     #[test]
     fn profile_inherits_kind_env_without_losing_its_workspace_dir() {
         let profile = AcpProfile {
-            native_launch: None,
             id: "p1".into(),
             kind_id: ConversationAgentKind::Claude.id().into(),
             label: "Claude Quant".into(),
@@ -1144,61 +1113,6 @@ mod tests {
             Some("/tmp/quant"),
             "profile 的数据目录是它的立身之本，不能被同名变量顶掉"
         );
-    }
-
-    #[test]
-    fn native_dsh_profile_keeps_credentials_owned_by_dsh() {
-        let profile = AcpProfile {
-            native_launch: Some(
-                smelt_model::agent_kind::ConversationLaunchSpec::from_command(
-                    "dsh-acp-rich --profile team",
-                ),
-            ),
-            id: "dsh-native-team".into(),
-            kind_id: ConversationAgentKind::Dsh.id().into(),
-            label: "DeepSeek Harness · team".into(),
-            workspace_dir: "team".into(),
-        };
-        let mut config = AgentHostState::default();
-        config.set_acp_env_for(
-            ConversationAgentKind::Dsh,
-            BTreeMap::from([("DEEPSEEK_API_KEY".into(), "smelt-only".into())]),
-        );
-
-        let launch = config
-            .profile_launch_spec(&profile)
-            .expect("原生 DSH profile");
-        assert!(launch.env.is_empty());
-        assert!(launch.command.contains("--profile team"));
-    }
-
-    #[test]
-    fn default_dsh_launch_prefers_the_discovered_native_profile() {
-        let native = AcpProfile {
-            native_launch: Some(
-                smelt_model::agent_kind::ConversationLaunchSpec::from_command(
-                    "dsh-acp-rich --profile web",
-                ),
-            ),
-            id: "dsh-native-web".into(),
-            kind_id: ConversationAgentKind::Dsh.id().into(),
-            label: "DeepSeek Harness · web".into(),
-            workspace_dir: "web".into(),
-        };
-        let mut config = AgentHostState {
-            native_dsh_profiles: vec![native],
-            ..Default::default()
-        };
-        config.set_acp_cmd_for(ConversationAgentKind::Dsh, "legacy-private-dsh".into());
-        config.set_acp_env_for(
-            ConversationAgentKind::Dsh,
-            BTreeMap::from([("DEEPSEEK_API_KEY".into(), "legacy-key".into())]),
-        );
-
-        let launch = config.acp_launch_for(ConversationAgentKind::Dsh);
-
-        assert!(launch.command.contains("--profile web"));
-        assert!(launch.env.is_empty());
     }
 
     /// 存档契约：旧 agent_ui.json 里那几个平铺的命令键必须继续被认，
@@ -1265,7 +1179,6 @@ mod tests {
         let mut config = AgentHostState::default();
         config.set_acp_cmd_for(ConversationAgentKind::Claude, "claude-custom --acp".into());
         let profile = AcpProfile {
-            native_launch: None,
             id: "quant".into(),
             kind_id: "claude".into(),
             label: "Quant".into(),
@@ -1284,7 +1197,6 @@ mod tests {
     #[test]
     fn unknown_profile_cannot_resolve_a_launch_spec() {
         let profile = AcpProfile {
-            native_launch: None,
             id: "future-profile".into(),
             kind_id: "future-agent".into(),
             label: "Future Agent".into(),

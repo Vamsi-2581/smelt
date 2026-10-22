@@ -170,8 +170,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 > **Codex**（经 `@agentclientprotocol/codex-acp` 标准 ACP 通道）、**Grok**（CLI 自带
 > `grok agent stdio`，凭据 `~/.grok/auth.json`）、**Cursor** / **OpenCode** /
 > **Kiro**，以及 **Pi**（终端仍用 Pi CLI；对话由 `smelt-pi` 跑 Pi 官方
-> JSONL RPC，Smelt 直接归一化事件，写入/执行类 Pi Tool 走 Smelt 权限审批）。**DSH** 是
-> profile-only 的第九种 ACP 引擎；终端通道另有 **Antigravity** 与 **Crush**
+> JSONL RPC，Smelt 直接归一化事件，写入/执行类 Pi Tool 走 Smelt 权限审批）。终端通道另有 **Antigravity** 与 **Crush**
 > （`settings::TerminalAgentKind`）。
 > 各条启动命令可在设置 →「Agent 运行环境」和「对话与工作区」改。provider 支持历史恢复时，
 > 「重新开始」是协议级续接而非摆样子的新对话（Pi 使用自身 session id）。

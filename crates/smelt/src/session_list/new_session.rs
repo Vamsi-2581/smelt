@@ -258,10 +258,7 @@ fn conversation_options(local: bool, cx: &App) -> Vec<AcpAgentOption> {
             history_dir: None,
         });
     }
-    for kind in ConversationAgentKind::ALL
-        .into_iter()
-        .filter(|kind| kind.is_bare_kind())
-    {
+    for kind in ConversationAgentKind::ALL {
         options.push(AcpAgentOption {
             id: kind.id().to_string(),
             kind: kind.id().to_string(),

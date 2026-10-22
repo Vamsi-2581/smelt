@@ -93,7 +93,6 @@ pub fn agent_options() -> Vec<AcpAgentOption> {
     let snapshot_ref = snapshot.as_ref();
     let mut options = ConversationAgentKind::ALL
         .into_iter()
-        .filter(|kind| kind.is_bare_kind())
         .map(|kind| AcpAgentOption {
             id: kind.id().to_string(),
             kind: kind.id().to_string(),
@@ -111,7 +110,6 @@ pub fn agent_options() -> Vec<AcpAgentOption> {
                 .profiles
                 .iter()
                 .map(|profile| AcpProfile {
-                    native_launch: None,
                     id: profile.id.clone(),
                     kind_id: profile.kind_id.clone(),
                     label: profile.label.clone(),
@@ -145,21 +143,6 @@ pub fn agent_options() -> Vec<AcpAgentOption> {
             history_dir: Some(crate::workspace_override::expand_tilde(
                 &profile.workspace_dir,
             )),
-        });
-    }
-    for profile in crate::agent_kind::native_dsh_profiles() {
-        let Ok(launch) = profile.launch_spec() else {
-            continue;
-        };
-        options.push(AcpAgentOption {
-            id: format!("profile:{}", profile.id),
-            kind: ConversationAgentKind::Dsh.id().to_string(),
-            label: profile.label,
-            profile: true,
-            agent_definition_id: None,
-            launch,
-            history_dir: crate::agent_kind::dsh_sessions_root()
-                .map(|path| path.to_string_lossy().into_owned()),
         });
     }
     options
@@ -881,81 +864,14 @@ pub fn list_history(option: &AcpAgentOption, cwd: &str) -> Vec<HistorySessionSum
     )
 }
 
-/// 历史解析器由 `session_history` 的 Provider 注册表分发；这里仅编排可选的 ACP
-/// live index，随后叠加 profile 自定义标题并转换成远程摘要模型。
-fn history_sessions(
-    kind: HistorySourceKind,
-    profile_id: Option<&str>,
-    cwd: &str,
-    override_dir: Option<&str>,
-) -> Vec<crate::session_history::SessionSummary> {
-    let provider = crate::session_history::history_provider(kind);
-    let local = provider.list_sessions(cwd, override_dir);
-    let Some(acp_index) = provider.acp_session_index() else {
-        return local;
-    };
-    // live index 要跟 agent 进程说话，没有 ACP 身份就无从谈起。
-    let Some(acp_kind) = kind.acp() else {
-        return local;
-    };
-
-    let Some(option) = find_agent_option_for(acp_kind, profile_id) else {
-        return local;
-    };
-    let Ok(listed) = crate::acp_conn::list_acp_sessions(&option.launch, cwd) else {
-        return local;
-    };
-    merge_acp_history_index(local, listed, profile_id, acp_index)
-}
-
-fn merge_acp_history_index(
-    local: Vec<crate::session_history::SessionSummary>,
-    listed: Vec<agent_client_protocol::schema::v1::SessionInfo>,
-    profile_id: Option<&str>,
-    acp_index: &crate::session_history::AcpSessionIndex,
-) -> Vec<crate::session_history::SessionSummary> {
-    let mut local = local
-        .into_iter()
-        .map(|session| (session.resume_id.clone(), session))
-        .collect::<std::collections::HashMap<_, _>>();
-    listed
-        .into_iter()
-        .map(|session| {
-            let resume_id = session.session_id.to_string();
-            if let Some(summary) = local.remove(&resume_id) {
-                return summary;
-            }
-            let title = session
-                .title
-                .filter(|title| !title.trim().is_empty())
-                .unwrap_or_else(|| resume_id.clone());
-            let last_active_at = session.updated_at.as_deref().and_then(|timestamp| {
-                chrono::DateTime::parse_from_rfc3339(timestamp)
-                    .ok()
-                    .map(|value| value.with_timezone(&chrono::Utc))
-            });
-            crate::session_history::SessionSummary {
-                path: acp_index.path(profile_id, &resume_id),
-                title: title.clone(),
-                agent_title: title,
-                custom_title: None,
-                resume_id,
-                started_at: None,
-                last_active_at,
-                message_count: 0,
-                total_tokens: 0,
-            }
-        })
-        .collect()
-}
-
 pub fn list_history_for(
     kind: HistorySourceKind,
     profile_id: Option<&str>,
     cwd: &str,
     override_dir: Option<&str>,
 ) -> Vec<HistorySessionSummary> {
-    let mut sessions = history_sessions(kind, profile_id, cwd, override_dir)
+    let mut sessions = crate::session_history::history_provider(kind)
+        .list_sessions(cwd, override_dir)
         .into_iter()
         .map(|session| HistorySessionSummary {
             path: session.path,
@@ -1306,10 +1222,7 @@ mod tests {
     #[test]
     fn default_agent_options_use_shared_agent_definitions() {
         let options = agent_options();
-        for kind in ConversationAgentKind::ALL
-            .into_iter()
-            .filter(|kind| kind.is_bare_kind())
-        {
+        for kind in ConversationAgentKind::ALL {
             let option = options
                 .iter()
                 .find(|option| option.id == kind.id())
@@ -1358,10 +1271,7 @@ mod tests {
     #[test]
     fn profile_id_strips_the_option_prefix() {
         let options = agent_options();
-        for kind in ConversationAgentKind::ALL
-            .into_iter()
-            .filter(|kind| kind.is_bare_kind())
-        {
+        for kind in ConversationAgentKind::ALL {
             let option = options
                 .iter()
                 .find(|option| option.id == kind.id())
@@ -1441,65 +1351,6 @@ mod tests {
         assert_eq!(session.display_title(), "Fix the flaky test");
         session.custom_title = Some("夜里那次排查".to_string());
         assert_eq!(session.display_title(), "夜里那次排查");
-    }
-
-    #[test]
-    fn acp_history_index_preserves_list_order_and_matching_local_metadata() {
-        let local = vec![
-            crate::session_history::SessionSummary {
-                path: PathBuf::from("/archive/existing.jsonl"),
-                title: "本地标题".to_string(),
-                agent_title: "本地标题".to_string(),
-                custom_title: None,
-                resume_id: "existing".to_string(),
-                started_at: None,
-                last_active_at: None,
-                message_count: 12,
-                total_tokens: 34,
-            },
-            crate::session_history::SessionSummary {
-                path: PathBuf::from("/archive/local-only.jsonl"),
-                title: "仅本地".to_string(),
-                agent_title: "仅本地".to_string(),
-                custom_title: None,
-                resume_id: "local-only".to_string(),
-                started_at: None,
-                last_active_at: None,
-                message_count: 1,
-                total_tokens: 2,
-            },
-        ];
-        let mut indexed =
-            agent_client_protocol::schema::v1::SessionInfo::new("indexed/a", "/work/project");
-        indexed.title = Some("远端标题".to_string());
-        indexed.updated_at = Some("2026-08-23T10:20:30Z".to_string());
-        let listed = vec![
-            indexed,
-            agent_client_protocol::schema::v1::SessionInfo::new("existing", "/work/project"),
-        ];
-        let index = crate::session_history::history_provider(ConversationAgentKind::Dsh.into())
-            .acp_session_index()
-            .unwrap();
-
-        let merged = merge_acp_history_index(local, listed, Some("team"), index);
-
-        assert_eq!(
-            merged
-                .iter()
-                .map(|session| session.resume_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["indexed/a", "existing"]
-        );
-        assert_eq!(merged[0].title, "远端标题");
-        assert_eq!(
-            merged[0].path.file_name().and_then(|name| name.to_str()),
-            Some("indexed_a")
-        );
-        assert_eq!(merged[0].message_count, 0);
-        assert!(merged[0].last_active_at.is_some());
-        assert_eq!(merged[1].path, PathBuf::from("/archive/existing.jsonl"));
-        assert_eq!(merged[1].message_count, 12);
-        assert_eq!(merged[1].total_tokens, 34);
     }
 
     #[test]

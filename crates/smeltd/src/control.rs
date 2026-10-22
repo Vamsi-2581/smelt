@@ -208,18 +208,6 @@ fn dispatch_control(
             Ok(result) => success_value(control_version, &request_id, result),
             Err(error) => error_value(control_version, request_id, error),
         },
-        dsh @ (ControlMethod::DshConfigGet
-        | ControlMethod::DshConfigEnsureFile
-        | ControlMethod::DshModelsCapabilities
-        | ControlMethod::DshModelsSaveDefault
-        | ControlMethod::DshProvidersDiscoverModels
-        | ControlMethod::DshProvidersSaveCustom
-        | ControlMethod::DshProvidersRefreshAuto
-        | ControlMethod::DshPluginsList
-        | ControlMethod::DshPluginsRun) => match super::dsh_control::dispatch(dsh, params) {
-            Ok(result) => success_value(control_version, &request_id, result),
-            Err(error) => error_value(control_version, request_id, error),
-        },
         ControlMethod::SessionLaunchPrepare => {
             let params: smelt_core::agent_definition_store::LaunchPrepareParams =
                 match params_or_error(control_version, &request_id, params) {

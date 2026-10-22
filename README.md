@@ -9,7 +9,7 @@
 **The AI coding cockpit for macOS — a desktop workspace designed to orchestrate multiple CLI coding agents at once.**
 
 A native application built with [GPUI](https://gpui.rs), with real embedded terminals, multiple projects, and multiple tabs.
-Claude Code, GitHub Copilot, Codex, Grok, Cursor, OpenCode, Kiro, Pi, Crush, DSH — any agent that runs in a terminal can be monitored side by side.
+Claude Code, GitHub Copilot, Codex, Grok, Cursor, OpenCode, Kiro, Pi, Crush — any agent that runs in a terminal can be monitored side by side.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/smelt-ai/smelt)](https://github.com/smelt-ai/smelt/releases)
@@ -38,7 +38,7 @@ The app checks for updates on launch and on demand (stable/beta channel), showin
 
 - **Workspace**: Multiple projects and tabs with real embedded terminals for interactive programs and full-screen TUIs such as `claude`, `codex`, `copilot`, `pi`, `vim`, and `htop`; split panes, a command palette (`Cmd+K`), and customizable quick launchers
 - **Keep an eye on agents**: Session state comes from agent hooks (`smelt-notify`) and structured protocols (ACP or provider-native). The session name comes from ACP `session_title` or hook `SessionTitleChanged`, and falls back to the first user prompt; OSC 0/2 is not a session name. OSC 9/777 notifications and bells are informational only. Badges and system notifications highlight sessions that need attention, without depending on any vendor-specific private format
-- **Native agent conversations**: Connect Claude Code, GitHub Copilot, Codex, Grok, Cursor, OpenCode, Kiro, Pi, and DSH through ACP or provider-native protocols for structured message streams, tool cards, inline diffs, permission prompts, PLAN progress, and resumable sessions (Pi uses its native JSONL RPC through Smelt's managed Bun runtime; it is not wrapped in ACP)
+- **Native agent conversations**: Connect Claude Code, GitHub Copilot, Codex, Grok, Cursor, OpenCode, Kiro, and Pi through ACP or provider-native protocols for structured message streams, tool cards, inline diffs, permission prompts, PLAN progress, and resumable sessions (Pi uses its native JSONL RPC through Smelt's managed Bun runtime; it is not wrapped in ACP)
 - **Persistent agents and automations**: The top-level Agents workspace manages reusable definitions, while Automations independently manages triggers, per-run input, and run history. Agent automations get a stable directory under that agent's space (`~/.smelt/agents/<id>/automations/`); shell automations stay in `~/.smelt/workspaces/automations`. Triggers are schedule or an external trigger: schedules cover weekday/daily/interval, while an external trigger is a loopback HTTP URL (`127.0.0.1`) that other programs on the same machine can POST to. The catalog shows “external trigger” without exposing the token. Pi is the first registered engine, and `smeltd` owns scheduled, external-trigger, and manual run lifecycles. Automations run with full access; there is no separate permission policy
 - **Read and edit code**: File tree and search, built-in editor, Git diff view, and Markdown/Mermaid rendering
 - **Usage and history**: Account usage is queried per provider (Claude, Copilot, Codex, Cursor, Grok) and is not read from transcripts. Historical sessions read each agent's local transcripts; Claude Code is not the only source

@@ -42,7 +42,7 @@ pub(super) fn workspace_page(
         "对话与工作区",
         Some(
             "管理执行引擎启动命令、额外 workspace 与跨 Agent 通讯。智能体定义请在\
-             主窗口左侧「智能体」中管理；API key 与网关地址在「DeepSeek Harness」或「Pi 模型」页面。",
+             主窗口左侧「智能体」中管理；API key 与网关地址在「Pi 模型」页面。",
         ),
         3,
         entity,
@@ -388,10 +388,7 @@ fn agent_groups(
                                 .text_color(muted)
                                 .child("Agent 对话运行时"),
                         );
-                        for agent in ConversationAgentKind::ALL
-                            .into_iter()
-                            .filter(|agent| agent.is_bare_kind())
-                        {
+                        for agent in ConversationAgentKind::ALL {
                             if let Some(executable) = diagnostics.for_agent(agent) {
                                 content = content.child(runtime_row(agent, executable));
                             }
@@ -556,13 +553,11 @@ fn agent_groups(
                 ),
             launch_group,
             SettingGroup::new()
-                // 按 `ConversationAgentKind::ALL` 迭代，不逐家手写：之前这里硬编码了五家，
-                // dsh 加进来之后就一直没有输入框——加一家 agent 不该需要记得回到
-                // 设置页再抄一遍。
+                // 按 `ConversationAgentKind::ALL` 迭代，不逐家手写：加一家 agent 不该
+                // 需要记得回到设置页再抄一遍。
                 .items(
                     ConversationAgentKind::ALL
                         .into_iter()
-                        .filter(|kind| kind.is_bare_kind())
                         .map(acp_cmd_setting_item),
                 )
                 .item(
@@ -656,10 +651,7 @@ fn agent_groups(
                                                     .w(kind_w)
                                                     .label(current_kind_label)
                                                     .dropdown_menu(move |mut menu, _window, _cx| {
-                                                        for kind in ConversationAgentKind::ALL
-                                                            .into_iter()
-                                                            .filter(|kind| kind.is_bare_kind())
-                                                        {
+                                                        for kind in ConversationAgentKind::ALL {
                                                             let kind_entity = kind_entity.clone();
                                                             menu = menu.item(
                                                                 PopupMenuItem::new(kind.label())

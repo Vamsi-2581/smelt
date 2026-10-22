@@ -100,8 +100,8 @@ pub struct SessionEntry {
     /// 会话的 agent 身份 id（裸终端为 None）。菜单项左侧按它查 logo，取不到
     /// （裸终端，或这一家还没有母图）时使用终端图标。
     ///
-    /// 存的是 id 而不是枚举：ACP 表和终端表是两张表，一个只能 ACP 跑的 agent
-    /// （dsh）在终端表里根本没有变体，用枚举就得在这里替它硬凑一个。
+    /// 存的是 id 而不是枚举：ACP 表和终端表是两张表，只能 ACP 跑的 agent 在
+    /// 终端表里根本没有变体，用枚举就得在这里替它硬凑一个。
     pub agent: Option<&'static str>,
 }
 
@@ -170,7 +170,6 @@ mod imp {
         ("kiro", include_bytes!("../../../assets/agent-kiro.png")),
         ("pi", include_bytes!("../../../assets/agent-pi.png")),
         ("crush", include_bytes!("../../../assets/agent-crush.png")),
-        ("dsh", include_bytes!("../../../assets/agent-dsh.png")),
     ];
 
     /// 菜单项左侧图标统一占用的尺寸。菜单栏是 2x 显示时，13pt 已经足够辨认，
@@ -586,7 +585,7 @@ mod tests {
     ///
     /// 查表是按 id 的，查不到就静默退回终端方块——那是个「图标不对」的 bug，
     /// 不会崩、也不会有人在 code review 里看出来，所以用不变量把它变成红测试。
-    /// 两张表都要覆盖：一家 agent 可能只走 ACP（dsh）或只走终端（antigravity）。
+    /// 两张表都要覆盖：一家 agent 可能只走 ACP 或只走终端（antigravity）。
     #[cfg(target_os = "macos")]
     #[test]
     fn every_agent_has_a_status_menu_logo() {

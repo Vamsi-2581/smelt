@@ -1407,7 +1407,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let base = cli_launch_entry_for_agent(agent, cx);
-        // 没有终端 CLI 的 agent（dsh）在这里安静地什么都不做：起一个别家的
+        // 没有终端 CLI 的 agent 在这里安静地什么都不做：起一个别家的
         // CLI，或者起一条拼不出来的空命令，都比不做更糟。
         let Some(mut command) = cli_resume_command(agent, &base.command, &resume_id) else {
             return;

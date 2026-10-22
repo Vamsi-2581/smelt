@@ -232,22 +232,6 @@ pub struct TerminalThemeSnapshot {
     pub search_hit_current: u32,
 }
 
-/// 哪一家的自定义 provider 名单（「这个 provider 的模型目录由 Smelt 维护」）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AutoModelHarness {
-    Dsh,
-    Pi,
-}
-
-impl AutoModelHarness {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Dsh => "dsh",
-            Self::Pi => "pi",
-        }
-    }
-}
-
 /// 跨启动的额度缓存。只缓存真正拿到额度的项。
 #[derive(Clone, Debug, PartialEq)]
 pub struct QuotaCacheSnapshot {

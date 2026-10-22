@@ -188,7 +188,7 @@ fi
 # 不会写进已签名的 .app）。
 PLUGINS="$RES/plugins"
 for dir in "$ROOT"/plugins/*/; do
-  # 没有清单的子目录（比如本地 clone 进来的 dsh 桥）不是插件。
+  # 没有清单的子目录不是插件。
   [[ -f "${dir}gpui-shell.json" ]] || continue
   target="$PLUGINS/$(basename "$dir")"
   mkdir -p "$target"

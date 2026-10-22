@@ -21,7 +21,6 @@ pub mod conversation;
 pub mod copilot_quota;
 pub mod daemon_state;
 pub mod default_conversation;
-pub mod dsh_service;
 pub mod font_config;
 pub mod launch_settings;
 pub mod memory_settings;

@@ -31,7 +31,7 @@ use agent_client_protocol::schema::v1::{
     ElicitationCapabilities, ElicitationContentValue, ElicitationFormCapabilities, ElicitationMode,
     ElicitationPropertySchema, ElicitationSchema, ElicitationUrlCapabilities,
     FileSystemCapabilities, ImageContent, Implementation, InitializeRequest, KillTerminalRequest,
-    KillTerminalResponse, ListSessionsRequest, LoadSessionRequest, MultiSelectItems,
+    KillTerminalResponse, LoadSessionRequest, MultiSelectItems,
     NewSessionRequest, Plan, PlanCapabilities, PlanEntry, PlanEntryPriority, PlanEntryStatus,
     PlanUpdate, PlanUpdateContent, PromptRequest, PromptResponse, ReadTextFileRequest,
     ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
@@ -39,7 +39,7 @@ use agent_client_protocol::schema::v1::{
     SelectedPermissionOutcome, SessionConfigId, SessionConfigKind, SessionConfigOption,
     SessionConfigOptionCategory, SessionConfigOptionValue, SessionConfigOptionsCapabilities,
     SessionConfigSelectOption, SessionConfigSelectOptions, SessionConfigValueId, SessionId,
-    SessionInfo, SessionModeState, SessionNotification, SessionUpdate,
+    SessionModeState, SessionNotification, SessionUpdate,
     SetSessionConfigOptionRequest, StopReason, TerminalOutputRequest, TerminalOutputResponse,
     ToolCall, ToolCallId, ToolCallUpdate, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
     WriteTextFileRequest, WriteTextFileResponse,
@@ -2057,72 +2057,6 @@ async fn run_connection(
     result
 }
 
-/// Query an agent's standard ACP `session/list` surface without creating a
-/// live session. Used by native dsh profiles so history discovery follows the
-/// profile's persistence provider instead of assuming a JSONL backend.
-pub fn list_acp_sessions(
-    launch: &ConversationLaunchSpec,
-    cwd: &str,
-) -> Result<Vec<SessionInfo>, String> {
-    smol::block_on(async {
-        let (command, managed_bun) =
-            resolve_runtime_command_with_bun(launch.command.as_str(), &|_| {})?;
-        let resolved_launch = ConversationLaunchSpec {
-            command,
-            env: launch.env.clone(),
-        };
-        let agent = build_agent(&resolved_launch, &BTreeMap::new())
-            .map_err(|error| format!("构建 ACP 历史查询进程失败：{error}"))?;
-        let (child_stdin, child_stdout, child_stderr, child) =
-            spawn_agent_process(&agent, None, managed_bun.as_ref())
-                .map_err(|error| format!("启动 ACP 历史查询进程失败：{error}"))?;
-        let mut child_guard = AcpChildGuard::new(child);
-        spawn_stderr_drain(child_stderr, Arc::default());
-        let outgoing = make_outgoing_sink(child_stdin);
-        let incoming = make_incoming_lines(child_stdout, Arc::default(), None);
-        let transport = Lines::new(outgoing, incoming);
-        let cwd = std::path::PathBuf::from(cwd);
-
-        let result = Client
-            .builder()
-            .name("smelt-history")
-            .connect_with(transport, |connection: ConnectionTo<Agent>| async move {
-                wait_for_acp_request(
-                    connection
-                        .send_request(InitializeRequest::new(ProtocolVersion::V1))
-                        .block_task(),
-                    "initialize",
-                )
-                .await?;
-
-                let mut sessions = Vec::new();
-                let mut cursor = None;
-                loop {
-                    let mut request = ListSessionsRequest::new().cwd(cwd.clone());
-                    if let Some(next) = cursor.take() {
-                        request = request.cursor(next);
-                    }
-                    let response = wait_for_acp_request(
-                        connection.send_request(request).block_task(),
-                        "session/list",
-                    )
-                    .await?;
-                    sessions.extend(response.sessions);
-                    cursor = response.next_cursor;
-                    if cursor.is_none() {
-                        break;
-                    }
-                }
-                Ok(sessions)
-            })
-            .await
-            .map_err(|error| format!("ACP session/list 失败：{error}"));
-        child_guard.kill_and_reap();
-        drop(managed_bun);
-        result
-    })
-}
-
 /// smeltd 无缝升级续接：不 spawn 新子进程，直接接上继承来的 fd（`exec()` 前
 /// 清了 CLOEXEC、活过整个交接）继续跑，起一条跟 `spawn_acp` 同款的专用线程，
 /// 立即返回句柄。`ConversationHandle.stdio` 一开始就是 `Some`——这几个 fd 本来就是
@@ -3703,16 +3637,9 @@ fn spawn_agent_process(
     // 放在 config.env 之前，让启动规格里显式写的 `VAR=value` 前缀（含 PATH）
     // 始终覆盖它。
     crate::login_env::apply_login_environment(&mut std_cmd);
-    let mut path = crate::login_env::login_path().to_string();
     for (name, value) in config.environment() {
-        if name == "PATH" {
-            path = value.clone();
-        }
         std_cmd.env(name, value);
     }
-    // `PATH=` 前缀会盖掉 login 环境。npx 退路的 `dsh` shim 必须垫在最终 PATH
-    // 最前面，否则桥里 `spawn('dsh')` 仍然 ENOENT。
-    std_cmd.env("PATH", crate::agent_kind::prepend_dsh_cli_shim(&path));
     if let Some(cwd) = cwd.filter(|cwd| !cwd.trim().is_empty()) {
         std_cmd.current_dir(cwd);
     }
@@ -4597,10 +4524,6 @@ pub fn inspect_acp_runtime() -> AcpRuntimeDiagnostics {
         diagnostics.record_terminal(agent, inspect(agent));
     }
     diagnostics.record_agent(ConversationAgentKind::Pi, inspect_smelt_pi_runtime());
-    diagnostics.record_agent(
-        ConversationAgentKind::Dsh,
-        inspect_dsh_runtime(&search_path),
-    );
     diagnostics
 }
 
@@ -4629,53 +4552,6 @@ fn inspect_smelt_pi_runtime() -> RuntimeExecutable {
             ..Default::default()
         },
     }
-}
-
-fn missing_dsh_profile_plugin_error(home: &str) -> String {
-    format!(
-        "原生 DeepSeek Harness 已安装，但 `{home}/profiles` 下没有可供 Smelt 使用的 profile。\n\
-         请为目标 profile 运行：dsh plugin --profile <name> add @smelt-ai/dsh-acp-rich\n\
-         插件说明：{}",
-        crate::agent_kind::DSH_BRIDGE_REPO
-    )
-}
-
-fn inspect_dsh_runtime(search_path: &str) -> RuntimeExecutable {
-    let dsh = resolve_in_path("dsh", search_path).map(std::path::PathBuf::from);
-    let npx = resolve_in_path("npx", search_path).map(std::path::PathBuf::from);
-    let mut runtime = match crate::agent_kind::resolve_dsh_cli(dsh, npx) {
-        Ok(cli) => dsh_runtime_from_cli(&cli),
-        Err(error) => RuntimeExecutable {
-            program: "dsh".to_string(),
-            path: None,
-            version: None,
-            error: Some(error),
-        },
-    };
-    if runtime.path.is_none() {
-        return runtime;
-    }
-    if crate::agent_kind::native_dsh_profiles().is_empty() {
-        let home = crate::agent_kind::dsh_home()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "~/.dsh".to_string());
-        runtime.path = None;
-        runtime.error = Some(missing_dsh_profile_plugin_error(&home));
-    }
-    runtime
-}
-
-/// 全局 `dsh` 跑一次 `--version`；npx 退路不拉包（探测不能打网络），只记下规格。
-fn dsh_runtime_from_cli(cli: &crate::agent_kind::DshCli) -> RuntimeExecutable {
-    if cli.is_npx_fallback() {
-        return RuntimeExecutable {
-            program: "dsh".to_string(),
-            path: Some(cli.program.to_string_lossy().into_owned()),
-            version: Some(cli.npx_spec()),
-            error: None,
-        };
-    }
-    inspect_runtime_path("dsh", Some(cli.program.clone()))
 }
 
 fn inspect_runtime_program(program: &str, search_path: &str) -> RuntimeExecutable {
@@ -5533,32 +5409,6 @@ mod handshake_watchdog_tests {
             &completed,
             Duration::from_millis(5)
         ));
-    }
-}
-
-#[cfg(test)]
-mod dsh_runtime_tests {
-    use super::{RuntimeExecutable, dsh_runtime_from_cli};
-    use crate::agent_kind::resolve_dsh_cli;
-
-    #[test]
-    fn npx_fallback_is_treated_as_an_available_runtime() {
-        let cli = resolve_dsh_cli(None, Some(std::path::PathBuf::from("/usr/bin/npx")))
-            .expect("npx is enough");
-        let runtime = dsh_runtime_from_cli(&cli);
-        assert!(
-            runtime.is_available(),
-            "没有全局 dsh 时，npx 退路必须让「+」菜单把 DeepSeek Harness 显示出来"
-        );
-        assert_eq!(runtime.path.as_deref(), Some("/usr/bin/npx"));
-        assert_eq!(runtime.version.as_ref(), Some(&cli.npx_spec()));
-        assert!(runtime.error.is_none());
-    }
-
-    #[test]
-    fn empty_diagnostics_still_mean_dsh_is_not_ready() {
-        let runtime = RuntimeExecutable::default();
-        assert!(!runtime.is_available());
     }
 }
 
@@ -6745,38 +6595,6 @@ mod process_reap_tests {
 }
 
 #[cfg(test)]
-mod dsh_diagnostics_tests {
-    use super::missing_dsh_profile_plugin_error;
-
-    /// 这段话是装好的 app 里唯一的自救线索，必须指向一个用户真能打开的地方。
-    ///
-    /// 桥独立成仓之前它写的是 `plugins/dsh-acp-rich/README.md`——那是 smelt 源码
-    /// 树里的相对路径，在发行版里根本不存在；桥搬走之后连源码树里也没有了。
-    #[test]
-    fn setup_hint_points_somewhere_the_user_can_actually_open() {
-        let message = missing_dsh_profile_plugin_error("/home/u/.dsh");
-
-        assert!(
-            message.contains(crate::agent_kind::DSH_BRIDGE_REPO),
-            "缺失提示必须给出桥仓地址，实际是：{message}"
-        );
-        assert!(
-            !message.contains("plugins/"),
-            "缺失提示不能指向 smelt 源码树里的相对路径，实际是：{message}"
-        );
-    }
-
-    /// 缺的是哪台机器上的哪个文件，得说清楚，否则用户没法判断自己装到哪一步了。
-    #[test]
-    fn setup_hint_names_the_missing_path() {
-        let message = missing_dsh_profile_plugin_error("/home/u/.dsh");
-
-        assert!(message.contains("/home/u/.dsh/profiles"));
-        assert!(message.contains("dsh plugin --profile <name> add"));
-    }
-}
-
-#[cfg(test)]
 mod prompt_failure_tests {
     use super::*;
 
@@ -6792,7 +6610,7 @@ mod prompt_failure_tests {
         e
     }
 
-    /// dsh 把真正有用的话（缺哪个环境变量、怎么补）放在 message 里，
+    /// agent 常把真正有用的话（缺哪个环境变量、怎么补）放在 message 里，
     /// 而 code 只是个 -32603。只报 code 等于什么都没说。
     #[test]
     fn prompt_error_keeps_the_actionable_sentence() {
@@ -6841,8 +6659,8 @@ mod prompt_failure_tests {
         assert!(describe_prompt_error(&unknown).contains("-31999"));
     }
 
-    /// 用户看到的第一句必须是「我现在该做什么」。dsh 那条原文是英文长句，
-    /// 里面还夹着一个 smelt 根本没有的「web Models page」——照抄等于把人
+    /// 用户看到的第一句必须是「我现在该做什么」。agent 的原文常是英文长句，
+    /// 还可能指向 smelt 根本没有的页面（如「web Models page」）——照抄等于把人
     /// 支到不存在的地方。
     #[test]
     fn missing_key_error_points_at_smelt_settings() {
@@ -6890,145 +6708,6 @@ mod prompt_failure_tests {
 
 #[cfg(test)]
 mod fake_agent_tests;
-
-/// 需要一个安装了 Smelt Host bundle 的原生 dsh profile，默认不跑：
-///
-///     cargo test -p smelt-core --lib dsh_live -- --ignored
-///
-/// 存在的理由：148 个单测全绿的那版桥，一接真 runtime 就暴露了 4 个致命 bug。
-/// 「回合失败不能杀会话」这条同样只有真跑一遍才算数——它牵涉 SDK 回调、
-/// 连接驱动任务、事件通道三层，全 mock 就只是在测我自己的假设。
-///
-/// 只跟 dsh 桥有关的才放这里。`acp_conn` 自己的事件顺序用 `fake_agent_tests`
-/// 的假 agent 测：不依赖本机装了什么，CI 每次都跑。
-#[cfg(test)]
-mod dsh_live_tests {
-    use super::*;
-
-    fn live_profile() -> String {
-        std::env::var("SMELT_TEST_DSH_PROFILE")
-            .ok()
-            .or_else(|| {
-                crate::agent_kind::native_dsh_profiles()
-                    .into_iter()
-                    .next()
-                    .map(|profile| profile.workspace_dir)
-            })
-            .expect("没有安装 Smelt Host bundle 的原生 dsh profile")
-    }
-
-    fn drain_until<F>(
-        handle: &ConversationHandle,
-        timeout: std::time::Duration,
-        mut done: F,
-    ) -> Vec<String>
-    where
-        F: FnMut(&ConversationEvent) -> bool,
-    {
-        let deadline = std::time::Instant::now() + timeout;
-        let mut seen = Vec::new();
-        while std::time::Instant::now() < deadline {
-            let next = smol::block_on(async {
-                smol::future::race(async { handle.event_rx.recv().await.ok() }, async {
-                    smol::Timer::after(std::time::Duration::from_millis(200)).await;
-                    None
-                })
-                .await
-            });
-            match next {
-                Some(ev) => {
-                    seen.push(match &ev {
-                        ConversationEvent::Ready { .. } => "Ready".to_string(),
-                        ConversationEvent::TurnEnded(_) => "TurnEnded".to_string(),
-                        ConversationEvent::TurnFailed(m) => format!("TurnFailed({m})"),
-                        ConversationEvent::Fatal(m) => format!("Fatal({m})"),
-                        ConversationEvent::AgentChunk { .. } => "AgentChunk".to_string(),
-                        other => std::any::type_name_of_val(other).to_string(),
-                    });
-                    if done(&ev) {
-                        break;
-                    }
-                }
-                None => continue,
-            }
-        }
-        seen
-    }
-
-    #[test]
-    #[ignore = "needs a native dsh profile with the Smelt Host bundle"]
-    fn prompt_failure_does_not_kill_the_session() {
-        let profile = live_profile();
-        assert!(crate::agent_kind::dsh_bridge_entry(&profile).is_some());
-        let handle = spawn_acp(
-            ConversationLaunch {
-                launch: crate::agent_kind::dsh_profile_launch_spec(&profile),
-                // 故意不给 DEEPSEEK_API_KEY：复现用户遇到的那一幕。
-                ephemeral_env: Default::default(),
-                cwd: Some("/tmp".to_string()),
-                sid: "acp-live-test".to_string(),
-                agent_token: String::new(),
-                resume_session_id: None,
-                fork_session_id: None,
-                fork_cut: None,
-            },
-            None,
-        );
-        let seen = drain_until(&handle, std::time::Duration::from_secs(90), |ev| {
-            matches!(ev, ConversationEvent::Ready { .. })
-        });
-        assert!(
-            seen.iter().any(|s| s == "Ready"),
-            "握手都没成功，看不出回合失败的行为：{seen:?}"
-        );
-
-        handle
-            .cmd_tx
-            .send_blocking(ConversationCommand::Prompt {
-                text: "你好".to_string(),
-                images: Vec::new(),
-            })
-            .expect("发 prompt");
-
-        let seen = drain_until(&handle, std::time::Duration::from_secs(90), |ev| {
-            ev.ends_turn() || matches!(ev, ConversationEvent::Fatal(_))
-        });
-        assert!(
-            seen.iter().any(|s| s.starts_with("TurnFailed")),
-            "没配 key 应当以 TurnFailed 收场：{seen:?}"
-        );
-        assert!(
-            !seen.iter().any(|s| s.starts_with("Fatal")),
-            "回合失败绝不能升级成连接 Fatal（会话会猝死）：{seen:?}"
-        );
-        assert!(
-            seen.iter().any(|s| s.contains("API key")),
-            "错误原文要能带到用户面前：{seen:?}"
-        );
-        assert!(
-            seen.iter().any(|s| s.contains("环境变量")),
-            "还要告诉用户下一步去哪里做什么：{seen:?}"
-        );
-
-        // 会话还活着：第二条 prompt 仍然能被受理并再次以 TurnFailed 收场。
-        handle
-            .cmd_tx
-            .send_blocking(ConversationCommand::Prompt {
-                text: "再试一次".to_string(),
-                images: Vec::new(),
-            })
-            .expect("会话必须还能收 prompt");
-        let seen = drain_until(&handle, std::time::Duration::from_secs(90), |ev| {
-            ev.ends_turn() || matches!(ev, ConversationEvent::Fatal(_))
-        });
-        assert!(
-            seen.iter().any(|s| s.starts_with("TurnFailed")),
-            "第一轮失败后连接必须还在：{seen:?}"
-        );
-
-        let _ = handle.cmd_tx.send_blocking(ConversationCommand::Shutdown);
-    }
-}
 
 #[cfg(test)]
 mod runtime_diagnostics_wire_tests {

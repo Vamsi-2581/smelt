@@ -17,8 +17,6 @@ pub struct AgentHostSettings {
     pub config_memory: BTreeMap<String, Vec<(String, String)>>,
     /// 手动添加的 workspace profile。
     pub profiles: Vec<AcpProfile>,
-    /// 运行时那台机器上 `$DSH_HOME/profiles` 里发现的 profile。是事实不是设置，只读。
-    pub native_dsh_profiles: Vec<AcpProfile>,
     pub agents: Vec<AgentDefinition>,
     /// 侧栏「新对话」默认用哪个智能体。指向这台运行时上的定义，所以跟着运行时走。
     pub default_conversation_agent: Option<String>,
@@ -36,7 +34,6 @@ impl AgentHostSettings {
             env: BTreeMap::new(),
             config_memory: BTreeMap::new(),
             profiles: Vec::new(),
-            native_dsh_profiles: Vec::new(),
             agents: Vec::new(),
             default_conversation_agent: None,
         }

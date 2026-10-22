@@ -143,7 +143,7 @@ fn probe() -> LoginEnv {
         .unwrap_or_default();
 
     // PATH 兜底：探测失败（shell 起不来/超时）也必须有一条能用的搜索路径，
-    // 否则连 `dsh`、`npx` 都解析不出来。
+    // 否则连 `npx` 这类工具都解析不出来。
     let path = vars
         .get("PATH")
         .filter(|value| !value.is_empty())
@@ -224,37 +224,6 @@ pub fn apply_login_environment(command: &mut Command) -> &mut Command {
     command.env("PATH", login_path())
 }
 
-/// Resolve an executable against the login shell PATH rather than Finder's
-/// stripped process PATH. GUI actions that directly spawn a helper (rather
-/// than going through ACP's launcher) use this for Node-backed DSH tools.
-pub fn executable_in_login_path(name: &str) -> Option<std::path::PathBuf> {
-    if name.is_empty() || name.contains(std::path::MAIN_SEPARATOR) {
-        let path = std::path::PathBuf::from(name);
-        return is_executable_file(&path).then_some(path);
-    }
-    std::env::split_paths(login_path())
-        .map(|directory| directory.join(name))
-        .find(|path| is_executable_file(path))
-}
-
-fn is_executable_file(path: &std::path::Path) -> bool {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return false;
-    };
-    if !metadata.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        metadata.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
-}
-
 /// 四个 workspace 覆盖变量的读取顺序：**先查当前进程自己的环境**，查不到再
 /// 退回登录 shell 探测出来的缓存值。
 ///
@@ -299,13 +268,6 @@ pub fn codex_home() -> Option<String> {
 /// Grok CLI 自定义目录（`GROK_HOME`），没设就是 `None`（回退 `~/.grok`）。
 pub fn grok_home() -> Option<String> {
     resolve_override("GROK_HOME")
-}
-
-/// DeepSeek Harness home. Native dsh resolves `$DSH_HOME` first and otherwise
-/// uses `~/.dsh`; Smelt must use the same root so profile and session discovery
-/// cannot drift from the CLI.
-pub fn dsh_home() -> Option<String> {
-    resolve_override("DSH_HOME")
 }
 
 /// Copilot CLI 自定义目录：`COPILOT_HOME` 优先（官方推荐、整段替换默认路径），
@@ -403,7 +365,7 @@ mod tests {
     /// 这条锁死本次修复的核心：**只补 PATH 对 shim 式管理器不成立**。volta 的
     /// shim 要 `VOLTA_HOME` 才能定位工具链，pnpm 还要 `VOLTA_FEATURE_PNPM`；
     /// 代理变量决定 registry 连不连得上。快照必须把它们一起带出来，否则
-    /// `dsh plugin add` 的表现不是报错而是挂起。
+    /// 拉包的命令表现不是报错而是挂起。
     #[test]
     fn snapshot_carries_toolchain_and_proxy_vars_not_just_path() {
         let block = "PATH=/home/me/.volta/bin:/usr/bin\0VOLTA_HOME=/home/me/.volta\0\

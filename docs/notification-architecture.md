@@ -38,7 +38,7 @@ OpenCode 使用 `~/.config/opencode/plugins/smelt-notifications.js`（设置 `XD
 的默认 v2 engine 不读取该全局 hooks 目录。Pi 快捷终端由 smeltd 进程级注入随应用打包的
 `--extension`，不修改用户 `~/.pi` 配置；扩展用 `agent_start` / `tool_execution_*` /
 `agent_settled` 上报运行、工具和最终完成状态，其中 `agent_settled` 保证自动重试、压缩重试
-和排队 follow-up 尚未结束时不会提前报完成。Pi 的原生 RPC 对话驱动、DSH 和其它以 ACP 方式启动的
+和排队 follow-up 尚未结束时不会提前报完成。Pi 的原生 RPC 对话驱动和其它以 ACP 方式启动的
 Agent 直接提供结构化状态，不重复注入终端桥。smeltd reducer 统一维护 phase，审批和输入
 等待保持粘性，只有对应工具完成、新 prompt 或明确回合终态才能解除，避免并行子任务消息覆盖。
 helper 每条 hook 只发送一次向后兼容的 `state + event` 信封：新 daemon 读取完整 event，

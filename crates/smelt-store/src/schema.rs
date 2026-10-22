@@ -503,9 +503,7 @@ CREATE TABLE terminal_theme_palette (
   color INTEGER NOT NULL
 );
 CREATE TABLE auto_model_provider (
-  harness TEXT NOT NULL CHECK (harness IN ('dsh', 'pi')),
-  provider TEXT NOT NULL,
-  PRIMARY KEY (harness, provider)
+  provider TEXT PRIMARY KEY
 ) WITHOUT ROWID;
 CREATE TABLE quota_cache (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -1644,4 +1642,40 @@ DROP TABLE subscription_cursor;
 DROP TABLE event_outbox;
 DROP TABLE event_log;
 DROP TABLE command_dedupe;
+";
+
+/// v24 删掉 DeepSeek Harness：DSH 对话（连同整段对话里的终端）、历史标题与智能体绑定、
+/// 启动命令、环境变量、最近选择、profile、以它为引擎的智能体及指向它们的置顶和默认项。
+/// `auto_model_provider` 只剩 Pi 一家，去掉 `harness` 列整表重建。
+pub const MIGRATE_V23_TO_V24: &str = "
+DELETE FROM published_session WHERE id IN (SELECT session_id FROM acp_detail WHERE agent = 'dsh');
+DELETE FROM session_group WHERE id IN (
+  SELECT session.group_id FROM session
+  JOIN acp_detail ON acp_detail.session_id = session.id
+  WHERE acp_detail.agent = 'dsh'
+);
+DELETE FROM history_title WHERE agent = 'dsh';
+DELETE FROM history_agent_binding WHERE agent = 'dsh';
+DELETE FROM remote_acp_session WHERE agent = 'dsh';
+DELETE FROM workspace_menu_session WHERE agent = 'dsh';
+DELETE FROM agent_acp_command WHERE command_key = 'acp_dsh_cmd';
+DELETE FROM agent_acp_env WHERE engine_kind_id = 'dsh';
+DELETE FROM agent_acp_config_memory WHERE engine_kind_id = 'dsh';
+DELETE FROM agent_profile WHERE kind_id = 'dsh';
+DELETE FROM new_session_pin
+  WHERE action_key = 'conversation:dsh'
+     OR action_key LIKE 'conversation:dsh:%'
+     OR action_key IN (
+       SELECT 'conversation:agent:' || id FROM agent_definition WHERE engine_kind_id = 'dsh'
+     );
+DELETE FROM default_conversation_agent
+  WHERE agent_definition_id IN (SELECT id FROM agent_definition WHERE engine_kind_id = 'dsh');
+DELETE FROM agent_definition WHERE engine_kind_id = 'dsh';
+ALTER TABLE auto_model_provider RENAME TO auto_model_provider_v23;
+CREATE TABLE auto_model_provider (
+  provider TEXT PRIMARY KEY
+) WITHOUT ROWID;
+INSERT INTO auto_model_provider(provider)
+  SELECT provider FROM auto_model_provider_v23 WHERE harness = 'pi';
+DROP TABLE auto_model_provider_v23;
 ";
