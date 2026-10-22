@@ -545,24 +545,13 @@ pub fn kill_acp_session(runtime: &RuntimeClient, id: &str) {
     let _ = BufReader::new(s).read_line(&mut resp);
 }
 
-fn spawn_acp_session_kill<F>(id: String, kill: F) -> std::io::Result<std::thread::JoinHandle<()>>
-where
-    F: FnOnce(&str) + Send + 'static,
-{
-    std::thread::Builder::new()
-        .name("smelt-acp-session-kill".into())
-        .spawn(move || kill(&id))
-}
-
-/// 在专用线程中结束 ACP 会话。关闭标签等 UI 回调必须走这里，不能在 GPUI 主线程
-/// 等 daemon 回收 provider；provider 卡住时，`acp_kill` 的有界等待也足以让窗口假死。
-///
-/// 请求仍使用 [`kill_acp_session`] 的完整回执语义，只把等待移出调用线程。若连专用
-/// 线程都无法创建，只记录错误而不在 UI 线程同步回退，否则资源紧张时反而重新卡住。
+/// 在专用线程中结束 ACP 会话（见 [`crate::session_kill`]）。关闭标签等 UI 回调必须走
+/// 这里，不能在 GPUI 主线程等 daemon 回收 provider；provider 卡住时，`acp_kill` 的有界
+/// 等待也足以让窗口假死。请求仍使用 [`kill_acp_session`] 的完整回执语义。
 pub fn kill_acp_session_in_background(runtime: RuntimeClient, id: String) {
-    if let Err(error) = spawn_acp_session_kill(id, move |id| kill_acp_session(&runtime, id)) {
-        eprintln!("[acp] 无法启动会话关闭线程：{error}");
-    }
+    crate::session_kill::spawn("smelt-acp-session-kill", move || {
+        kill_acp_session(&runtime, &id)
+    });
 }
 
 /// 强制重启一个卡死的 ACP 会话：杀掉当前 agent 子进程（整个进程组），换一个
@@ -599,12 +588,9 @@ mod tests {
         ACP_INITIAL_TAIL_LIMIT, AcpEndKind, ConversationClientLaunch, ConversationSnapshot,
         DaemonPhase, SnapshotFrame, acp_open_request, acp_snapshot_request, fallback_snapshot,
         history_snapshot_from_response, read_snapshot_frame, snapshot_after_stream_disconnect,
-        spawn_acp_session_kill,
     };
     use smelt_model::agent_kind::{ConversationAgentKind, ConversationLaunchSpec};
     use std::collections::BTreeMap;
-    use std::sync::mpsc;
-    use std::time::Duration;
 
     #[test]
     fn acp_open_request_serializes_structured_launch() {
@@ -841,33 +827,6 @@ mod tests {
         assert_eq!(req["id"], "acp-1");
         assert_eq!(req["before"], 900);
         assert_eq!(req["limit"], 100);
-    }
-
-    #[test]
-    fn scheduling_session_kill_does_not_wait_for_daemon_round_trip() {
-        let (kill_started_tx, kill_started_rx) = mpsc::channel();
-        let (release_kill_tx, release_kill_rx) = mpsc::channel();
-        let (scheduled_tx, scheduled_rx) = mpsc::channel();
-
-        let scheduler = std::thread::spawn(move || {
-            let worker = spawn_acp_session_kill("acp-slow".into(), move |id| {
-                assert_eq!(id, "acp-slow");
-                kill_started_tx.send(()).unwrap();
-                release_kill_rx.recv().unwrap();
-            })
-            .unwrap();
-            scheduled_tx.send(worker).unwrap();
-        });
-
-        kill_started_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("后台 kill 应开始执行");
-        let worker = scheduled_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("调度调用不能等待 kill 完成");
-        release_kill_tx.send(()).unwrap();
-        worker.join().unwrap();
-        scheduler.join().unwrap();
     }
 
     /// 守护发的一帧：整段帧原样，增量帧由发送方镜像算出。

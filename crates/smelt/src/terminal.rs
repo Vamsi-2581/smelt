@@ -1237,12 +1237,10 @@ pub(crate) fn connect_daemon() -> std::io::Result<UnixStream> {
         // handoff 后短暂窗口：下面走拉起/轮询
     }
 
-    // 优先 managed 路径；没有则从 App/cargo 同目录同步一份。
-    let daemon = match ensure_managed_daemon_for_connect(
-        &CONNECT_MANAGED_ENSURED,
-        managed_daemon_path(),
-        ensure_managed_daemon_current,
-    ) {
+    // 要拉起了：完整检查一遍，不用进程内缓存。缓存只说明「之前在跑的那个已经核对过」，
+    // 它退出后启动名可能还指着旧映像（新版本只挂在 smeltd.pending），照缓存直接拉起会把
+    // 旧版本又起一遍。没在跑时完整检查会把启动名拨到 App 里的版本。
+    let daemon = match ensure_managed_daemon_current() {
         Ok(p) => p,
         Err(e) => {
             let exe = std::env::current_exe()?;
@@ -2001,12 +1999,20 @@ pub fn ensure_daemon_running() {
 }
 
 /// 让运行时杀掉某会话（用户主动关 pane 时调用；GUI 退出不调 → 会话持久活着）。
-/// 等回执再返回，确保 kill 落地后再继续（避免关 pane 后立刻退出时丢命令）。
+/// 等回执再返回，阻塞，不能在主线程调；UI 回调用 [`kill_remote_in_background`]。
 pub(crate) fn kill_remote(runtime: &crate::runtimes::Runtime, id: &str) {
     let _ = runtime.client().request(
         &serde_json::json!({ "op": DaemonOperation::Kill, "id": id }),
         smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT,
     );
+}
+
+/// [`kill_remote`] 放专用线程（见 `smelt_client::session_kill`）：远程运行时要经 iroh
+/// 拨号，离线时要等到超时，主线程不能跟着等；App 退出时会在收尾时间里等它发完。
+pub(crate) fn kill_remote_in_background(runtime: &crate::runtimes::Runtime, id: &str) {
+    let runtime = runtime.clone();
+    let id = id.to_string();
+    smelt_client::session_kill::spawn("smelt-session-kill", move || kill_remote(&runtime, &id));
 }
 
 // ===================== 状态通道（见 docs/archive/state-channel-plan.md） =====================

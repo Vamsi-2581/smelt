@@ -2,9 +2,13 @@
 //! 断线、运行时没起来就退避重连；事件打上所属运行时，送进同一个处理循环。本机那条随
 //! 应用常驻，远程的跟着 [`RuntimeHub`] 增删。
 //!
-//! 远程运行时每次连之前先对版本（本机守护由桌面自己拉起和升级，版本总是对的）：对不上
-//! 就不订阅，把原因记到 [`RuntimeHub`] 上给人看，丢掉它的会话状态镜像，隔一阵再探，对上了
-//! 才订阅。不然订阅解不出投影就断，断了又连，会话状态永远到不了，也没人知道为什么。
+//! 每次连之前先对版本：对不上就不订阅，把原因记到 [`RuntimeHub`] 上给人看，丢掉它的会话
+//! 状态镜像，隔一阵再探，对上了才订阅。不然订阅解不出投影就断，断了又连，会话状态永远
+//! 到不了，也没人知道为什么。
+//!
+//! 本机那条还看着本机守护：没在跑（没起来过，或者运行中退出了）就按 App 里的版本拉起；
+//! 版本对不上（App 更新跨过了协议版本，旧守护还在跑）就立刻请它交接到 App 里的版本，
+//! 不等空闲——对不上时桌面什么都用不了，等也没有意义。
 //!
 //! 连不上和对不上都退避重探；「重新连接」（[`reconnect`]）叫醒线程立刻再试，退避从头算。
 //!
@@ -144,34 +148,38 @@ pub(crate) fn spawn_subscription(
             let mut incompatible_attempt = 0u32;
             let mut upgrade_requested = false;
             while !stop.load(Ordering::Acquire) {
-                let mut status =
-                    (!runtime.is_local()).then(|| crate::runtimes::status_of(runtime.client()));
-                if !upgrade_requested
-                    && let Some(RuntimeStatus::Incompatible {
-                        version,
-                        detail,
-                        runtime_outdated: true,
-                    }) = &status
+                let mut status = if runtime.is_local() {
+                    crate::runtimes::local_status(runtime.client())
+                } else {
+                    crate::runtimes::status_of(runtime.client())
+                };
+                if let RuntimeStatus::Incompatible {
+                    version,
+                    detail,
+                    runtime_outdated: true,
+                } = &status
                 {
-                    upgrade_requested = true;
                     let (version, detail) = (version.clone(), detail.clone());
-                    status = Some(upgrade_then_probe(
-                        &runtime, &version, &detail, &status_tx, &stop,
-                    ));
+                    if runtime.is_local() {
+                        status = upgrade_local_then_probe(
+                            &runtime, &version, &detail, &status_tx, &stop,
+                        );
+                    } else if !upgrade_requested {
+                        upgrade_requested = true;
+                        status = upgrade_then_probe(&runtime, &version, &detail, &status_tx, &stop);
+                    }
                 }
                 let connected_at = Instant::now();
-                if let Some(status) = &status {
-                    let _ = status_tx.try_send((key.clone(), status.clone()));
-                }
+                let _ = status_tx.try_send((key.clone(), status.clone()));
                 let pause = match status {
-                    Some(RuntimeStatus::Incompatible { .. }) => {
+                    RuntimeStatus::Incompatible { .. } => {
                         reconnect_attempt = 0;
                         let pause = incompatible_backoff(incompatible_attempt);
                         incompatible_attempt = incompatible_attempt.saturating_add(1);
                         pause
                     }
                     // 连不上就不再拨一次订阅，直接退避。
-                    Some(RuntimeStatus::Offline(_)) => {
+                    RuntimeStatus::Offline(_) => {
                         incompatible_attempt = 0;
                         let pause = crate::terminal::daemon_reconnect_backoff(reconnect_attempt);
                         reconnect_attempt = reconnect_attempt.saturating_add(1);
@@ -189,13 +197,12 @@ pub(crate) fn spawn_subscription(
                         if stop.load(Ordering::Acquire) {
                             return;
                         }
-                        // 订阅断了：远程运行时这会儿算连不上，退避后再探测时连上了会报回在线。
-                        if !runtime.is_local() {
-                            let _ = status_tx.try_send((
-                                key.clone(),
-                                RuntimeStatus::Offline("连接断开".to_string()),
-                            ));
-                        }
+                        // 订阅断了：这会儿算连不上，退避后再探测时连上了会报回在线。本机守护
+                        // 是退出了的话，下一轮探测会把它拉起来。
+                        let _ = status_tx.try_send((
+                            key.clone(),
+                            RuntimeStatus::Offline("连接断开".to_string()),
+                        ));
                         let _ = sender.try_send((key.clone(), DaemonStateEvent::Disconnected));
                         // 短暂可用后断开（daemon 升级）从首档开始；连续失败则指数退避并封顶，
                         // 避免运行时没起来时固定节拍反复去连。
@@ -226,6 +233,51 @@ pub(crate) fn spawn_subscription(
         })
         .expect("spawn smelt-events 线程");
     handle
+}
+
+/// 本机守护版本对不上：请它交接到 App 里的版本（会话保留），换好再探一次。它有回合没跑完
+/// 时拒绝交接，隔一阵再请，直到换成或者停下；期间报「升级中」，界面上看得到在等什么。
+fn upgrade_local_then_probe(
+    runtime: &Runtime,
+    version: &str,
+    detail: &str,
+    status_tx: &smol::channel::Sender<(RuntimeKey, RuntimeStatus)>,
+    stop: &AtomicBool,
+) -> RuntimeStatus {
+    use crate::terminal::UpgradeOutcome;
+
+    const BUSY_RETRY: Duration = Duration::from_secs(15);
+    let report = |progress: &str| {
+        let _ = status_tx.try_send((
+            runtime.key().clone(),
+            RuntimeStatus::Upgrading(progress.to_string()),
+        ));
+    };
+    report("正在升级本机运行时");
+    loop {
+        match crate::terminal::upgrade_daemon() {
+            UpgradeOutcome::Busy => {
+                report("本机运行时有回合没跑完，跑完就升级");
+                std::thread::sleep(BUSY_RETRY);
+                if stop.load(Ordering::Acquire) {
+                    return crate::runtimes::status_of(runtime.client());
+                }
+            }
+            UpgradeOutcome::Unsupported => {
+                return RuntimeStatus::Incompatible {
+                    version: version.to_string(),
+                    detail: format!(
+                        "{detail}。本机运行时太旧，不能无缝升级：在设置里重启守护进程（会断开会话）"
+                    ),
+                    runtime_outdated: true,
+                };
+            }
+            // 换成了，或者没换成（新守护没起来、交接回滚），都以重新探到的为准。
+            UpgradeOutcome::Upgraded | UpgradeOutcome::Failed => {
+                return crate::runtimes::local_status(runtime.client());
+            }
+        }
+    }
 }
 
 /// 请运行时升到这个桌面的版本，等它换好再探一次，返回探到的状态。升级没成就在原来的

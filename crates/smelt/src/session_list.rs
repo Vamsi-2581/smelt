@@ -76,10 +76,57 @@ fn project_element_id(name: &'static str, project: &ProjectRef) -> ElementId {
     (ElementId::from(name), key).into()
 }
 
-/// 侧栏里一台机器的分段标题：点整行折起或展开；名字后面只在需要注意时写连接状态
-/// （离线、连接中、走中继，慢了用警告色）；折起时组里有对话在跑或在等你，挂一个状态点，
-/// 免得「需要你」被折没了。`⋯` 和右键是同一份机器菜单（[`machine_menu`]），hover 时多出
-/// 「打开项目」的快捷按钮。
+/// 机器名字，远程的带连接灯和要人处理时的几个字；悬停看完整的连接说明。
+fn runtime_name_with_indicator(
+    key: &RuntimeKey,
+    name: impl IntoElement,
+    indicator: Option<crate::runtimes::RuntimeIndicator>,
+) -> AnyElement {
+    let name = div()
+        .min_w_0()
+        .truncate()
+        .text_sm()
+        .font_medium()
+        .text_color(rgb(ui_theme::text_mid()))
+        .child(name);
+    let Some(indicator) = indicator else {
+        return name.into_any_element();
+    };
+    let light = match indicator.light {
+        crate::runtimes::LinkLight::Good => ui_theme::green(),
+        crate::runtimes::LinkLight::Degraded => ui_theme::yellow(),
+        crate::runtimes::LinkLight::Down => ui_theme::red(),
+    };
+    let detail = SharedString::from(indicator.detail);
+    h_flex()
+        .id(ElementId::from(SharedString::from(format!(
+            "runtime-indicator-{key:?}"
+        ))))
+        .min_w_0()
+        .gap_1p5()
+        .items_center()
+        .child(div().flex_none().size(px(6.)).rounded_full().bg(rgb(light)))
+        .child(name)
+        .when_some(indicator.label, |d, label| {
+            d.child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(rgb(light))
+                    .child(label),
+            )
+        })
+        .tooltip(move |window, cx| {
+            gpui_component::tooltip::Tooltip::new(detail.clone()).build(window, cx)
+        })
+        .into_any_element()
+}
+
+/// 侧栏里一台机器的分段标题：点整行折起或展开；远程机器名字前一盏连接灯（绿：在线；
+/// 黄：慢、连接中、升级中；红：离线、版本不兼容），悬停名字看走哪条路、多慢、什么版本，
+/// 要人处理的状态名字后再写几个字；折起时组里有对话在跑或在等你，挂一个状态点，免得
+/// 「需要你」被折没了。`⋯` 和右键是同一份机器菜单（[`machine_menu`]），hover 时多出
+/// 「远程桌面」（装了的才有）和「打开项目」的快捷按钮。
 fn runtime_section_header(
     runtime: crate::runtimes::Runtime,
     workspace: Entity<Workspace>,
@@ -89,7 +136,8 @@ fn runtime_section_header(
 ) -> impl IntoElement + use<> {
     let key = runtime.key().clone();
     let name = crate::runtimes::runtime_name(&key, cx);
-    let attention = crate::runtimes::runtime_attention(&key, cx);
+    let indicator = crate::runtimes::runtime_indicator(&key, cx);
+    let has_desktop = crate::runtimes::runtime_has_desktop(&key, cx);
     let group = SharedString::from(format!("runtime-header-{key:?}"));
     let toggle_workspace = workspace.clone();
     let toggle_key = key.clone();
@@ -120,27 +168,7 @@ fn runtime_section_header(
             .size(px(12.))
             .text_color(rgb(ui_theme::text_faint())),
         )
-        .child(
-            div()
-                .min_w_0()
-                .truncate()
-                .text_sm()
-                .font_medium()
-                .text_color(rgb(ui_theme::text_mid()))
-                .child(name),
-        )
-        .when_some(attention, |d, (text, tone)| {
-            d.child(
-                div()
-                    .flex_none()
-                    .text_xs()
-                    .text_color(rgb(match tone {
-                        crate::runtimes::LinkTone::Warning => ui_theme::yellow(),
-                        crate::runtimes::LinkTone::Muted => ui_theme::text_faint(),
-                    }))
-                    .child(text),
-            )
-        })
+        .child(runtime_name_with_indicator(&key, name, indicator))
         .when_some(alert.filter(|_| folded), |d, status| {
             d.child(
                 div()
@@ -151,6 +179,26 @@ fn runtime_section_header(
             )
         })
         .child(div().flex_1())
+        .when(has_desktop, |d| {
+            let runtime = runtime.clone();
+            let workspace = workspace.clone();
+            d.child(
+                Button::new(ElementId::from(SharedString::from(format!(
+                    "runtime-desktop-{key:?}"
+                ))))
+                .quiet()
+                .icon_size()
+                .icon(Icon::empty().path("smelt-icons/monitor.svg"))
+                .icon_action("远程桌面")
+                .opacity(0.0)
+                .group_hover(group.clone(), |style| style.opacity(1.0))
+                .on_click(move |_ev, window, cx| {
+                    cx.stop_propagation();
+                    let runtime = runtime.clone();
+                    workspace.update(cx, |ws, cx| ws.open_desktop(runtime, window, cx));
+                }),
+            )
+        })
         .child({
             let runtime = runtime.clone();
             let workspace = workspace.clone();

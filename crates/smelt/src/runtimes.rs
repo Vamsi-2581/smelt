@@ -185,30 +185,24 @@ pub(crate) enum LinkTone {
     Warning,
 }
 
-/// 一台机器的连接状态写成字。`compact` 给侧栏标题：一切正常（直连、在线还没测出路径）
-/// 时不写，只在需要注意时给一小段；否则是机器面板里的完整说明。
-fn link_text(
-    status: &RuntimeStatus,
-    link: Option<&RuntimeLink>,
-    compact: bool,
-) -> Option<(String, LinkTone)> {
+/// 一台机器的连接状态写成字，机器面板里的完整说明：走哪条路、多慢，版本不对时是什么版本。
+fn link_text(status: &RuntimeStatus, link: Option<&RuntimeLink>) -> (String, LinkTone) {
     match status {
-        RuntimeStatus::Connecting => Some(("连接中".to_string(), LinkTone::Muted)),
-        RuntimeStatus::Offline(_) => Some(("离线".to_string(), LinkTone::Muted)),
+        RuntimeStatus::Connecting => ("连接中".to_string(), LinkTone::Muted),
+        RuntimeStatus::Offline(_) => ("离线".to_string(), LinkTone::Muted),
         RuntimeStatus::Incompatible { version, .. } => {
             let text = format!("版本不兼容 · {version}");
-            // 连得上，连接路径照样有：机器面板里也说走哪条路、多慢。
+            // 连得上，连接路径照样有：也说走哪条路、多慢。
             let text = match link {
-                Some(link) if !compact => format!("{text} · {}", link_summary(link)),
-                _ => text,
+                Some(link) => format!("{text} · {}", link_summary(link)),
+                None => text,
             };
-            Some((text, LinkTone::Warning))
+            (text, LinkTone::Warning)
         }
-        RuntimeStatus::Upgrading(_) if compact => Some(("升级中".to_string(), LinkTone::Muted)),
-        RuntimeStatus::Upgrading(progress) => Some((progress.clone(), LinkTone::Muted)),
+        RuntimeStatus::Upgrading(progress) => (progress.clone(), LinkTone::Muted),
         RuntimeStatus::Online { .. } => {
             let Some(link) = link else {
-                return (!compact).then(|| ("在线".to_string(), LinkTone::Muted));
+                return ("在线".to_string(), LinkTone::Muted);
             };
             let tone = if link.rtt_ms >= SLOW_RTT_MS {
                 LinkTone::Warning
@@ -216,12 +210,54 @@ fn link_text(
                 LinkTone::Muted
             };
             match &link.kind {
-                LinkKind::Relay(_) if compact => Some((format!("中继 · {}ms", link.rtt_ms), tone)),
-                _ if compact => None,
-                LinkKind::Other => Some((format!("在线 · {}ms", link.rtt_ms), tone)),
-                _ => Some((link_summary(link), tone)),
+                LinkKind::Other => (format!("在线 · {}ms", link.rtt_ms), tone),
+                _ => (link_summary(link), tone),
             }
         }
+    }
+}
+
+/// 侧栏标题上的连接指示灯。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinkLight {
+    /// 在线，延迟正常。
+    Good,
+    /// 能用但要留意：连接中、升级中、延迟高。
+    Degraded,
+    /// 用不了：离线、版本不兼容。
+    Down,
+}
+
+/// 侧栏标题上一台远程机器的连接状态：一盏灯，悬停看完整说明。要人处理的（离线、版本
+/// 不兼容、升级中）灯旁再写几个字，不只靠颜色。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RuntimeIndicator {
+    pub(crate) light: LinkLight,
+    pub(crate) label: Option<String>,
+    pub(crate) detail: String,
+}
+
+fn indicator(status: &RuntimeStatus, link: Option<&RuntimeLink>) -> RuntimeIndicator {
+    let (light, label) = match status {
+        RuntimeStatus::Online { .. } => match link {
+            Some(link) if link.rtt_ms >= SLOW_RTT_MS => (LinkLight::Degraded, None),
+            _ => (LinkLight::Good, None),
+        },
+        RuntimeStatus::Connecting => (LinkLight::Degraded, None),
+        RuntimeStatus::Upgrading(_) => (LinkLight::Degraded, Some("升级中".to_string())),
+        RuntimeStatus::Offline(_) => (LinkLight::Down, Some("离线".to_string())),
+        RuntimeStatus::Incompatible { version, .. } => {
+            (LinkLight::Down, Some(format!("版本不兼容 · {version}")))
+        }
+    };
+    let detail = match status {
+        RuntimeStatus::Offline(error) => format!("离线：{error}"),
+        _ => link_text(status, link).0,
+    };
+    RuntimeIndicator {
+        light,
+        label,
+        detail,
     }
 }
 
@@ -230,6 +266,14 @@ fn remote_of<'a>(key: &RuntimeKey, cx: &'a gpui::App) -> Option<&'a RemoteRuntim
         .remotes
         .iter()
         .find(|remote| remote.runtime.key() == key)
+}
+
+/// 一个运行时最近一次探到的状态。本机还没探过时是 `None`。
+fn status_of_key<'a>(key: &RuntimeKey, cx: &'a gpui::App) -> Option<&'a RuntimeStatus> {
+    match key {
+        RuntimeKey::Local => cx.try_global::<RuntimeHub>()?.local_status.as_ref(),
+        RuntimeKey::Remote(_) => remote_of(key, cx).map(|remote| &remote.status),
+    }
 }
 
 /// 走哪条路、多慢，机器面板里的写法。
@@ -241,10 +285,18 @@ fn link_summary(link: &RuntimeLink) -> String {
     }
 }
 
-/// 侧栏标题上的连接状态，见 [`link_text`]。本机不写。
-pub(crate) fn runtime_attention(key: &RuntimeKey, cx: &gpui::App) -> Option<(String, LinkTone)> {
-    let remote = remote_of(key, cx)?;
-    link_text(&remote.status, remote.link.as_ref(), true)
+/// 侧栏标题上的连接指示，见 [`RuntimeIndicator`]。本机只在出了状况（守护没起来、
+/// 版本不对、正在升级）时显示：平时它总在，挂一盏绿灯只是噪音。
+pub(crate) fn runtime_indicator(key: &RuntimeKey, cx: &gpui::App) -> Option<RuntimeIndicator> {
+    match key {
+        RuntimeKey::Local => status_of_key(key, cx)
+            .filter(|status| !matches!(status, RuntimeStatus::Online { .. }))
+            .map(|status| indicator(status, None)),
+        RuntimeKey::Remote(_) => {
+            let remote = remote_of(key, cx)?;
+            Some(indicator(&remote.status, remote.link.as_ref()))
+        }
+    }
 }
 
 /// 机器面板里的完整连接说明。
@@ -252,15 +304,26 @@ pub(crate) fn runtime_link_detail(key: &RuntimeKey, cx: &gpui::App) -> (String, 
     match key {
         RuntimeKey::Local => ("这台 Mac".to_string(), LinkTone::Muted),
         RuntimeKey::Remote(_) => remote_of(key, cx)
-            .and_then(|remote| link_text(&remote.status, remote.link.as_ref(), false))
+            .map(|remote| link_text(&remote.status, remote.link.as_ref()))
             .unwrap_or_else(|| ("离线".to_string(), LinkTone::Muted)),
     }
 }
 
 /// 最近一次探测是版本对不上。
 pub(crate) fn runtime_incompatible(key: &RuntimeKey, cx: &gpui::App) -> bool {
-    remote_of(key, cx)
-        .is_some_and(|remote| matches!(remote.status, RuntimeStatus::Incompatible { .. }))
+    status_of_key(key, cx)
+        .is_some_and(|status| matches!(status, RuntimeStatus::Incompatible { .. }))
+}
+
+/// 本机守护版本对不上、正在换代：这时由订阅线程负责升级（见 `runtime_events`），
+/// 别处的空闲升级不要再插一脚。
+pub(crate) fn local_upgrade_in_hand(cx: &gpui::App) -> bool {
+    status_of_key(&RuntimeKey::Local, cx).is_some_and(|status| {
+        matches!(
+            status,
+            RuntimeStatus::Incompatible { .. } | RuntimeStatus::Upgrading(_)
+        )
+    })
 }
 
 /// 连不上或版本对不上的远程机器，菜单里给「重新连接」。
@@ -283,10 +346,17 @@ pub(crate) fn runtime_has_desktop(key: &RuntimeKey, cx: &gpui::App) -> bool {
 pub(crate) fn any_runtime_needs_attention(cx: &gpui::App) -> bool {
     cx.try_global::<RuntimeHub>().is_some_and(|hub| {
         hub.load_error.is_some()
+            || hub
+                .local_status
+                .as_ref()
+                .is_some_and(|status| indicator(status, None).light == LinkLight::Down)
             || hub.remotes.iter().any(|remote| {
-                link_text(&remote.status, remote.link.as_ref(), true)
-                    .is_some_and(|(_, tone)| tone == LinkTone::Warning)
-                    || matches!(remote.status, RuntimeStatus::Offline(_))
+                match indicator(&remote.status, remote.link.as_ref()).light {
+                    LinkLight::Down => true,
+                    // 连接中、升级中是过程，不算；在线却慢才算。
+                    LinkLight::Degraded => matches!(remote.status, RuntimeStatus::Online { .. }),
+                    LinkLight::Good => false,
+                }
             })
     })
 }
@@ -303,6 +373,8 @@ pub(crate) struct RuntimeHub {
     /// 启动时没读出登记过的机器（比如客户端库版本比程序新）。这时列表里只剩本机，不说
     /// 一声就像机器全丢了，所以机器面板和设置页都要显示它。
     pub(crate) load_error: Option<String>,
+    /// 本机守护最近一次探到的状态，订阅线程报来（见 `runtime_events`）。还没探过是 `None`。
+    pub(crate) local_status: Option<RuntimeStatus>,
 }
 
 impl gpui::Global for RuntimeHub {}
@@ -390,6 +462,13 @@ fn remote_client(
         connector: probe.0.clone(),
     });
     Ok((client, probe))
+}
+
+/// 本机守护：没在跑就按 App 里的版本拉起（运行中退出了也靠这里补上），再对版本。
+/// 阻塞，只在后台调。
+pub(crate) fn local_status(client: &RuntimeClient) -> RuntimeStatus {
+    crate::terminal::ensure_daemon_running();
+    status_of(client)
 }
 
 /// 问一次运行时并对版本。阻塞，只在后台调。
@@ -499,21 +578,26 @@ fn described_status(
 /// 事件订阅报来的连通性（见 `runtime_events`）：记到运行时上给人看。没变就不动 hub，
 /// 订阅每次重连都会探测一次，不能每次都让看着 hub 的界面重画。
 pub(crate) fn set_status(key: &RuntimeKey, status: RuntimeStatus, cx: &mut gpui::App) {
-    let changed = cx.try_global::<RuntimeHub>().is_some_and(|hub| {
-        hub.remotes
+    let changed = cx.try_global::<RuntimeHub>().is_some_and(|hub| match key {
+        RuntimeKey::Local => hub.local_status.as_ref() != Some(&status),
+        RuntimeKey::Remote(_) => hub
+            .remotes
             .iter()
-            .any(|remote| remote.runtime.key() == key && remote.status != status)
+            .any(|remote| remote.runtime.key() == key && remote.status != status),
     });
     if !changed {
         return;
     }
-    update_hub(cx, |hub| {
-        if let Some(remote) = hub
-            .remotes
-            .iter_mut()
-            .find(|remote| remote.runtime.key() == key)
-        {
-            remote.status = status;
+    update_hub(cx, |hub| match key {
+        RuntimeKey::Local => hub.local_status = Some(status),
+        RuntimeKey::Remote(_) => {
+            if let Some(remote) = hub
+                .remotes
+                .iter_mut()
+                .find(|remote| remote.runtime.key() == key)
+            {
+                remote.status = status;
+            }
         }
     });
 }
@@ -759,35 +843,48 @@ pub(crate) fn remove_runtime(runtime_id: String, cx: &mut gpui::App) {
     }) else {
         return;
     };
+    // 在线才顺手请它吊销本机的配对。离线的连不上，拨号要等到超时，不能让移除跟着等；
+    // 那台机器上的配对记录留着，要清就在那台机器上撤。
+    let revoke = matches!(remote.status, RuntimeStatus::Online { .. });
     cx.spawn(async move |cx| {
         let removed = cx
             .background_executor()
-            .spawn(async move {
-                if let Ok(client) = iroh_client() {
-                    let _ = remote
-                        .runtime
-                        .client()
-                        .call::<smelt_model::control_api::DeviceRevoke>(
-                            &smelt_model::remote_config::DeviceIdParams {
-                                endpoint_id: client.id().to_string(),
-                            },
-                            smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT,
-                        );
+            .spawn({
+                let runtime_id = runtime_id.clone();
+                async move {
+                    smelt_client_store::client_store()
+                        .and_then(|store| store.delete_runtime_connection(&runtime_id))
+                        .map(|_| ())
+                        .map_err(|error| format!("移除运行时失败：{error}"))
                 }
-                smelt_client_store::client_store()
-                    .and_then(|store| store.delete_runtime_connection(&runtime_id))
-                    .map(|_| runtime_id)
-                    .map_err(|error| format!("移除运行时失败：{error}"))
             })
             .await;
+        let deleted = removed.is_ok();
         cx.update(|cx| {
             update_hub(cx, |hub| match removed {
-                Ok(runtime_id) => hub
+                Ok(()) => hub
                     .remotes
                     .retain(|remote| remote.connection.runtime_id != runtime_id),
                 Err(error) => hub.error = Some(error),
             })
         });
+        if deleted && revoke {
+            cx.background_executor()
+                .spawn(async move {
+                    if let Ok(client) = iroh_client() {
+                        let _ = remote
+                            .runtime
+                            .client()
+                            .call::<smelt_model::control_api::DeviceRevoke>(
+                                &smelt_model::remote_config::DeviceIdParams {
+                                    endpoint_id: client.id().to_string(),
+                                },
+                                smelt_runtime_client::DEFAULT_REQUEST_TIMEOUT,
+                            );
+                    }
+                })
+                .await;
+        }
     })
     .detach();
 }
@@ -834,74 +931,80 @@ mod tests {
         assert!(!link_changed(None, None));
     }
 
-    /// 侧栏只在需要注意时写字：直连不写，中继写延迟，慢了用警告色。
+    /// 机器面板里说全：走哪条路、多慢，慢了用警告色；版本不对时连上版本和连接路径。
     #[test]
-    fn the_sidebar_only_speaks_up_when_it_matters() {
+    fn the_machine_panel_spells_the_link_out() {
         let status = online();
         assert_eq!(
-            link_text(&status, Some(&link(LinkKind::Direct, 12)), true),
-            None
+            link_text(&status, Some(&link(LinkKind::Direct, 12))),
+            ("直连 · 12ms".into(), LinkTone::Muted)
         );
-        assert_eq!(link_text(&status, None, true), None);
+        assert_eq!(link_text(&status, None), ("在线".into(), LinkTone::Muted));
         assert_eq!(
             link_text(
                 &status,
-                Some(&link(LinkKind::Relay("n0 usw1-1".into()), 437)),
-                true
+                Some(&link(LinkKind::Relay("n0 usw1-1".into()), 437))
             ),
-            Some(("中继 · 437ms".into(), LinkTone::Warning))
+            ("中继 n0 usw1-1 · 437ms".into(), LinkTone::Warning)
         );
         assert_eq!(
-            link_text(
-                &status,
-                Some(&link(LinkKind::Relay("relay.example".into()), 60)),
-                true
-            ),
-            Some(("中继 · 60ms".into(), LinkTone::Muted))
+            link_text(&RuntimeStatus::Offline("断了".into()), None),
+            ("离线".into(), LinkTone::Muted)
         );
-        assert_eq!(
-            link_text(&RuntimeStatus::Offline("断了".into()), None, true),
-            Some(("离线".into(), LinkTone::Muted))
-        );
-        // 机器面板里说全。
-        assert_eq!(
-            link_text(&status, Some(&link(LinkKind::Direct, 12)), false),
-            Some(("直连 · 12ms".into(), LinkTone::Muted))
-        );
-        assert_eq!(
-            link_text(
-                &status,
-                Some(&link(LinkKind::Relay("n0 usw1-1".into()), 437)),
-                false
-            ),
-            Some(("中继 n0 usw1-1 · 437ms".into(), LinkTone::Warning))
-        );
-    }
-
-    /// 版本不兼容也写出运行时的版本；连得上，机器面板里照样说走哪条路、多慢。
-    #[test]
-    fn incompatible_runtime_shows_its_version_and_link() {
-        let status = RuntimeStatus::Incompatible {
+        let incompatible = RuntimeStatus::Incompatible {
             version: "0.9.0-rc.3".into(),
             detail: "运行时 0.9.0-rc.3 较旧，需要升级运行时（控制协议 v1，桌面要 v2）".into(),
             runtime_outdated: true,
         };
-        let relay = link(LinkKind::Relay("n0 usw1-1".into()), 437);
         assert_eq!(
-            link_text(&status, Some(&relay), true),
-            Some(("版本不兼容 · 0.9.0-rc.3".into(), LinkTone::Warning))
-        );
-        assert_eq!(
-            link_text(&status, Some(&relay), false),
-            Some((
+            link_text(
+                &incompatible,
+                Some(&link(LinkKind::Relay("n0 usw1-1".into()), 437))
+            ),
+            (
                 "版本不兼容 · 0.9.0-rc.3 · 中继 n0 usw1-1 · 437ms".into(),
                 LinkTone::Warning
-            ))
+            )
         );
-        assert_eq!(
-            link_text(&status, None, false),
-            Some(("版本不兼容 · 0.9.0-rc.3".into(), LinkTone::Warning))
+    }
+
+    /// 侧栏标题一盏灯：在线绿、慢或过程中黄、用不了红；要人处理的灯旁写字，悬停看全。
+    #[test]
+    fn the_sidebar_light_follows_the_link() {
+        let fast = indicator(
+            &online(),
+            Some(&link(LinkKind::Relay("n0 usw1-1".into()), 60)),
         );
+        assert_eq!(fast.light, LinkLight::Good);
+        assert_eq!(fast.label, None);
+        assert_eq!(fast.detail, "中继 n0 usw1-1 · 60ms");
+
+        let slow = indicator(
+            &online(),
+            Some(&link(LinkKind::Relay("n0 usw1-1".into()), 628)),
+        );
+        assert_eq!(slow.light, LinkLight::Degraded);
+        assert_eq!(slow.label, None);
+
+        let offline = indicator(&RuntimeStatus::Offline("connection refused".into()), None);
+        assert_eq!(offline.light, LinkLight::Down);
+        assert_eq!(offline.label.as_deref(), Some("离线"));
+        assert_eq!(offline.detail, "离线：connection refused");
+
+        let incompatible = indicator(
+            &RuntimeStatus::Incompatible {
+                version: "0.9.0".into(),
+                detail: String::new(),
+                runtime_outdated: true,
+            },
+            None,
+        );
+        assert_eq!(incompatible.light, LinkLight::Down);
+        assert_eq!(incompatible.label.as_deref(), Some("版本不兼容 · 0.9.0"));
+
+        let upgrading = indicator(&RuntimeStatus::Upgrading("正在升级".into()), None);
+        assert_eq!(upgrading.light, LinkLight::Degraded);
+        assert_eq!(upgrading.label.as_deref(), Some("升级中"));
     }
 
     /// 每次连接都用 `respond` 回一条 `system.describe`，模拟另一个版本的运行时。

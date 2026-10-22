@@ -4992,10 +4992,16 @@ fn main() {
                 .as_ref()
                 .and_then(|main| main.workspace.upgrade())
                 .map(|ws| ws.update(cx, |ws, cx| ws.flush_ws_state_on_quit(cx)));
+            // 刚关掉的会话，kill 可能还在路上（见 smelt_client::session_kill）。GPUI 只给
+            // 收尾一小段时间，超时的就算了：会话留在运行时上，会话管理里还能关。
+            let kills = cx.background_executor().spawn(async {
+                smelt_client::session_kill::wait_settled(gpui::SHUTDOWN_TIMEOUT);
+            });
             async move {
                 if let Some(done) = flush_done {
                     let _ = done.recv().await;
                 }
+                kills.await;
             }
         });
         cx.set_global(AppQuitSubscription {

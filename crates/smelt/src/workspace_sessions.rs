@@ -293,7 +293,7 @@ impl Workspace {
                     if this.restore_cancelled(&key) {
                         if let Ok(leaves) = result {
                             for leaf in leaves {
-                                terminal::kill_remote(&runtime, &leaf.sid);
+                                terminal::kill_remote_in_background(&runtime, &leaf.sid);
                             }
                         }
                         this.forget_pending_restore(&key, original_index);
@@ -2120,10 +2120,7 @@ impl Workspace {
                 })
                 .collect::<Vec<_>>();
             for (runtime, id) in terminals {
-                // 用户主动关闭会话时要在移除视图前完成有界 kill 往返。
-                // `terminal::kill_remote` 使用 5s socket 超时，确保 App 紧接着退出时
-                // 不会把尚未送达的命令留给一个 detached 任务。
-                terminal::kill_remote(&runtime, &id);
+                terminal::kill_remote_in_background(&runtime, &id);
             }
             if let SessionKind::Conversation(view) = &self.sessions[ix].kind {
                 view.update(cx, |v, cx| v.shutdown(cx));
@@ -2211,7 +2208,7 @@ impl Workspace {
         }
         // 用户主动关 pane → 守护真正杀掉该 shell（区别于退出 GUI：那时保活）。
         let closed_session_id = view.read(cx).session_id().to_string();
-        terminal::kill_remote(view.read(cx).runtime(), &closed_session_id);
+        terminal::kill_remote_in_background(view.read(cx).runtime(), &closed_session_id);
         if cx.try_global::<AttentionGlobal>().is_some() {
             AttentionGlobal::remove_session(&closed_session_id, cx);
         }

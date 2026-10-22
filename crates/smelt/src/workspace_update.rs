@@ -435,7 +435,10 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| {
                 this.daemon_info = info;
                 this.daemon_outdated = Some(outdated);
-                if outdated {
+                if outdated && crate::runtimes::local_upgrade_in_hand(cx) {
+                    // 版本对不上：订阅线程正在换代，这里不再发一次。
+                    this.daemon_upgrade_pending = false;
+                } else if outdated {
                     if this.any_agent_busy(cx) {
                         // 有 agent 正在跑：无缝升级虽然不丢会话，但会让所有终端
                         // 闪断重连——挑用户不在跑任务的时刻做，别背着用户换代
@@ -615,11 +618,15 @@ impl Workspace {
         }
     }
 
-    /// 关掉守护进程里的一个会话（真杀底层 shell / ACP 子进程）。
+    /// 关掉守护进程里的一个会话（真杀底层 shell / ACP 子进程）。kill 在专用线程里发，
+    /// App 退出时会等它发完（见 `smelt_client::session_kill`）。
     pub(crate) fn kill_session_in_manager(&mut self, id: String, cx: &mut Context<Self>) {
-        // 这是用户明确点击“关闭会话”，不能把 kill 留给 App 退出时可能被丢弃的
-        // detached 任务。两个控制 op 都有 5s socket 超时，主线程最多等待一次有界往返。
-        Self::kill_daemon_session(&id);
+        {
+            let id = id.clone();
+            smelt_client::session_kill::spawn("smelt-session-kill", move || {
+                Self::kill_daemon_session(&id)
+            });
+        }
         self.session_manager_tombstones.insert(id);
         self.refresh_session_manager(cx);
     }
