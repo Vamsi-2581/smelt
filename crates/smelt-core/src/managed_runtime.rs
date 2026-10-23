@@ -120,11 +120,14 @@ impl ManagedPiRuntime {
             .collect()
     }
 
+    /// 起 smelt-pi 的子命令（登录、MCP 登录）。和 Pi 会话一样铺 login shell 环境：
+    /// 守护拿不到用户 rc 里的代理变量，子命令要联网，缺了它在只放行代理的网络里会挂住。
     pub(crate) fn command(&self, subcommand: Option<&str>) -> Command {
         let mut command = Command::new(&self.executable);
         if let Some(subcommand) = subcommand {
             command.arg(subcommand);
         }
+        crate::login_env::apply_login_environment(&mut command);
         command.env(PI_PROTOCOL_ENV, pi_protocol());
         command
     }
@@ -472,6 +475,34 @@ mod tests {
             Some(pi_protocol()),
             "子命令也要带约定版本，不然 smelt-pi 会拒绝启动"
         );
+    }
+
+    /// 守护是 launchd 拉起的，没有用户 rc 里的 `HTTPS_PROXY`。登录助手少了它会
+    /// 直连 github.com，在只放行代理的网络里一直挂着；Pi 会话那边早就铺了 login
+    /// 环境，子命令得和它一样。
+    #[test]
+    fn subcommands_run_with_the_login_shell_environment() {
+        let runtime = ManagedPiRuntime {
+            executable: PathBuf::from("/Applications/Smelt.app/Contents/MacOS/smelt-pi"),
+        };
+        let command = runtime.command(Some("auth"));
+        let env = |name: &str| {
+            command
+                .get_envs()
+                .find(|(key, _)| *key == name)
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().into_owned())
+        };
+        assert_eq!(
+            env("PATH").as_deref(),
+            Some(crate::login_env::login_path())
+        );
+        for (name, value) in crate::login_env::login_environment() {
+            if name == "PATH" || name == PI_PROTOCOL_ENV || name == "NPM_CONFIG_REGISTRY" {
+                continue;
+            }
+            assert_eq!(env(name).as_ref(), Some(value), "{name} 没传给子命令");
+        }
     }
 
     #[test]
