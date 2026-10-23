@@ -5,7 +5,8 @@
 //! `RuntimeClient`。上层的阻塞读写、超时、`try_clone` 对两种传输完全一样。
 //!
 //! 鉴权不在这里：服务端把对端的 endpoint id 连同流一起交出去，由运行时按已配对设备
-//! 判断（D3）。
+//! 判断（D3）。这里只按运行时给的「是否已配对」限流：endpoint id 不是秘密，谁都能连上来
+//! 握手，未配对的对端不能靠多开连接、多开流把运行时的线程耗尽。
 
 use std::collections::HashMap;
 use std::io;
@@ -16,6 +17,7 @@ use anyhow::{Context, Result};
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use tokio::io::AsyncWriteExt as _;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{info, warn};
 
 use crate::{ConnectionEvent, ConnectionObserver, PathObserver, RelaySettings};
@@ -23,9 +25,26 @@ use crate::{ConnectionEvent, ConnectionObserver, PathObserver, RelaySettings};
 /// 运行时协议的 ALPN。协议语义变了就换版本号，两端对不上 iroh 直接拒绝握手。
 pub const RUNTIME_ALPN: &[u8] = b"smelt/runtime/1";
 
-/// 运行时一侧接收桥接好的流。在 tokio 线程上被调用，不能阻塞：处理放到自己的线程。
+/// 同时最多留几条未配对的连接。配对只要一条，多出来的直接拒绝。
+const MAX_UNTRUSTED_CONNECTIONS: usize = 8;
+/// 未配对连接超限时的关闭码。
+const CLOSE_BUSY: u32 = 2;
+/// 未配对的连接最多留多久。到点还没配对就断开，名额不能被一条不说话的流一直占着；
+/// 客户端下次请求时会重拨。
+#[cfg(not(test))]
+const UNTRUSTED_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(test)]
+const UNTRUSTED_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+/// 未配对连接到期时的关闭码。
+const CLOSE_PAIRING_TIMEOUT: u32 = 3;
+
+/// 运行时一侧接收桥接好的流。
 pub trait StreamAcceptor: Send + Sync + 'static {
-    /// `remote` 是对端的 endpoint id。
+    /// 对端是不是已配对的设备。可以阻塞（查库），在 blocking 线程池上调用。
+    /// 未配对的连接受限：总数有上限，流一条处理完才接下一条。
+    fn is_trusted(&self, remote: &str) -> bool;
+
+    /// `remote` 是对端的 endpoint id。在 tokio 线程上被调用，不能阻塞：处理放到自己的线程。
     fn accept(&self, remote: &str, stream: UnixStream);
 }
 
@@ -104,6 +123,7 @@ pub async fn serve_runtime(
     conn_observer: Option<ConnectionObserver>,
 ) {
     tokio::pin!(shutdown);
+    let untrusted = Arc::new(Semaphore::new(MAX_UNTRUSTED_CONNECTIONS));
     loop {
         let incoming = tokio::select! {
             _ = &mut shutdown => break,
@@ -116,9 +136,17 @@ pub async fn serve_runtime(
         let registry = registry.clone();
         let path_observer = path_observer.clone();
         let conn_observer = conn_observer.clone();
+        let untrusted = Arc::clone(&untrusted);
         tokio::spawn(async move {
-            if let Err(error) =
-                serve_connection(incoming, acceptor, registry, path_observer, conn_observer).await
+            if let Err(error) = serve_connection(
+                incoming,
+                acceptor,
+                untrusted,
+                registry,
+                path_observer,
+                conn_observer,
+            )
+            .await
             {
                 warn!("iroh 运行时连接处理失败：{error:#}");
             }
@@ -130,6 +158,7 @@ pub async fn serve_runtime(
 async fn serve_connection(
     incoming: iroh::endpoint::Incoming,
     acceptor: Arc<dyn StreamAcceptor>,
+    untrusted: Arc<Semaphore>,
     registry: ConnectionRegistry,
     path_observer: Option<PathObserver>,
     conn_observer: Option<ConnectionObserver>,
@@ -137,8 +166,24 @@ async fn serve_connection(
     let conn = incoming.await.context("握手失败")?;
     let connection_id = conn.stable_id();
     let remote = conn.remote_id().to_string();
-    info!(%remote, "iroh 已接受运行时连接");
+    // 先登记再查白名单：撤销是先删白名单再按登记断连，这样查到「已配对」之后的撤销
+    // 一定断得到这条连接，不存在「已配对的连接又变回未配对」。
     registry.insert(&remote, conn.clone());
+    // 未配对期间占一个名额；在这条连接上配对成功后释放。
+    let mut untrusted_slot: Option<OwnedSemaphorePermit> = None;
+    if !is_trusted(&acceptor, &remote).await {
+        match untrusted.try_acquire_owned() {
+            Ok(permit) => untrusted_slot = Some(permit),
+            Err(_) => {
+                warn!(%remote, "未配对的连接已达上限，拒绝");
+                registry.remove(&remote, &conn);
+                conn.close(CLOSE_BUSY.into(), b"busy");
+                return Ok(());
+            }
+        }
+    }
+    let deadline = tokio::time::Instant::now() + UNTRUSTED_DEADLINE;
+    info!(%remote, "iroh 已接受运行时连接");
     if let Some(observer) = conn_observer.as_ref() {
         let connected_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -153,15 +198,31 @@ async fn serve_connection(
     crate::observe_selected_paths(conn.clone(), remote.clone(), path_observer);
 
     loop {
-        let (send, recv) = match conn.accept_bi().await {
+        let limit = untrusted_slot.as_ref().map(|_| deadline);
+        let Some(accepted) = before(limit, conn.accept_bi()).await else {
+            expire(&conn, &remote);
+            break;
+        };
+        let (send, recv) = match accepted {
             Ok(pair) => pair,
             Err(error) => {
                 info!(%remote, "iroh 运行时连接结束：{error}");
                 break;
             }
         };
-        match bridge(send, recv) {
-            Ok(stream) => acceptor.accept(&remote, stream),
+        if untrusted_slot.is_some() && is_trusted(&acceptor, &remote).await {
+            untrusted_slot = None;
+        }
+        match bridge_tracked(send, recv) {
+            Ok((stream, pumped)) => {
+                acceptor.accept(&remote, stream);
+                // 未配对的流一条处理完再接下一条：对端多开的流留在 QUIC 层，受它的流控约束，
+                // 不会各占一个处理线程。
+                if untrusted_slot.is_some() && before(Some(deadline), pumped).await.is_none() {
+                    expire(&conn, &remote);
+                    break;
+                }
+            }
             Err(error) => warn!(%remote, "桥接 iroh 流失败：{error}"),
         }
     }
@@ -176,14 +237,46 @@ async fn serve_connection(
     Ok(())
 }
 
+/// 在 `deadline` 之前等完 `fut`；`deadline` 为 `None` 时不限时，到点返回 `None`。
+async fn before<F: std::future::Future>(
+    deadline: Option<tokio::time::Instant>,
+    fut: F,
+) -> Option<F::Output> {
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, fut).await.ok(),
+        None => Some(fut.await),
+    }
+}
+
+/// 未配对的连接到期：断开。搬运任务随之出错收摊，处理线程读到 EOF 退出。
+fn expire(conn: &Connection, remote: &str) {
+    warn!(%remote, "未配对的连接到期，断开");
+    conn.close(CLOSE_PAIRING_TIMEOUT.into(), b"pairing timeout");
+}
+
+async fn is_trusted(acceptor: &Arc<dyn StreamAcceptor>, remote: &str) -> bool {
+    let acceptor = Arc::clone(acceptor);
+    let remote = remote.to_string();
+    tokio::task::spawn_blocking(move || acceptor.is_trusted(&remote))
+        .await
+        .unwrap_or(false)
+}
+
 /// 把一条 QUIC 双向流接到 `UnixStream::pair()` 的一端，返回另一端。必须在 tokio
 /// 运行时里调用：搬运任务挂在当前运行时上。
 pub fn bridge(send: SendStream, recv: RecvStream) -> io::Result<UnixStream> {
+    bridge_tracked(send, recv).map(|(stream, _)| stream)
+}
+
+/// 同 [`bridge`]，另返回搬运任务：它结束时这条流已经收摊。
+fn bridge_tracked(
+    send: SendStream,
+    recv: RecvStream,
+) -> io::Result<(UnixStream, tokio::task::JoinHandle<()>)> {
     let (ours, theirs) = UnixStream::pair()?;
     ours.set_nonblocking(true)?;
     let ours = tokio::net::UnixStream::from_std(ours)?;
-    tokio::spawn(pump(send, recv, ours));
-    Ok(theirs)
+    Ok((theirs, tokio::spawn(pump(send, recv, ours))))
 }
 
 /// 两个方向分别搬到对端 EOF。对端只是写完（半关闭）时，另一方向继续，回包还要回去；
@@ -338,5 +431,191 @@ impl smelt_runtime_client::Connector for RuntimeConnector {
                 }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use iroh::RelayMode;
+    use iroh::endpoint::ConnectionError;
+    use tokio::sync::mpsc;
+    use tokio::time::timeout;
+
+    const TEST_ALPN: &[u8] = b"smelt/test/1";
+    const ARRIVES: Duration = Duration::from_secs(5);
+    const STAYS_AWAY: Duration = Duration::from_millis(300);
+
+    struct TestAcceptor {
+        trusted: AtomicBool,
+        streams: mpsc::UnboundedSender<UnixStream>,
+    }
+
+    impl StreamAcceptor for TestAcceptor {
+        fn is_trusted(&self, _remote: &str) -> bool {
+            self.trusted.load(Ordering::SeqCst)
+        }
+
+        fn accept(&self, _remote: &str, stream: UnixStream) {
+            let _ = self.streams.send(stream);
+        }
+    }
+
+    async fn local_endpoint(alpns: Vec<Vec<u8>>) -> Endpoint {
+        Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .secret_key(SecretKey::generate())
+            .alpns(alpns)
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap()
+    }
+
+    /// 起一个运行时一侧的 endpoint；返回它的地址、acceptor 和它收到的流。
+    async fn serve(
+        trusted: bool,
+    ) -> (
+        EndpointAddr,
+        Arc<TestAcceptor>,
+        mpsc::UnboundedReceiver<UnixStream>,
+    ) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let acceptor = Arc::new(TestAcceptor {
+            trusted: AtomicBool::new(trusted),
+            streams: tx,
+        });
+        let endpoint = local_endpoint(vec![TEST_ALPN.to_vec()]).await;
+        let addr = endpoint.addr();
+        tokio::spawn(serve_runtime(
+            endpoint,
+            Arc::clone(&acceptor) as Arc<dyn StreamAcceptor>,
+            ConnectionRegistry::default(),
+            std::future::pending(),
+            None,
+            None,
+        ));
+        (addr, acceptor, rx)
+    }
+
+    async fn connect(client: &Endpoint, addr: &EndpointAddr) -> Connection {
+        client.connect(addr.clone(), TEST_ALPN).await.unwrap()
+    }
+
+    /// 开一条流并写一个字节：对端要收到数据才看得见这条流。
+    async fn open(conn: &Connection) -> (SendStream, RecvStream) {
+        let (mut send, recv) = conn.open_bi().await.unwrap();
+        send.write_all(b"x").await.unwrap();
+        (send, recv)
+    }
+
+    async fn next(rx: &mut mpsc::UnboundedReceiver<UnixStream>) -> UnixStream {
+        timeout(ARRIVES, rx.recv()).await.unwrap().unwrap()
+    }
+
+    async fn nothing_more(rx: &mut mpsc::UnboundedReceiver<UnixStream>) {
+        assert!(timeout(STAYS_AWAY, rx.recv()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn untrusted_streams_are_handled_one_at_a_time() {
+        let (addr, _acceptor, mut rx) = serve(false).await;
+        let client = local_endpoint(Vec::new()).await;
+        let conn = connect(&client, &addr).await;
+        let _first = open(&conn).await;
+        let _second = open(&conn).await;
+
+        let first = next(&mut rx).await;
+        nothing_more(&mut rx).await;
+        drop(first);
+        next(&mut rx).await;
+    }
+
+    #[tokio::test]
+    async fn trusted_streams_are_handled_concurrently() {
+        let (addr, _acceptor, mut rx) = serve(true).await;
+        let client = local_endpoint(Vec::new()).await;
+        let conn = connect(&client, &addr).await;
+        let _first = open(&conn).await;
+        let _second = open(&conn).await;
+
+        let _held = next(&mut rx).await;
+        next(&mut rx).await;
+    }
+
+    #[tokio::test]
+    async fn pairing_on_the_connection_lifts_the_limit() {
+        let (addr, acceptor, mut rx) = serve(false).await;
+        let client = local_endpoint(Vec::new()).await;
+        let conn = connect(&client, &addr).await;
+        let _pair = open(&conn).await;
+        let pair = next(&mut rx).await;
+        acceptor.trusted.store(true, Ordering::SeqCst);
+        drop(pair);
+
+        let _second = open(&conn).await;
+        let _third = open(&conn).await;
+        let _held = next(&mut rx).await;
+        next(&mut rx).await;
+    }
+
+    #[tokio::test]
+    async fn untrusted_connections_beyond_the_cap_are_refused() {
+        let (addr, _acceptor, _rx) = serve(false).await;
+        let client = local_endpoint(Vec::new()).await;
+        let mut conns = Vec::new();
+        for _ in 0..=MAX_UNTRUSTED_CONNECTIONS {
+            conns.push(connect(&client, &addr).await);
+        }
+
+        let mut refused = 0;
+        for conn in &conns {
+            if let Ok(ConnectionError::ApplicationClosed(close)) =
+                timeout(STAYS_AWAY, conn.closed()).await
+                && close.error_code == CLOSE_BUSY.into()
+            {
+                refused += 1;
+            }
+        }
+        assert_eq!(refused, 1);
+    }
+
+    /// 处理线程卡着不收摊（对端只写半行就不说话）：到期整条连接断开，名额让出来。
+    #[tokio::test]
+    async fn stalled_untrusted_connections_expire_and_free_their_slot() {
+        let (addr, _acceptor, mut rx) = serve(false).await;
+        let client = local_endpoint(Vec::new()).await;
+        let mut conns = Vec::new();
+        let mut opened = Vec::new();
+        let mut stuck = Vec::new();
+        for _ in 0..MAX_UNTRUSTED_CONNECTIONS {
+            let conn = connect(&client, &addr).await;
+            opened.push(open(&conn).await);
+            stuck.push(next(&mut rx).await);
+            conns.push(conn);
+        }
+
+        let extra = connect(&client, &addr).await;
+        match timeout(STAYS_AWAY, extra.closed()).await {
+            Ok(ConnectionError::ApplicationClosed(close)) => {
+                assert_eq!(close.error_code, CLOSE_BUSY.into());
+            }
+            other => panic!("名额满时应拒绝：{other:?}"),
+        }
+
+        for conn in &conns {
+            match timeout(UNTRUSTED_DEADLINE + ARRIVES, conn.closed()).await {
+                Ok(ConnectionError::ApplicationClosed(close)) => {
+                    assert_eq!(close.error_code, CLOSE_PAIRING_TIMEOUT.into());
+                }
+                other => panic!("到期应断开：{other:?}"),
+            }
+        }
+
+        let later = connect(&client, &addr).await;
+        let _later = open(&later).await;
+        next(&mut rx).await;
     }
 }
