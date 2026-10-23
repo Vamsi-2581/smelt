@@ -2,7 +2,7 @@
 //! 版本的包，校验、装好，再无缝交接到新版本；桌面只说要哪个版本，不传字节。
 //!
 //! 这是冻结契约：不走带 `control_version` 的控制信封，因为要升级的恰恰是控制协议对不上
-//! 的运行时，信封一对不上就被拒。连接首行 `{"op":"runtime_upgrade","version":"0.9.1"}`，
+//! 的运行时，信封一对不上就被拒。连接首行 `{"op":"runtime_upgrade","version":"2026.1023.0"}`，
 //! 运行时逐行回 [`RuntimeUpgradeReply`]：先回 `accepted`，再回一个结局；交接成功时旧进程
 //! 直接退出，连接就此断开，客户端重新探测看版本。一行都没回就断开，是运行时太旧、不认识
 //! 这个 op。形状只能加可缺省的字段，不能改。
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeUpgradeRequest {
-    /// 要升到的版本，和 Release 的 tag 去掉 `v` 一致，如 `0.9.1`、`0.9.1-rc.1`。
+    /// 要升到的版本，和 Release 的 tag 去掉 `v` 一致，如 `2026.1023.0`、`2026.1023.0-rc.1`。
     pub version: String,
 }
 

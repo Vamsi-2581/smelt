@@ -369,6 +369,17 @@ mod tests {
         assert!(check_target("0.9.0-rc.1", "0.9.0").is_err());
     }
 
+    /// v0.9.1 之后按日期取号（`YYYY.MDD.N`，见 docs/release.md），从旧号升上来不能被当成降级。
+    #[test]
+    fn date_versions_upgrade_from_old_scheme_and_sort_by_date() {
+        assert!(check_target("2026.1023.0", "0.9.1").is_ok());
+        assert!(check_target("2026.1023.1", "2026.1023.0").is_ok());
+        assert!(check_target("2026.1023.0", "2026.1023.0-rc.1").is_ok());
+        assert!(check_target("2027.103.0", "2026.1231.5").is_ok());
+        assert!(check_target("2026.1003.0", "2026.1031.0").is_err());
+        assert!(check_target("2026.0103.0", "0.9.1").is_err(), "前导零不是合法 semver");
+    }
+
     /// 版本号会拼进下载地址，不是 semver 的一律拒绝。
     #[test]
     fn version_must_be_semver() {

@@ -30,7 +30,7 @@
 //!   {"op":"upgrade","exe":"/path/to/smeltd"}                 → 同上，但 exec 指定路径（装 DMG 时先
 //!                                                              handoff 到暂存包，再替换 .app，避免
 //!                                                              整包覆盖把旧守护 SIGKILL、会话全灭）
-//!   {"op":"runtime_upgrade","version":"0.9.1"}               → 回 {"state":"accepted"}，从 GitHub Release
+//!   {"op":"runtime_upgrade","version":"2026.1023.0"}         → 回 {"state":"accepted"}，从 GitHub Release
 //!                                                              下载该版本装好再交接；见 runtime_upgrade.rs
 //!   {"op":"agent_event","id":"..","event":{...}}             → 回 {"ok":true} 后关闭，归一化 hook 事件
 //!   {"op":"action","id":"..","kind":"approve|deny|reply","text":".."}
