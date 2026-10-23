@@ -10,6 +10,20 @@ pub(crate) fn local() -> RuntimeClient {
     Runtime::local().client().clone()
 }
 
+/// 发给 `key` 那台机器的客户端。本机总在；远程的机器已经移除就是 `None`，调用方报错，
+/// 不退回本机：发错机器比报错更糟。
+pub(crate) fn client(key: &RuntimeKey, cx: &gpui::App) -> Option<RuntimeClient> {
+    match key {
+        RuntimeKey::Local => Some(local()),
+        RuntimeKey::Remote(_) => remote_of(key, cx).map(|remote| remote.runtime.client().clone()),
+    }
+}
+
+/// `key` 那台机器（连同客户端）；远程的已经移除就是 `None`。
+pub(crate) fn runtime(key: &RuntimeKey, cx: &gpui::App) -> Option<Runtime> {
+    client(key, cx).map(|client| Runtime::new(key.clone(), client))
+}
+
 /// 给终端开一条连接。本机守护没在跑就先拉起来，这只有本机做得到；远程运行时连不上
 /// 就是连不上，由调用方按断线处理。
 pub(crate) fn connect_terminal(
@@ -614,6 +628,7 @@ pub(crate) fn set_status(key: &RuntimeKey, status: RuntimeStatus, cx: &mut gpui:
     if !changed {
         return;
     }
+    let online = matches!(status, RuntimeStatus::Online { .. });
     update_hub(cx, |hub| match key {
         RuntimeKey::Local => hub.local_status = Some(status),
         RuntimeKey::Remote(_) => {
@@ -626,6 +641,14 @@ pub(crate) fn set_status(key: &RuntimeKey, status: RuntimeStatus, cx: &mut gpui:
             }
         }
     });
+    // 远程机器第一次连上时挂上它的智能体配置；本机启动时就挂了。之后断线重连不重读，
+    // 已经挂着的只换客户端。
+    if online
+        && key != &RuntimeKey::Local
+        && let Some(client) = client(key, cx)
+    {
+        crate::settings::attach_agent_host(key.clone(), client, cx, |_| {});
+    }
 }
 
 fn update_hub(cx: &mut gpui::App, change: impl FnOnce(&mut RuntimeHub)) {
@@ -761,6 +784,12 @@ pub(crate) fn add_runtime(cx: &mut gpui::App) {
             .spawn(async move { pair_with(&uri) })
             .await;
         cx.update(|cx| {
+            // 配对时已经连上：之后订阅报的还是「在线」，`set_status` 看不出变化，就在这里挂。
+            let online = added
+                .as_ref()
+                .ok()
+                .filter(|remote| matches!(remote.status, RuntimeStatus::Online { .. }))
+                .map(|remote| remote.runtime.clone());
             update_hub(cx, |hub| {
                 hub.adding = false;
                 match added {
@@ -773,7 +802,15 @@ pub(crate) fn add_runtime(cx: &mut gpui::App) {
                     }
                     Err(error) => hub.error = Some(error),
                 }
-            })
+            });
+            if let Some(runtime) = online {
+                crate::settings::attach_agent_host(
+                    runtime.key().clone(),
+                    runtime.client().clone(),
+                    cx,
+                    |_| {},
+                );
+            }
         });
     })
     .detach();
@@ -966,12 +1003,15 @@ pub(crate) fn remove_runtime(runtime_id: String, cx: &mut gpui::App) {
             .await;
         let deleted = removed.is_ok();
         cx.update(|cx| {
-            update_hub(cx, |hub| match removed {
+            update_hub(cx, |hub| match &removed {
                 Ok(()) => hub
                     .remotes
                     .retain(|remote| remote.connection.runtime_id != runtime_id),
-                Err(error) => hub.error = Some(error),
-            })
+                Err(error) => hub.error = Some(error.clone()),
+            });
+            if removed.is_ok() {
+                crate::settings::detach_agent_host(remote.runtime.key(), cx);
+            }
         });
         if deleted && revoke {
             cx.background_executor()
@@ -1008,6 +1048,45 @@ mod tests {
             platform: None,
             desktop: false,
         }
+    }
+
+    /// 调用按 key 发给那台机器自己的客户端；机器移除了就取不到，不能悄悄退回本机。
+    #[gpui::test]
+    fn calls_resolve_to_the_keyed_machine(cx: &mut gpui::TestAppContext) {
+        let far = RuntimeKey::Remote("far".into());
+        cx.update(|cx| {
+            assert!(client(&far, cx).is_none(), "还没挂机器时不该取到客户端");
+            cx.set_global(RuntimeHub {
+                remotes: vec![RemoteRuntime {
+                    connection: smelt_client_store::RuntimeConnection {
+                        runtime_id: "far".into(),
+                        name: "far".into(),
+                        endpoint_id: String::new(),
+                        relay_url: None,
+                        added_at_ms: 0,
+                    },
+                    runtime: remote_runtime(
+                        "far",
+                        RuntimeClient::new(|| Err(std::io::Error::other("connected far"))),
+                    ),
+                    status: online(),
+                    route: RemoteRoute::default(),
+                    link: None,
+                }],
+                ..Default::default()
+            });
+            let error = client(&far, cx)
+                .expect("挂着的机器要取到客户端")
+                .connect()
+                .expect_err("假连接器只会报错");
+            assert_eq!(
+                error.to_string(),
+                "connected far",
+                "取到的不是那台机器的客户端"
+            );
+            assert!(client(&RuntimeKey::Remote("gone".into()), cx).is_none());
+            assert!(client(&RuntimeKey::Local, cx).is_some());
+        });
     }
 
     #[test]
@@ -1339,7 +1418,10 @@ mod tests {
     /// 当成升级成功。
     #[test]
     fn a_runtime_that_hangs_up_without_a_word_cannot_upgrade_itself() {
-        assert_eq!(push_upgrade(&runtime_replying(&[])), PushUpgrade::Unsupported);
+        assert_eq!(
+            push_upgrade(&runtime_replying(&[])),
+            PushUpgrade::Unsupported
+        );
     }
 
     /// 接下以后断开：交接时旧进程退出就是这样，要重新探测。

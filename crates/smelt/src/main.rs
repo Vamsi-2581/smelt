@@ -1224,12 +1224,7 @@ impl Session {
                 let fallback = self
                     .agent_definition_id
                     .as_deref()
-                    .and_then(|id| {
-                        cx.try_global::<settings::AgentHostState>()?
-                            .agents
-                            .iter()
-                            .find(|definition| definition.id == id)
-                    })
+                    .and_then(|id| settings::agent_hosts(cx)?.agent(view.runtime().key(), id))
                     .map(|definition| definition.name.trim())
                     .filter(|name| !name.is_empty())
                     .unwrap_or_else(|| view.agent_kind().short_label());
@@ -2582,14 +2577,10 @@ struct Workspace {
     pi_mcp_pending_remove: Option<String>,
     /// MCP 配置操作（添加、启停、移除、登录）的最近一次错误。
     pi_mcp_error: Option<String>,
-    /// 运行时给的 Pi 配置快照（模型、MCP、插件……）。渲染只读它；打开设置窗口、进
+    /// 各台机器的 Pi 配置快照（模型、MCP、插件……）。渲染只读它；打开设置窗口、进
     /// 能力库、开智能体编辑器时刷新，修改由运行时回带新快照。
-    pi_config: Option<smelt_model::pi_service::PiConfig>,
-    /// 最近一次读取失败的原因。
-    pi_config_error: Option<String>,
-    /// 读取的代数：晚回来的旧读取不能盖掉更新的快照。
-    pi_config_generation: u64,
-    /// 能力库在配哪台机器，以及那台机器（不是本机时）的快照。
+    pi_configs: HashMap<RuntimeKey, settings::PiConfigSlot>,
+    /// 能力库在配哪台机器。
     pi_library: settings::PiLibrary,
     /// 交互式原生 Pi 模型表单错误。
     pi_model_editor_error: Option<String>,
@@ -2814,6 +2805,8 @@ struct Workspace {
     _runtime_hub_sub: Option<Subscription>,
     /// 自动化目录读 AgentHostState；不观察的话，投影写进 global 后当前页不会重绘。
     _agent_host_sub: Option<Subscription>,
+    /// 智能体页、侧栏读各台机器的智能体配置（`AgentHosts`），理由同上。
+    _agent_hosts_sub: Option<Subscription>,
     /// provider 账户状态（额度）变化时重绘侧栏额度行。
     _provider_status_sub: Option<Subscription>,
     /// 侧栏 pane 标题在 render 里读 `HistoryTitles`。读 Global 不会自动订阅，
@@ -3182,10 +3175,8 @@ impl Workspace {
             pi_mcp_login: None,
             pi_mcp_pending_remove: None,
             pi_mcp_error: None,
-            pi_config: None,
-            pi_config_error: None,
+            pi_configs: HashMap::new(),
             pi_library: Default::default(),
-            pi_config_generation: 0,
             pi_model_editor_error: None,
             pi_plugin_pending_delete: None,
             pi_plugin_error: None,
@@ -3246,6 +3237,7 @@ impl Workspace {
             _remote_sessions_sub: None,
             _runtime_hub_sub: None,
             _agent_host_sub: None,
+            _agent_hosts_sub: None,
             _provider_status_sub: None,
             _history_titles_sub: None,
             _appearance_sub: None,
@@ -3304,6 +3296,8 @@ impl Workspace {
         );
         ws._agent_host_sub =
             Some(cx.observe_global_in::<settings::AgentHostState>(window, |_, _, cx| cx.notify()));
+        ws._agent_hosts_sub =
+            Some(cx.observe_global_in::<settings::AgentHosts>(window, |_, _, cx| cx.notify()));
         ws._provider_status_sub = Some(
             cx.observe_global_in::<smelt_ui::provider_status_global::ProviderStatus>(
                 window,
@@ -4723,8 +4717,9 @@ fn main() {
         }
         // 新安装和缺少开关的旧配置都默认开启托管 hooks；只有用户明确关闭时跳过。
         // 安装由运行时执行（含 Codex app-server 信任握手），这里只发请求。
-        settings::start_agent_host_load(cx, |cx| {
-            if cx.global::<settings::AgentHostState>().agent_hooks_enabled {
+        cx.set_global(settings::AgentHosts::default());
+        settings::attach_agent_host(RuntimeKey::Local, runtimes::local(), cx, |cx| {
+            if settings::agent_host_settings(&RuntimeKey::Local, cx).hooks_enabled {
                 settings::reconcile_agent_hooks(cx);
             }
             // 运行时已经连上：请它照端点刷新 Pi 里标记为「自动」的自定义 provider

@@ -49,7 +49,8 @@ fn render_rerank_model(form: Entity<MemorySettingsForm>, cx: &mut App) -> AnyEle
                         auto_form.update(cx, |form, cx| form.set_rerank_model(None, cx));
                     }),
             );
-            let groups = crate::settings::pi_model_choice_groups(cx);
+            // 记忆只在本机运行时上，模型也按本机的选。
+            let groups = crate::settings::pi_model_choice_groups(&crate::RuntimeKey::Local, cx);
             if !groups.is_empty() {
                 menu = menu.separator();
             }
