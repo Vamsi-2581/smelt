@@ -66,6 +66,10 @@ const result = await Bun.build({
 	compile: {
 		outfile,
 		target: compileTarget,
+		// 认运行那台机器的系统证书库（macOS 钥匙串、Linux /etc/ssl），和 Rust 侧
+		// reqwest 的 native-tls 一致。只认 Bun 自带的根证书时，做 HTTPS 解密的公司
+		// 网络里登录、调模型都会报 TLS 错误。
+		execArgv: ["--use-system-ca"],
 		autoloadDotenv: false,
 		autoloadBunfig: false,
 	},
