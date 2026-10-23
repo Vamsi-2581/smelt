@@ -35,6 +35,10 @@ DESKTOP_PACKAGES=(
   tigervnc-standalone-server xauth xfonts-base xfce4 xfce4-terminal adwaita-icon-theme
   papirus-icon-theme dbus xdotool fonts-noto-cjk fonts-dejavu-core
 )
+# 运行时装成 systemd 用户服务：linger 拉起用户的 systemd 要 pam_systemd 给它建
+# XDG_RUNTIME_DIR，systemctl --user 要用户总线（/run/user/<uid>/bus）。minbase 一类的精简
+# 镜像（如 Debian Cloud Micro）两样都没有，用户的 systemd 起不来。
+SYSTEMD_PACKAGES=(libpam-systemd dbus-user-session)
 DESKTOP_UNITS=(smelt-display.service smelt-desktop.service smelt-chrome.service)
 
 WITH_DESKTOP=0
@@ -167,6 +171,7 @@ missing_packages() {
 
 wanted_packages() {
   echo "${BASE_PACKAGES[@]}"
+  has_systemd && echo "${SYSTEMD_PACKAGES[@]}"
   ((WITH_DESKTOP)) && echo "${DESKTOP_PACKAGES[@]}"
   return 0
 }
