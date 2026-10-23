@@ -1107,12 +1107,15 @@ impl Workspace {
                 restore: false,
             });
         }
-        if !smelt_model::session_control::is_agent_conversation(
+        // 托管目录按会话所在那台机器的 SMELT_HOME 认，项目也记在那台机器上。
+        let runtime = request.runtime.key().clone();
+        if !smelt_model::session_control::is_agent_conversation_on(
+            crate::runtimes::smelt_home(&runtime, cx).as_deref(),
             None,
             agent_definition_id.as_deref(),
             request.cwd.as_deref(),
         ) {
-            self.remember_session_project(&RuntimeKey::Local, request.cwd.as_deref());
+            self.remember_session_project(&runtime, request.cwd.as_deref());
         }
         if agent_definition_id.is_none() {
             request.config_values = settings::initial_acp_config_for(
@@ -1183,7 +1186,10 @@ impl Workspace {
             .as_ref()
             .and_then(|definition| definition.model_config_value());
         let agent_definition_id = agent_definition.map(|definition| definition.id);
-        let is_agent_conversation = smelt_model::session_control::is_agent_conversation(
+        // 托管目录按会话所在那台机器的 SMELT_HOME 认：远程智能体的 space 不在本机主目录下，
+        // 拿本机的去比会把它当成项目记下来。
+        let is_agent_conversation = smelt_model::session_control::is_agent_conversation_on(
+            crate::runtimes::smelt_home(runtime.key(), cx).as_deref(),
             automation_id.as_deref(),
             agent_definition_id.as_deref(),
             cwd.as_deref(),

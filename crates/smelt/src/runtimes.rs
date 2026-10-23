@@ -24,6 +24,19 @@ pub(crate) fn runtime(key: &RuntimeKey, cx: &gpui::App) -> Option<Runtime> {
     client(key, cx).map(|client| Runtime::new(key.clone(), client))
 }
 
+/// 那台机器的 `SMELT_HOME`：本机直接算；远程的取连上时记下的，还没连上过（或运行时太旧
+/// 不报）是 `None`。客户端拿它认出那台机器上哪些会话是智能体对话。
+pub(crate) fn smelt_home(key: &RuntimeKey, cx: &gpui::App) -> Option<std::path::PathBuf> {
+    match key {
+        RuntimeKey::Local => smelt_paths::smelt_home(),
+        RuntimeKey::Remote(_) => remote_of(key, cx)?
+            .connection
+            .smelt_home
+            .as_ref()
+            .map(std::path::PathBuf::from),
+    }
+}
+
 /// 给终端开一条连接。本机守护没在跑就先拉起来，这只有本机做得到；远程运行时连不上
 /// 就是连不上，由调用方按断线处理。
 pub(crate) fn connect_terminal(
@@ -103,6 +116,8 @@ pub(crate) enum RuntimeStatus {
         platform: Option<String>,
         /// 装了远程桌面，侧栏和机器面板才给「远程桌面」。
         desktop: bool,
+        /// 运行时报的 `SMELT_HOME`，旧运行时不报。见 [`smelt_home`]。
+        smelt_home: Option<String>,
     },
     Offline(String),
     /// 连得上，但版本和这个桌面对不上（见 `smelt_client::compat`），说明里写着该升级
@@ -606,6 +621,7 @@ fn described_status(
     }
     RuntimeStatus::Online {
         desktop: described.daemon.desktop.unwrap_or(false),
+        smelt_home: described.daemon.smelt_home,
         version: described.daemon.version,
         platform: described
             .daemon
@@ -629,6 +645,7 @@ pub(crate) fn set_status(key: &RuntimeKey, status: RuntimeStatus, cx: &mut gpui:
         return;
     }
     let online = matches!(status, RuntimeStatus::Online { .. });
+    let mut learned_home = None;
     update_hub(cx, |hub| match key {
         RuntimeKey::Local => hub.local_status = Some(status),
         RuntimeKey::Remote(_) => {
@@ -637,10 +654,32 @@ pub(crate) fn set_status(key: &RuntimeKey, status: RuntimeStatus, cx: &mut gpui:
                 .iter_mut()
                 .find(|remote| remote.runtime.key() == key)
             {
+                // SMELT_HOME 记在机器上并落库：离线时、下次启动还没连上时也要认得出它的
+                // 智能体对话。
+                if let RuntimeStatus::Online {
+                    smelt_home: Some(home),
+                    ..
+                } = &status
+                    && remote.connection.smelt_home.as_ref() != Some(home)
+                {
+                    remote.connection.smelt_home = Some(home.clone());
+                    learned_home = Some(remote.connection.clone());
+                }
                 remote.status = status;
             }
         }
     });
+    if let Some(connection) = learned_home {
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(error) = smelt_client_store::client_store()
+                    .and_then(|store| store.put_runtime_connection(&connection))
+                {
+                    eprintln!("[runtimes] 保存机器的 SMELT_HOME 失败：{error}");
+                }
+            })
+            .detach();
+    }
     // 远程机器第一次连上时挂上它的智能体配置；本机启动时就挂了。之后断线重连不重读，
     // 已经挂着的只换客户端。
     if online
@@ -826,6 +865,7 @@ pub(crate) fn pair_with(uri: &str) -> Result<RemoteRuntime, String> {
         name: String::new(),
         endpoint_id: pairing.endpoint_id,
         relay_url: pairing.relay_url,
+        smelt_home: None,
         added_at_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_millis() as i64)
@@ -854,6 +894,7 @@ pub(crate) fn pair_with(uri: &str) -> Result<RemoteRuntime, String> {
         .hostname
         .clone()
         .unwrap_or_else(|| connection.endpoint_id.chars().take(8).collect());
+    connection.smelt_home = described.daemon.smelt_home.clone();
     smelt_client_store::client_store()
         .and_then(|store| store.put_runtime_connection(&connection))
         .map_err(|error| format!("保存运行时失败：{error}"))?;
@@ -1047,6 +1088,7 @@ mod tests {
             version: "0.9.0".into(),
             platform: None,
             desktop: false,
+            smelt_home: None,
         }
     }
 
@@ -1064,6 +1106,7 @@ mod tests {
                         endpoint_id: String::new(),
                         relay_url: None,
                         added_at_ms: 0,
+                        smelt_home: Some("/home/far/.smelt".into()),
                     },
                     runtime: remote_runtime(
                         "far",
@@ -1086,6 +1129,12 @@ mod tests {
             );
             assert!(client(&RuntimeKey::Remote("gone".into()), cx).is_none());
             assert!(client(&RuntimeKey::Local, cx).is_some());
+            // 远程机器的 SMELT_HOME 取连上时记下的，跟本机的无关。
+            assert_eq!(
+                smelt_home(&far, cx),
+                Some(std::path::PathBuf::from("/home/far/.smelt"))
+            );
+            assert!(smelt_home(&RuntimeKey::Remote("gone".into()), cx).is_none());
         });
     }
 
@@ -1254,6 +1303,7 @@ mod tests {
                 arch: Some("x86_64".to_string()),
                 hostname: None,
                 desktop: None,
+                smelt_home: None,
             },
             events: Some(EventProtocolDescription {
                 protocol_version: smelt_event_protocol::EVENT_BUS_PROTOCOL_VERSION,

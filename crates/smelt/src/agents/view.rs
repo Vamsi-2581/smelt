@@ -315,7 +315,11 @@ impl Workspace {
             };
             let sid = view.read(cx).session_id().to_string();
             let selected = selected_sid == Some(sid.as_str());
-            let updated_text = crate::session_list::row::session_updated_at_text(updated_at, &now);
+            let updated_text = conversation_row_meta(
+                view.read(cx).runtime().key(),
+                crate::session_list::row::session_updated_at_text(updated_at, &now),
+                cx,
+            );
             let title = conversation_row_title(
                 session.custom_title.as_deref(),
                 view.read(cx).auto_title().as_deref(),
@@ -1496,4 +1500,19 @@ fn render_agent_machine_header(group: &AgentMachineGroup, cx: &App) -> AnyElemen
             )
         })
         .into_any_element()
+}
+
+/// 「最近对话」行的第二行。本机的只写时间；别的机器上的在前面标机器名，连不上时写状态：
+/// 智能体对话不按机器分组，只能在行上说清楚它在哪台机器上。
+fn conversation_row_meta(runtime: &crate::RuntimeKey, updated: String, cx: &App) -> String {
+    match runtime {
+        crate::RuntimeKey::Local => updated,
+        crate::RuntimeKey::Remote(_) => {
+            let machine = crate::runtimes::runtime_name(runtime, cx);
+            match crate::runtimes::runtime_unavailable_label(runtime, cx) {
+                Some(unavailable) => format!("{machine} · {unavailable}"),
+                None => format!("{machine} · {updated}"),
+            }
+        }
+    }
 }

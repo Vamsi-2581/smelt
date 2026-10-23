@@ -1109,12 +1109,14 @@ impl Session {
         }
     }
 
-    /// 产品级智能体对话 / 自动化 Run 属于工作台对话区，不进项目会话列表。
+    /// 产品级智能体对话 / 自动化 Run 属于工作台对话区，不进项目会话列表。托管目录按会话
+    /// 所在那台机器的 SMELT_HOME 认。
     fn is_product_conversation(&self, cx: &App) -> bool {
         let acp_session_id = self
             .active_acp()
             .map(|view| view.read(cx).session_id().to_string());
-        smelt_model::session_control::is_product_conversation(
+        smelt_model::session_control::is_product_conversation_on(
+            crate::runtimes::smelt_home(self.runtime(cx).key(), cx).as_deref(),
             self.automation_id.as_deref(),
             self.agent_definition_id.as_deref(),
             acp_session_id.as_deref(),
@@ -1123,7 +1125,8 @@ impl Session {
     }
 
     fn is_agent_conversation(&self, cx: &App) -> bool {
-        smelt_model::session_control::is_agent_conversation(
+        smelt_model::session_control::is_agent_conversation_on(
+            crate::runtimes::smelt_home(self.runtime(cx).key(), cx).as_deref(),
             self.automation_id.as_deref(),
             self.agent_definition_id.as_deref(),
             self.cwd(cx).as_deref(),

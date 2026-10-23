@@ -242,6 +242,10 @@ pub struct DaemonRuntimeInfo {
     /// 入口。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desktop: Option<bool>,
+    /// 运行时的 `SMELT_HOME`。智能体的 space 等托管目录都在它下面，客户端拿它认出哪些
+    /// 会话是智能体对话：用自己的主目录去比，别的机器上的永远对不上。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smelt_home: Option<String>,
 }
 
 /// 事件订阅这一侧的版本。控制方法能按方法清单逐个看，订阅推来的投影不行：版本对不上，
