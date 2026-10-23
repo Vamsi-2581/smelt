@@ -286,18 +286,33 @@ fn should_touch(endpoint_id: &str) -> bool {
     }
 }
 
+/// 是否在设备白名单里。
+fn is_paired(endpoint_id: &str) -> Result<bool, String> {
+    smelt_core::sqlite_state::default_sqlite_store()
+        .and_then(|store| store.paired_device(endpoint_id).map_err(|e| e.to_string()))
+        .map(|device| device.is_some())
+}
+
 /// iroh 流的入口：认出是谁，交给和 unix socket 同一个分发器。
 pub(crate) struct RemoteStreams;
 
 impl smelt_iroh::runtime::StreamAcceptor for RemoteStreams {
+    fn is_trusted(&self, remote: &str) -> bool {
+        match is_paired(remote) {
+            Ok(paired) => paired,
+            Err(error) => {
+                crate::dlog(&format!("查设备白名单失败，按未配对处理：{error}"));
+                false
+            }
+        }
+    }
+
     fn accept(&self, remote: &str, stream: UnixStream) {
         let remote = remote.to_string();
         // 查库、分发都是阻塞的，不能占着 tokio 线程。
         std::thread::spawn(move || {
-            let principal = match smelt_core::sqlite_state::default_sqlite_store()
-                .and_then(|store| store.paired_device(&remote).map_err(|e| e.to_string()))
-            {
-                Ok(Some(_)) => {
+            let principal = match is_paired(&remote) {
+                Ok(true) => {
                     if should_touch(&remote)
                         && let Ok(store) = smelt_core::sqlite_state::default_sqlite_store()
                     {
@@ -305,7 +320,7 @@ impl smelt_iroh::runtime::StreamAcceptor for RemoteStreams {
                     }
                     Principal::Device(remote)
                 }
-                Ok(None) => Principal::Unpaired(remote),
+                Ok(false) => Principal::Unpaired(remote),
                 Err(error) => {
                     crate::dlog(&format!("查设备白名单失败，拒绝这条连接：{error}"));
                     return;
