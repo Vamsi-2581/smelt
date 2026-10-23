@@ -1,6 +1,11 @@
 # Windows 支持（设计，未开工）
 
-对应 issue [#74](https://github.com/smelt-ai/smelt/issues/74)。分两步：第 1 步 Windows 桌面端只连远程运行时，本机不起 smeltd；第 2 步 Windows 本机跑 smeltd。本文把第 1 步写到能开工，第 2 步只定方向和待定问题，开工前另补。
+对应 issue [#74](https://github.com/smelt-ai/smelt/issues/74)。分两步：
+
+1. Windows 桌面端只连远程运行时，本机不起 smeltd。
+2. Windows 本机跑 smeltd。
+
+本文把第 1 步写到能开工，第 2 步只定方向和待定问题，开工前另补。
 
 ## 第 1 步的范围
 
@@ -11,15 +16,17 @@
 
 不做：
 
-- 本机运行时（smeltd、smelt-notify、Pi 运行时、agent hook）——第 2 步。
+- 本机运行时（smeltd、smelt-notify、Pi 运行时、agent hook），留给第 2 步。
 - 自动更新、代码签名、安装包。
-- 系统通知、状态栏图标、IDE 集成、Dock 角标、液态玻璃——这些模块已经有非 macOS 的空实现（`status_item.rs`、`dock.rs`、`liquid_glass.rs`），保持为空。
+- 系统通知、状态栏图标、IDE 集成、Dock 角标、液态玻璃。这些模块已经有非 macOS 的空实现（`status_item.rs`、`dock.rs`、`liquid_glass.rs`），保持为空。
 
-## 现状：桌面端依赖链里绑定 Unix 的地方
+## 前提
 
-桌面端（`crates/smelt`）不依赖 smeltd 和 smelt-core，依赖链是 smelt-client、smelt-sys、smelt-paths、smelt-runtime-client、smelt-iroh、smelt-client-store、smelt-ui、smelt-acp-view。依赖库层面没有阻塞：GPUI 有 `gpui-pre-windows` 后端，quickjs-jit 的 `sys/build.rs` 有 MSVC 分支，gpui-kit 的 `shell`、`webview` 有 Windows 代码，iroh、rusqlite bundled、alacritty_terminal 都支持 Windows。桌面端至今只在 macOS 上编过，`not(target_os = "macos")` 分支没被编译器检查过，开工第一件事是在 Windows 上拿到真实报错清单校准本文。
+- 桌面端（`crates/smelt`）不依赖 smeltd 和 smelt-core。第 1 步只动它的依赖链：smelt-client、smelt-sys、smelt-paths、smelt-runtime-client、smelt-iroh、smelt-client-store、smelt-ui、smelt-acp-view。
+- 依赖库没有阻塞：GPUI 有 `gpui-pre-windows` 后端，quickjs-jit 的 `sys/build.rs` 有 MSVC 分支，gpui-kit 的 `shell`、`webview` 有 Windows 代码，iroh、rusqlite bundled、alacritty_terminal 都支持 Windows。以上只读了源码，没实际编过。
+- 桌面端至今只在 macOS 上编过，`not(target_os = "macos")` 分支没被编译器检查过。本文对改动面的估计要用 Windows 上的真实报错校准（施工顺序第 1 项）。
 
-阻塞点分三类结构性问题和一批零散调用，分别见 D1–D4。
+阻塞点是三处结构问题（D1–D3）和一批零散的平台调用（D4），另加打包和 CI（D5）。编号即施工顺序。
 
 ## D1 连接流类型
 
@@ -27,7 +34,7 @@
 
 `smelt-runtime-client/src/connector.rs` 的 `Connector::connect` 返回 `std::os::unix::net::UnixStream`。文件头写明了原意：本机直接连 socket，远程 iroh 连接器把 QUIC 流接到 `UnixStream::pair()` 的一端，这样上层的阻塞读写、`try_clone`、读写超时对两种传输完全一样，协议代码不用分叉。
 
-于是这个类型穿透了所有调用方：`client.rs`、`desktop.rs`、`smelt-client/src/acp_client.rs`、`smelt/src/terminal.rs`、`smelt/src/runtimes.rs`，以及 smelt-mobile 的 catalog、conversation、terminal。iroh 侧 `smelt-iroh/src/runtime.rs` 的 `bridge_tracked` 用 `UnixStream::pair()` 加 `tokio::net::UnixStream::from_std` 搬运。Windows 上 std 没有 `UnixStream`，tokio 也没有 AF_UNIX，所以连远程也编不过。
+这个类型因此穿透了所有调用方：smelt-runtime-client 的 `client.rs`、`desktop.rs`，`smelt-client/src/acp_client.rs`，`smelt/src/terminal.rs`、`smelt/src/runtimes.rs`，以及 smelt-mobile 的 catalog、conversation、terminal。iroh 侧 `smelt-iroh/src/runtime.rs` 的 `bridge_tracked` 用 `UnixStream::pair()` 加 `tokio::net::UnixStream::from_std` 搬运。Windows 上 std 没有 `UnixStream`，tokio 也没有 AF_UNIX，所以连远程也编不过。
 
 ### 方案
 
@@ -36,122 +43,125 @@
 1. smelt-runtime-client 新增 `stream` 模块，定义 `RuntimeStream` 和 `stream_pair()`：
    - Unix：`std::os::unix::net::UnixStream` 的类型别名，行为不变。
    - Windows：`uds_windows::UnixStream`（AF_UNIX，Windows 10 1803 起系统支持；该 crate 已在依赖树里）。它提供 `pair`、`connect`、`try_clone`、`set_read_timeout`、`set_write_timeout`、`shutdown`，覆盖调用方用到的全部方法。
-2. 所有签名里的 `UnixStream` 换成 `RuntimeStream`。调用方只用到上面这些方法，改动是机械替换。
-3. iroh 搬运：Unix 保持现有 tokio 实现。Windows 上 AF_UNIX 套接字进不了 tokio，`bridge_tracked` 改为每个方向一条线程：一条阻塞读本地端、经 `Handle::block_on` 写 QUIC `SendStream`；另一条反过来。语义和现有 `pump` 一致：一方读到 EOF 只半关闭对应方向，另一方向继续；任一方向出错，两端一起关。
-   - 线程数：每条远程流两条线程。桌面同时开着的流是订阅加每个打开的终端、对话各一条，几十条量级，可以接受。
-   - 现有 `runtime.rs` 里的桥接测试在 Windows CI 上跑同一套。
+2. 所有签名里的 `UnixStream` 换成 `RuntimeStream`，是机械替换。
+3. iroh 搬运：Unix 保持现有 tokio 实现。Windows 上 AF_UNIX 套接字进不了 tokio，`bridge_tracked` 改为每个方向一条线程：一条阻塞读本地端、经 `Handle::block_on` 写 QUIC `SendStream`，另一条反过来。语义和现有 `pump` 一致：一方读到 EOF 只半关闭对应方向，另一方向继续；任一方向出错，两端一起关。
+   - 每条远程流两条线程。桌面同时开着的流是事件订阅加每个打开的终端、对话各一条，几十条量级，可以接受。
+   - `runtime.rs` 里现有的桥接测试在 Windows CI 上跑同一套。
 
-不选回环 TCP 对：第 2 步本机通信要按对端进程鉴权（见第 2 步），AF_UNIX 能取对端进程 id，回环 TCP 不能；第 1 步和第 2 步用同一种流，第 2 步不必再加一层桥。
+没选的做法：
 
-不选把 `RuntimeStream` 做成 trait object：调用方需要 `try_clone` 出读写两端，trait object 要自己补这套能力，换来的只是多一层间接，类型别名就够了。
+- **回环 TCP 对**：拿不到对端进程，第 2 步本机通信不能用它（见第 2 步）。第 1 步用 AF_UNIX，第 2 步若也选 AF_UNIX，就不必再加一层桥。
+- **trait object**：调用方要 `try_clone` 出读写两端，trait object 得自己补这套能力，只多一层间接。
 
-影响面：smelt-mobile 走 Unix 分支，行为不变，但改了它依赖的签名，要跑移动端测试。
+影响面：smelt-mobile 走 Unix 分支，行为不变，但它依赖的签名改了，要跑移动端测试。
 
-## D2 本机运行时可选
-
-### 现状
-
-「本机运行时总在」是写死在结构里的，不只是约定：
-
-- `smelt-client/src/runtime.rs`：`Runtime::local()` 无条件返回本机运行时。
-- `Workspace` 有固定的 `local: RuntimeSpace` 字段，远程的在 `remote_spaces`（`main.rs`）。`runtime_space.rs` 的 `space()`、`space_mut()`、`space_keys()` 把本机特判在前。
-- 有 14 处直接读 `self.local` 的字段，多数是冷启动闸门 `sessions_restored` / `restore_pending`，另有 `catalog_loaded`、`write_queue`（`workspace_sessions.rs`、`workspace_prepare.rs`、`workspace_attention.rs`、`workspace_persist.rs`、`main.rs`）。
-- `runtime_events.rs` 启动即订阅本机；`RuntimeHub.local_status` 记本机状态。
-- 机器面板 `session_list/machines.rs` 以 `vec![Runtime::local()]` 起头。
-- 守护生命周期：`terminal.rs` 的 `connect_daemon`、`connect_daemon_control`、`daemon_outdated`、`restart_daemon`、`ensure_daemon_running`（用 `flock`、`kill`），被 `runtimes.rs`、`workspace_update.rs`、`workspace_persist.rs`、`workspace_sessions.rs` 调用。
-- `settings/bundled_helpers.rs` 同步 smelt-notify，`cli.rs` 经 `daemon_request` 直连本机。
-
-### 方案
-
-1. **能力判定一处**：`smelt_client::runtime::local_runtime_supported()`，第 1 步为 `cfg!(unix)`，第 2 步 Windows 打开。
-2. **`Runtime::local()` 改返回 `Option<Runtime>`**，让编译器逼出每个调用点的处理，不靠运行时连不上兜底。
-3. **空间合一**：`local` 和 `remote_spaces` 合成 `spaces: Vec<RuntimeSpace>`，有本机时本机在前。`space()` 等去掉本机特判。直接读 `self.local.sessions_restored` 的冷启动闸门逐个看原意后改成读会话所属运行时的空间；这几处原本是为本机冷启动恢复设计的，改之前要确认远程空间的恢复语义一致。
-4. **守护生命周期独立成模块**：把 `terminal.rs` 里上面那段挪到 `local_daemon.rs`，整体 `cfg(unix)`。`runtimes::connect_terminal` 在本机分支调它。第 2 步再给 Windows 实现。
-5. **只认本机的功能**，按下表处理：
-
-| 功能 | 位置 | 没有本机运行时时 |
-|---|---|---|
-| 机器面板 | `session_list/machines.rs` | 只列远程 |
-| 侧栏分段默认折叠 | `runtime_space.rs` 的 `runtime_folded` | 第一个运行时展开 |
-| 打开项目 | `workspace_sessions.rs` 的 `open_project` | 先选机器（只有一台就直接用） |
-| 历史页 | `session_history.rs`、`workspace_sessions.rs` | 读写已经按 `&Runtime` 传，改成跟当前选中的机器走（待定，见末尾） |
-| 能力库、自动化 | `agents/workspace.rs` | 隐藏 |
-| 挂「只作用于本机运行时」标签的设置页 | `settings/workspace_view/render/mod.rs`、`agents/view.rs` | 隐藏 |
-| Pi 配置 | `settings/pi_config.rs` | 已按 `RuntimeKey` 选客户端，默认选第一个可用运行时 |
-| 守护升级、重启、过期探测 | `workspace_update.rs`、`main.rs` 的 `start_daemon_outdated_watch` | 不启动 |
-| smelt-notify 同步 | `settings/bundled_helpers.rs` | 不调用 |
-| 命令行子命令 | `cli.rs` | Windows 上不提供 |
-
-6. **首次启动的空状态**：Windows 上没配对任何运行时时侧栏是空的，放一个引导去设置页配对的空状态。配对输入已经在 `RuntimeHub.pairing_input`。
-
-## D3 运行时路径
+## D2 运行时路径
 
 ### 现状
 
-协议里的路径（`cwd`、项目根等）已经是 `String`，是运行时那台机器的路径。但桌面端拼接时用 `std::path`，按桌面所在系统的规则处理：
+协议里的路径（`cwd`、项目根等）已经是 `String`，是运行时那台机器的路径。但桌面端用 `std::path` 拼接，按桌面所在系统的规则处理：
 
 - `file_tree/view.rs`：`Path::new(dir).join(name)`
 - `git_panel/mod.rs`：`Path::new(root).join(&row.path)`
 
-在 Windows 上会拼出 `/home/u/proj\src` 发给 Linux 运行时。`crates/smelt` 里非测试的 `Path::new(` 有约 40 处，集中在 `file_tree/workspace.rs`、`terminal.rs`、`ide.rs`、`file_tree/view.rs`，其中一部分处理的是本机路径（守护、IDE），不受影响。
+在 Windows 上会拼出 `/home/u/proj\src` 发给 Linux 运行时。macOS 连 Linux 时这些地方是碰巧对的。`crates/smelt` 里非测试的 `Path::new(` 约 40 处，集中在 `file_tree/workspace.rs`、`terminal.rs`、`ide.rs`、`file_tree/view.rs`，其中一部分处理的是本机路径（smeltd、IDE），不受影响。
 
 ### 方案
 
 - 规则：**运行时给的路径只按运行时那台机器的规则处理**，桌面端不拿 `std::path` 碰它。
-- smelt-client 加 `runtime_path` 模块，提供 `join`、`parent`、`file_name`。第 1 步运行时只有 macOS、Linux，统一按 `/` 处理，不需要参数。
-- 逐个筛上面那约 40 处 `Path::new(`，以及 `PathBuf::from(` 接运行时字符串的地方（如 `git_panel/view.rs`），属于运行时路径的换成 `runtime_path`。已经按 `/` 手写切分的约 13 处对 POSIX 运行时本来就对，第 1 步不动。
-- 第 2 步有 Windows 运行时后，按运行时 `system.describe` 里已有的 `os` 字段选分隔符，届时 `runtime_path` 的函数多一个运行时参数。
+- smelt-client 加 `runtime_path` 模块，提供 `join`、`parent`、`file_name`。第 1 步运行时只有 macOS、Linux，统一按 `/` 处理，不带参数。
+- 逐个筛那约 40 处 `Path::new(`，以及 `PathBuf::from(` 接运行时字符串的地方（如 `git_panel/view.rs`），属于运行时路径的换成 `runtime_path`。已经按 `/` 手写切分的约 13 处对 POSIX 运行时本来就对，不动。
+- 第 2 步有了 Windows 运行时，按运行时 `system.describe` 已有的 `os` 字段选分隔符，`runtime_path` 的函数届时多一个运行时参数。
 
-这一项 macOS 连 Linux 也受益：现在这些地方是碰巧对的。
+## D3 本机运行时可选
+
+### 现状
+
+「本机运行时总在」写死在结构里，不只是约定：
+
+- `smelt-client/src/runtime.rs`：`Runtime::local()` 无条件返回本机运行时。
+- `Workspace` 有固定的 `local: RuntimeSpace` 字段，远程的在 `remote_spaces`（`main.rs`）。`runtime_space.rs` 的 `space()`、`space_mut()`、`space_keys()` 把本机特判在前。
+- 14 处直接读 `self.local` 的字段，多数是冷启动闸门 `sessions_restored` / `restore_pending`，另有 `catalog_loaded`、`write_queue`（`workspace_sessions.rs`、`workspace_prepare.rs`、`workspace_attention.rs`、`workspace_persist.rs`、`main.rs`）。
+- `runtime_events.rs` 启动即订阅本机；`RuntimeHub.local_status` 记本机状态。
+- smeltd 生命周期：`terminal.rs` 的 `connect_daemon`、`connect_daemon_control`、`daemon_outdated`、`restart_daemon`、`ensure_daemon_running`（用 `flock`、`kill`），被 `runtimes.rs`、`workspace_update.rs`、`workspace_persist.rs`、`workspace_sessions.rs` 调用。
+- 另有一批只认本机的功能，见下面的表。
+
+### 方案
+
+1. **能力判定一处**：`smelt_client::runtime::local_runtime_supported()`，第 1 步为 `cfg!(unix)`，第 2 步给 Windows 打开。
+2. **`Runtime::local()` 改返回 `Option<Runtime>`**，让编译器逼出每个调用点的处理，不靠运行时连不上兜底。
+3. **空间合一**：`local` 和 `remote_spaces` 合成 `spaces: Vec<RuntimeSpace>`，有本机时本机在前，`space()` 等去掉本机特判。那 14 处 `self.local` 原本为本机冷启动恢复而设，逐个确认原意后改成读会话所属运行时的空间，改之前要确认远程空间的恢复语义一致。
+4. **smeltd 生命周期独立成模块**：`terminal.rs` 里上面那段挪到 `local_daemon.rs`，整体 `cfg(unix)`，`runtimes::connect_terminal` 在本机分支调它。第 2 步再给 Windows 实现。
+5. **只认本机的功能**按下表处理：
+
+| 功能 | 位置 | 没有本机运行时时 |
+|---|---|---|
+| 机器面板 | `session_list/machines.rs`（以 `vec![Runtime::local()]` 起头） | 只列远程 |
+| 侧栏分段默认折叠 | `runtime_space.rs` 的 `runtime_folded` | 第一个运行时展开 |
+| 打开项目 | `workspace_sessions.rs` 的 `open_project` | 先选机器，只有一台就直接用 |
+| 历史页 | `session_history.rs`、`workspace_sessions.rs` | 待定，见末尾 |
+| 能力库、自动化 | `agents/workspace.rs` | 隐藏 |
+| 挂「只作用于本机运行时」标签的设置页 | `settings/workspace_view/render/mod.rs`、`agents/view.rs` | 隐藏 |
+| Pi 配置 | `settings/pi_config.rs` | 已按 `RuntimeKey` 选客户端，默认选第一个可用运行时 |
+| smeltd 升级、重启、过期探测 | `workspace_update.rs`，`main.rs` 的 `start_daemon_outdated_watch` | 不启动 |
+| smelt-notify 同步 | `settings/bundled_helpers.rs` | 不调用 |
+| 命令行子命令 | `cli.rs`（经 `daemon_request` 直连本机） | Windows 上不提供 |
+
+6. **首次启动的空状态**：没配对任何运行时时侧栏是空的，放一个引导去设置页配对的空状态。配对输入已有（`RuntimeHub.pairing_input`）。
 
 ## D4 零散的平台调用
 
-| 位置 | 现状 | 第 1 步处理 |
+| 位置 | 现状 | 处理 |
 |---|---|---|
 | `smelt-sys/src/lib.rs` `hostname()` | `libc::gethostname` | Windows 用 `GetComputerNameExW` |
-| `smelt-sys` `process_wait`、`daemon_image`、`fd_limit` | Unix 进程和文件描述符 | 只被本机守护路径用，`cfg(unix)` |
+| `smelt-sys` `process_wait`、`daemon_image`、`fd_limit` | Unix 进程和文件描述符 | 只被 smeltd 生命周期用，`cfg(unix)` |
 | `smelt-sys/src/app_log.rs` | 已有 `cfg(not(unix))` 分支 | 确认能编过 |
-| `smelt-paths` `pid_is_alive` | `libc::kill(pid, 0)` | 只服务测试沙箱清理，Windows 用 `OpenProcess` 判断，或该清理整体 `cfg(unix)` |
-| `smelt-paths` `smelt_home()` | `dirs::home_dir().join(".smelt")` | 不改，Windows 上是 `%USERPROFILE%\.smelt`（待定，见末尾） |
-| `smelt-iroh/src/lib.rs` 密钥文件权限 | `cfg(unix)` 设 0600，已有非 Unix 分支 | 不改；用户目录默认 ACL 只给本人 |
+| `smelt-paths` `pid_is_alive` | `libc::kill(pid, 0)` | 只服务测试沙箱清理；Windows 用 `OpenProcess` 判断，或该清理整体 `cfg(unix)` |
+| `smelt-paths` `smelt_home()` | `dirs::home_dir().join(".smelt")` | 待定，见末尾 |
+| `smelt-iroh/src/lib.rs` 密钥文件权限 | `cfg(unix)` 设 0600，已有非 Unix 分支 | 不改，用户目录默认 ACL 只给本人 |
 | `smelt-client-store` `path_bytes` | Unix `OsStrExt` | 只服务更新器状态，随更新器 `cfg` |
 | `smelt-client/src/updater.rs`、`app_location.rs` | `.app` 替换，`flock`、`renamex_np`、`dlopen` | `cfg(target_os = "macos")`，设置页的更新入口在 Windows 上隐藏 |
-| `smelt/src/plugins/host_fs.rs` | 软链接、原子交换 | 软链接用 `std::os::windows::fs::symlink_file` / `symlink_dir`，失败按不支持报错；原子交换在 Windows 上走现有「不支持」分支 |
-| `smelt/src/terminal.rs` 剩余部分 | 前端渲染与连接 | 随 D1 换类型；守护部分已在 D2 挪走 |
+| `smelt/src/plugins/host_fs.rs` | 软链接、原子交换 | 软链接用 `std::os::windows::fs::symlink_file` / `symlink_dir`，失败按不支持报错；原子交换走现有的「不支持」分支 |
+| `smelt/src/terminal.rs` 其余部分 | 前端渲染与连接 | D1 换类型，smeltd 部分已在 D3 挪走 |
 
-## D5 打包、CI 与发版
+## D5 CI、发版与打包
 
-- **CI**：`ci.yml` 加 `windows-latest` 任务，跑 `cargo check -p smelt` 和受影响 crate 的测试（smelt-runtime-client、smelt-iroh、smelt-client）。先不设为必需检查，等桌面端在 Windows 上编过后加进 `ci-ok`。在 Windows runner 上原生编译，不交叉编译。
+- **CI**：`ci.yml` 加 `windows-latest` 任务，跑 `cargo check -p smelt` 和受影响 crate 的测试（smelt-runtime-client、smelt-iroh、smelt-client）。在 Windows runner 上原生编译，不交叉编译。桌面端在 Windows 上编过之前不设为必需检查，编过后加进 `ci-ok`。
 - **发版**：`release.yml` 加 Windows 任务，只编 `smelt`，产出 `smelt-<版本>-windows-x86_64.zip`，挂到同一个 Release，写进校验和清单。
-- **图标与清单**：GPUI 的 Windows 清单由 `gpui-pre-platform` 的 `windows-manifest` 特性带上；exe 图标要新加 `crates/smelt/build.rs`，只在 Windows 目标上嵌资源。
-- **签名与更新**：第一版不签名，下载后会有 SmartScreen 提示，在 Release 说明里写明。自动更新等安装包方案定了再做。
+- **图标与清单**：Windows 清单由 `gpui-pre-platform` 的 `windows-manifest` 特性带上；exe 图标要新加 `crates/smelt/build.rs`，只在 Windows 目标上嵌资源。
+- **签名与更新**：第一版不签名，下载后有 SmartScreen 提示，在 Release 说明里写明。自动更新等安装包方案定了再做。
 
 ## 施工顺序
 
 每一块单独可合入，macOS 行为不变。
 
-1. 在 Windows 机器上跑 `cargo check -p smelt --target x86_64-pc-windows-msvc`，拿报错清单，校准本文。
+1. 在 Windows 机器上跑 `cargo check -p smelt --target x86_64-pc-windows-msvc`，拿报错清单校准本文。
 2. D1 连接流类型。
-3. D3 运行时路径。
-4. D2 本机运行时可选（含守护生命周期挪模块、空间合一）。
-5. D4 零散调用，直到 Windows 上编过、跑通；CI 的 Windows 任务转为必需。
-6. D5 打包和发版。
+3. D2 运行时路径。
+4. D3 本机运行时可选。
+5. D4 零散平台调用，直到 Windows 上编过、跑通；CI 的 Windows 任务转为必需。
+6. D5 发版与打包。
 
-## 第 2 步：方向与待定问题
+## 第 2 步：方向
 
-第 2 步基本等于把守护进程移植一遍。平台相关代码集中在 smeltd 的 `main.rs`、`protocol/auth.rs`、`handoff_v2/`，以及 smelt-core 的 `background_tasks.rs`、`acp_conn.rs`、`pi_rpc.rs`、`pi_model_settings.rs`、`managed_runtime.rs`。
+第 2 步基本等于把 smeltd 移植一遍。平台相关代码集中在 smeltd 的 `main.rs`、`protocol/auth.rs`、`handoff_v2/`，以及 smelt-core 的 `background_tasks.rs`、`acp_conn.rs`、`pi_rpc.rs`、`pi_model_settings.rs`、`managed_runtime.rs`。
 
-- **本机通信与鉴权**：`protocol/auth.rs` 按对端进程身份鉴权（macOS 取 audit token 再校验代码签名），回环端口拿不到对端进程，不可用。候选是 AF_UNIX（和 D1 同一种流，对端 pid 用 `SIO_AF_UNIX_GETPEERPID`）或命名管道（`GetNamedPipeClientProcessId`），再校验 Authenticode 签名。倾向 AF_UNIX；smeltd 服务端大量用 tokio，而 tokio 在 Windows 上没有 AF_UNIX，要评估监听和会话流怎么接进运行时，这是取舍的关键。
+- **本机通信与鉴权**：`protocol/auth.rs` 按对端进程身份鉴权（macOS 取 audit token 再校验代码签名），回环端口拿不到对端进程，不可用。候选是 AF_UNIX（和 D1 同一种流，对端 pid 用 `SIO_AF_UNIX_GETPEERPID`）或命名管道（`GetNamedPipeClientProcessId`），再校验 Authenticode 签名。取舍的关键是 smeltd 服务端大量用 tokio，而 tokio 在 Windows 上没有 AF_UNIX，要评估监听和会话流怎么接进运行时。未定。
 - **Pi 扩展**：`background_tasks.rs` 里 Pi 扩展通过 Unix 套接字给会话宿主下命令，TS 侧要一起换传输。
 - **进程模型**：`pi_rpc.rs` 的 `sigprocmask` / `SIGCHLD`，`acp_conn.rs` 的 `WNOHANG` / `proc_bsdinfo`，`background_tasks.rs` 的 `kill` / `SIGKILL`，换成 Job Object。终端用的 `portable-pty` 支持 ConPTY。
 - **无缝交接**：`handoff_v2` 用 `SCM_RIGHTS` 把 PTY 等 fd 交给新进程。ConPTY 句柄能不能交给另一个进程接着用待验证；第一版不做交接，升级即重启，终端会话丢失。
 - **软链接与权限**：`managed_runtime.rs`、`daemon_image` 靠软链接切版本，Windows 上建软链接要开发者模式或管理员权限，要换机制；`pi_model_settings.rs` 的 0600 凭据保护和 `kevent` 文件监听要换成 ACL 和别的监听方式。
 - **hook**：各 agent hook 里的 smelt-notify 路径要按 cmd / PowerShell 规则引用，配置位置按 Windows 约定。
-- **运行时路径**：D3 的 `runtime_path` 按运行时 `os` 选分隔符，macOS / Linux 桌面连 Windows 运行时时生效。
 
 ## 待定问题
 
+第 1 步：
+
 - **历史页**：没有本机运行时时是隐藏，还是改成跟当前选中的机器走。倾向后者：读写已经按 `&Runtime` 传，改动小，而 Windows 用户没有历史页会少一大块功能。
-- **数据目录**：沿用 `%USERPROFILE%\.smelt`，还是改用 `%LOCALAPPDATA%\Smelt`。倾向沿用：一处真源（smelt-paths），和其它平台一致，开发者工具放家目录点目录在 Windows 上也常见。
+- **数据目录**：沿用 `%USERPROFILE%\.smelt`，还是改用 `%LOCALAPPDATA%\Smelt`。倾向沿用：路径只有 smelt-paths 一处真源，和其它平台一致，开发者工具在家目录放点目录在 Windows 上也常见。
 - **架构**：第一版是否同时出 aarch64。
-- **签名**：Authenticode 证书从哪来，决定第 2 步鉴权能不能按签名校验。
+
+第 2 步：
+
+- **本机通信**：AF_UNIX 还是命名管道，见上文。
+- **签名**：Authenticode 证书从哪来，决定本机鉴权能不能按签名校验。
