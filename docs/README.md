@@ -27,6 +27,7 @@ Contributor-facing notes that are still current.
 - [`notification-architecture.md`](notification-architecture.md) — Current status, attention, and notification model.
 - [`event-bus-architecture.md`](event-bus-architecture.md) — Event bus and `event_subscribe`. Plugin-host sections describe a removed design.
 - [`agent-memory.md`](agent-memory.md) — Agent memory. Phase 1 is implemented; later work is listed in the doc.
+- [`windows-support.md`](windows-support.md) — Windows support: step 1 desktop that connects only to remote runtimes, step 2 a native smeltd. Not started.
 - [`terminal-rendering-gaps.md`](terminal-rendering-gaps.md) — Living notes versus Zed. The main render path is aligned; a few input and platform gaps remain.
 
 ## Product / planning
