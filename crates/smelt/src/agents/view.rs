@@ -1266,15 +1266,10 @@ impl Workspace {
                     .child("能力库"),
             )
             .child(tabs)
-            // 挂了别的机器，才需要选在配哪台。记忆只在本机运行时上，切到别的机器时说清楚。
+            // 挂了别的机器，才需要选在配哪台。
             .when(crate::runtimes::has_remote_runtimes(cx), |header| {
                 header
                     .child(div().flex_1())
-                    .when(
-                        current == CapabilitiesTab::Memory
-                            && *self.pi_library_runtime() != crate::RuntimeKey::Local,
-                        |header| header.child(crate::runtimes::local_runtime_scope_chip()),
-                    )
                     .child(self.render_pi_library_picker(cx))
             });
 
