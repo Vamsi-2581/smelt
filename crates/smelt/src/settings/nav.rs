@@ -29,6 +29,8 @@ pub enum SettingsSection {
     MaintenanceResources,
     MaintenanceStorage,
     Shortcuts,
+    /// Tool Panel 里的插件：列出、导入、删除、重新加载。
+    PanelPlugins,
 }
 
 impl SettingsSection {
@@ -59,6 +61,7 @@ impl SettingsSection {
             Self::MaintenanceResources => "maintenance-resources".into(),
             Self::MaintenanceStorage => "maintenance-storage".into(),
             Self::Shortcuts => "shortcuts".into(),
+            Self::PanelPlugins => "panel-plugins".into(),
         }
     }
 }
@@ -182,6 +185,24 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
                         "keymap",
                         "cmd",
                         "command",
+                    ],
+                ),
+                leaf(
+                    "面板插件",
+                    Icon::new(gpui_kit_assets::IconName::Puzzle),
+                    SettingsSection::PanelPlugins,
+                    &[
+                        "插件",
+                        "plugin",
+                        "扩展",
+                        "Tool Panel",
+                        "右侧面板",
+                        "导入插件",
+                        "安装插件",
+                        "删除插件",
+                        "卸载插件",
+                        "重新加载",
+                        "gpui-shell",
                     ],
                 ),
             ],
@@ -546,7 +567,7 @@ mod tests {
         );
         assert_eq!(
             child_titles(&nav, SettingsCategoryId::General),
-            ["主题与界面", "终端", "窗口与背景", "键盘快捷键"]
+            ["主题与界面", "终端", "窗口与背景", "键盘快捷键", "面板插件"]
         );
         assert_eq!(
             child_titles(&nav, SettingsCategoryId::Agent),
@@ -590,6 +611,7 @@ mod tests {
                 SettingsSection::AppearanceTerminal,
                 SettingsSection::AppearanceWindow,
                 SettingsSection::Shortcuts,
+                SettingsSection::PanelPlugins,
             ]
         );
         assert_ne!(
@@ -629,7 +651,7 @@ mod tests {
         let by_category = filter_settings_nav(&nav, "通用");
         assert_eq!(
             child_titles(&by_category, SettingsCategoryId::General).len(),
-            4
+            5
         );
     }
 
@@ -686,6 +708,7 @@ mod tests {
             ("Relay 地址", SettingsSection::CollaborationRemote),
             ("添加机器", SettingsSection::CollaborationMachines),
             ("内存占用", SettingsSection::MaintenanceResources),
+            ("导入插件", SettingsSection::PanelPlugins),
             #[cfg(target_os = "macos")]
             ("自动下载安装", SettingsSection::MaintenanceUpdate),
         ] {
@@ -705,9 +728,9 @@ mod tests {
 
         // 少掉的一页是 macOS 的「应用更新」。
         #[cfg(target_os = "macos")]
-        let destination_count = 15;
+        let destination_count = 16;
         #[cfg(not(target_os = "macos"))]
-        let destination_count = 14;
+        let destination_count = 15;
         assert_eq!(visible_destinations.len(), destination_count);
         assert!(visible_destinations.contains(&SettingsSection::Shortcuts));
     }

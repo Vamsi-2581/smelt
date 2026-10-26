@@ -32,6 +32,7 @@ mod agent_hooks;
 mod bundled_helpers;
 mod memory;
 mod nav;
+mod panel_plugins;
 mod pi_auth;
 mod pi_config;
 mod pi_mcp;
@@ -71,6 +72,7 @@ pub(super) use agent_hooks::{
 };
 pub(super) use bundled_helpers::sync_bundled_smelt_notify;
 pub(crate) use pi_config::{PiConfigSlot, PiLibrary, pi_model_choice_groups};
+pub(crate) use panel_plugins::{PanelPluginsSnapshot, PanelPluginsState};
 
 // ===================== 外观 / 启动 配置类型 =====================
 
@@ -1338,6 +1340,7 @@ struct SettingsRenderSnapshot {
     pi_plugin_error: Option<String>,
     /// 插件 id -> 勾选了它的智能体名字，用来在删除前提示占用方。
     agent_names_using_plugin: std::collections::HashMap<String, Vec<String>>,
+    panel_plugins: PanelPluginsSnapshot,
     #[cfg(target_os = "macos")]
     update_status: updater::UpdateStatus,
     /// 正在把 App 移到「应用程序」，见 `Workspace::move_app_to_applications`。

@@ -15,6 +15,7 @@ mod agent;
 mod appearance;
 mod collaboration;
 mod maintenance;
+mod panel_plugin;
 mod pi_auth;
 mod pi_mcp;
 mod pi_memory;
@@ -261,6 +262,7 @@ fn section_page(
         }
         SettingsSection::MaintenanceStorage => maintenance::storage_page(cx),
         SettingsSection::Shortcuts => shortcuts::shortcuts_page(entity, snapshot, cx),
+        SettingsSection::PanelPlugins => panel_plugin::panel_plugin_page(entity, snapshot),
     };
     if local_runtime_only && crate::runtimes::has_remote_runtimes(cx) {
         page.title_suffix(|_, _| crate::runtimes::local_runtime_scope_chip())

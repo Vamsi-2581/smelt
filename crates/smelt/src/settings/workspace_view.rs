@@ -96,6 +96,7 @@ impl Workspace {
                 }
                 map
             },
+            panel_plugins: self.panel_plugins_snapshot(),
             #[cfg(target_os = "macos")]
             update_status: self.update_status.clone(),
             #[cfg(target_os = "macos")]

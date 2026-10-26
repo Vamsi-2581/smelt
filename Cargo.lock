@@ -10801,6 +10801,8 @@ dependencies = [
  "smelt-ui",
  "smol",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "url",
  "uuid",
 ]

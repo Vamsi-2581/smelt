@@ -2619,6 +2619,8 @@ struct Workspace {
     pi_plugin_pending_delete: Option<String>,
     /// 插件导入 / 删除的最近一次错误。
     pi_plugin_error: Option<String>,
+    /// 面板插件（Tool Panel 里的 gpui-shell 插件）设置页的状态，见 `settings::panel_plugins`。
+    panel_plugins: settings::PanelPluginsState,
     /// 设置面板的有状态组件（懒创建）：不透明度滑块 + 界面字号滑块 + 终端字号滑块 + 背景色取色器
     /// + 背景图透明度滑块。
     opacity_slider: Option<Entity<SliderState>>,
@@ -3014,6 +3016,21 @@ impl Workspace {
         // 插件 tab 必须先于存档读取挂好：存档里的 tab 以插件 id 记录，
         // 注册表为空时会降级成 Files，用户上次停在插件面板就再也回不去。
         plugins::mount_all(window, cx);
+        // 插件的 `open_session`：和点系统通知一样跳到会话。推到这一轮更新结束后再进
+        // 工作台窗口：插件是在自己的事件里调它的，这时可能正嵌在别的更新里。
+        let window_handle = window.window_handle();
+        let workspace = cx.weak_entity();
+        plugins::set_session_opener(move |session_id, cx| {
+            let workspace = workspace.clone();
+            cx.defer(move |cx| {
+                let _ = cx.update_window(window_handle, |_root, window, cx| {
+                    let _ = workspace.update(cx, |workspace, cx| {
+                        workspace.request_notification_session_jump(session_id, window, cx);
+                    });
+                    window.activate_window();
+                });
+            });
+        });
         // 客户端界面状态（侧栏、当前页、Dock 布局）存在本机，同步读，窗口一次成型。
         // 项目和会话属于运行时，窗口起来后异步加载，到了再恢复会话
         // （见 start_workspace_catalog_load）。
@@ -3237,6 +3254,7 @@ impl Workspace {
             pi_model_editor_error: None,
             pi_plugin_pending_delete: None,
             pi_plugin_error: None,
+            panel_plugins: Default::default(),
             opacity_slider: None,
             ui_font_size_slider: None,
             font_size_slider: None,
@@ -4759,6 +4777,8 @@ fn main() {
     // 尤其能保留 GPUI 清理阶段二次 panic 之前的第一条错误。
     smelt_sys::app_log::install_panic_hook("smelt");
     smelt_sys::app_log::tee_stderr("smelt");
+    // 插件的 console 输出和脚本错误是 tracing 事件，不接就看不见。
+    plugins::install_log();
     schedule_obsolete_file_cleanup();
     // Finder / launchd 启动的 GUI 默认软上限常是 256；在创建窗口、socket 和终端
     // 线程之前先抬高，避免正常多会话也让更新检查等新连接触发 EMFILE。
