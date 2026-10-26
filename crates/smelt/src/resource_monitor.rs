@@ -283,7 +283,7 @@ fn runtime_total(result: &ResourceUsageResult) -> ProcessUsage {
 }
 
 /// 曲线的点：从 `now` 往回每隔 [`INTERVAL`] 取一刻，取那一刻之前最近的样本，老的在前。
-/// 还没有样本的时刻不出点，曲线从左边长起来。
+/// 还没有样本的时刻不出点：刚打开时点少，画出来铺满整宽，只是覆盖的时间短。
 fn memory_series(history: &VecDeque<(Instant, u64)>, now: Instant) -> Vec<f64> {
     (0..CHART_POINTS)
         .rev()
@@ -635,7 +635,7 @@ fn summary_view(snapshot: &PanelSnapshot, cx: &App) -> AnyElement {
     );
     if snapshot.chart.len() > 1 {
         let peak = snapshot.chart.iter().copied().fold(0., f64::max);
-        let stroke = theme.chart_1;
+        let stroke: Hsla = rgb(ui_theme::blue()).into();
         view = view.child(
             div().h(px(96.)).w_full().child(
                 AreaChart::new(snapshot.chart.clone().into_iter().enumerate())
@@ -649,7 +649,6 @@ fn summary_view(snapshot: &PanelSnapshot, cx: &App) -> AnyElement {
                     .y_axis(false)
                     .grid(false)
                     .y_domain(0., peak * 1.2)
-                    .point_count(CHART_POINTS)
                     .interactive(false)
                     .appear(false),
             ),
@@ -659,7 +658,7 @@ fn summary_view(snapshot: &PanelSnapshot, cx: &App) -> AnyElement {
         div()
             .text_xs()
             .text_color(theme.muted_foreground)
-            .child("本机合计：Smelt 界面、后台服务和本机会话。曲线是最近两分钟的内存。"),
+            .child("本机合计：Smelt 界面、后台服务和本机会话。曲线从打开这一页起画，最多两分钟。"),
     )
     .into_any_element()
 }
@@ -698,6 +697,7 @@ fn section_view(
         h_flex()
             .px_2()
             .pb_1()
+            .gap_3()
             .text_xs()
             .child(div().w(px(DISCLOSURE_COLUMN)))
             .child(div().flex_1().text_color(colors.muted).child("名称"))
@@ -706,12 +706,19 @@ fn section_view(
     );
     if let Some(note) = &section.note {
         table = table.child(
-            div()
+            h_flex()
                 .px_2()
                 .py_1()
-                .text_sm()
-                .text_color(colors.muted)
-                .child(note.clone()),
+                .gap_3()
+                .child(div().flex_none().w(px(DISCLOSURE_COLUMN)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_sm()
+                        .text_color(colors.muted)
+                        .child(note.clone()),
+                ),
         );
     }
     for row in &section.fixed {
@@ -734,6 +741,7 @@ fn section_view(
                 .mt_1()
                 .px_2()
                 .pt_1()
+                .gap_3()
                 .border_t_1()
                 .border_color(theme.border)
                 .child(div().w(px(DISCLOSURE_COLUMN)))
@@ -879,7 +887,8 @@ fn session_row(
         return head.into_any_element();
     }
     let mut body = v_flex()
-        .pl(px(DISCLOSURE_COLUMN + 8.))
+        // 和会话名对齐：行内边距之后是箭头列，再隔一个列间距。
+        .pl(px(DISCLOSURE_COLUMN + 12.))
         .pb_1()
         .children(group.processes.iter().map(|process| process_row(process, colors)));
     let unlisted = (group.usage.process_count as usize).saturating_sub(group.processes.len());
