@@ -4445,7 +4445,17 @@ fn permission_question(tool_name: &str, input: &serde_json::Value) -> String {
             .unwrap_or_else(|| "允许执行命令？".to_string()),
         "write" => "允许写入文件？".to_string(),
         "edit" => "允许修改文件？".to_string(),
-        _ => format!("允许 Pi 调用工具 `{tool_name}`？"),
+        // 别的工具也要看得出批的是什么：网址、路径、搜索词接在工具名后面。
+        _ => {
+            crate::acp_conn::permission_view(
+                Some(&format!("允许 Pi 调用工具 `{tool_name}`")),
+                tool_name,
+                None,
+                Some(input),
+                &[],
+            )
+            .0
+        }
     }
 }
 
@@ -4471,9 +4481,8 @@ fn permission_details(
                 .and_then(serde_json::Value::as_str)
                 .map(|path| absolute_tool_path(path, cwd)),
         },
-        _ => ApprovalDetailsView::Permissions {
-            summary: format!("Pi Tool: {tool_name}"),
-        },
+        // 卡片直接画问题，问题里已经带着调用的对象。
+        _ => ApprovalDetailsView::Generic,
     }
 }
 
@@ -9591,5 +9600,30 @@ mod tests {
         ));
         assert!(state.pending_rewind.is_none());
         assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[cfg(test)]
+mod permission_text_tests {
+    use super::{permission_details, permission_question};
+    use crate::acp_session::ApprovalDetailsView;
+    use serde_json::json;
+
+    /// bash / write / edit 之外的工具，审批卡也写出这次调用的对象。
+    #[test]
+    fn other_tools_name_what_they_touch() {
+        let input = json!({"url": "https://example.com/page"});
+        assert_eq!(
+            permission_question("web_fetch", &input),
+            "允许 Pi 调用工具 `web_fetch`：https://example.com/page"
+        );
+        assert!(matches!(
+            permission_details("web_fetch", &input, None),
+            ApprovalDetailsView::Generic
+        ));
+        assert_eq!(
+            permission_question("web_fetch", &json!({})),
+            "允许 Pi 调用工具 `web_fetch`"
+        );
     }
 }
