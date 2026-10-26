@@ -4031,7 +4031,7 @@ impl Render for Workspace {
         let shell_chrome = self.render_shared_right_chrome(
             self.chrome_left_guard(window),
             tool_span,
-            window.is_fullscreen(),
+            !workspace_frame::traffic_lights_visible(window),
             cx,
         );
         // 外壳分栏拖动要在窗口级听按下和松开：弹出菜单等元素会拿走焦点、停止事件
@@ -4296,10 +4296,15 @@ impl Render for Workspace {
                         // 这一条浮在拖窗口的顶带上：按下先拦住，不让它变成拖窗口。
                         div()
                             // 非全屏时红绿灯常驻，左边留 92px 让位；macOS 全屏会
-                            // 隐藏红绿灯，这 92px 就全空了，按钮回到窗口左侧
+                            // 隐藏红绿灯、Windows 用系统标题栏不在客户区画红绿灯，
+                            // 这 92px 就全空了，按钮回到窗口左侧
                             // 18px 的统一视觉基准。纵向不再手算 top：由共用顶栏的
                             // flex 居中，UI 字号改变、按钮尺寸随 rem 缩放时也不会偏。
-                            .ml(px(if window.is_fullscreen() { 18. } else { 92. }))
+                            .ml(px(if workspace_frame::traffic_lights_visible(window) {
+                                92.
+                            } else {
+                                18.
+                            }))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .child(
                                 smelt_ui::Button::new("sidebar-toggle")
