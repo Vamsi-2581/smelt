@@ -5,9 +5,9 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::{Mutex, TryLockError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use smelt_runtime_client::RuntimeStream;
 use smelt_runtime_client::protocol::daemon::DaemonOperation;
@@ -1379,6 +1379,7 @@ pub fn ensure_daemon_running() {
 #[cfg(test)]
 mod successor_daemon_tests {
     use super::*;
+    use std::time::Instant;
 
     fn info(pid: Option<u32>, started_at: Option<u64>) -> DaemonInfo {
         DaemonInfo {
@@ -1611,6 +1612,7 @@ mod outdated_fingerprint_tests {
 mod managed_daemon_ensure_tests {
     use super::*;
     use std::cell::Cell;
+    use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
 
     fn managed_test_file(name: &str) -> std::path::PathBuf {
