@@ -1635,7 +1635,7 @@ async fn run_connection(
                 let perm_tx = perm_tx.clone();
                 let raw_request_line = perm_last_line.lock().unwrap().clone();
                 async move {
-                    let question = permission_question(&request);
+                    let (question, details) = permission_from_request(&request);
                     let _ = perm_tx.try_send(ConversationEvent::Permission {
                         question,
                         tool_call_id: request.tool_call.tool_call_id.clone(),
@@ -1651,7 +1651,7 @@ async fn run_connection(
                             })
                             .collect(),
                         responder: PermissionResponder::acp(responder),
-                        details: crate::acp_session::ApprovalDetailsView::Generic,
+                        details,
                         raw_request_line,
                     });
                     Ok(())
@@ -3319,15 +3319,100 @@ fn publish_raw_session_config_line(
     }
 }
 
-/// 权限卡片的问题摘要：tool call 有标题用标题，否则退回工具 id。
-fn permission_question(request: &RequestPermissionRequest) -> String {
-    request
-        .tool_call
-        .fields
-        .title
-        .clone()
-        .filter(|t| !t.is_empty())
-        .unwrap_or_else(|| format!("工具调用 {}", request.tool_call.tool_call_id))
+/// ACP 审批请求的问题和详情。
+fn permission_from_request(
+    request: &RequestPermissionRequest,
+) -> (String, crate::acp_session::ApprovalDetailsView) {
+    let fields = &request.tool_call.fields;
+    let paths: Vec<String> = fields
+        .locations
+        .iter()
+        .flatten()
+        .map(|location| location.path.to_string_lossy().into_owned())
+        .collect();
+    permission_view(
+        fields.title.as_deref(),
+        &request.tool_call.tool_call_id.to_string(),
+        fields.kind,
+        fields.raw_input.as_ref(),
+        &paths,
+    )
+}
+
+/// 审批卡要让人看得出批的是什么：工具标题（「Fetch URL」「Run shell」）之外，带上这次
+/// 调用的对象——命令、网址、文件。能认出是执行命令或改文件的，给专门的详情样式；其余的
+/// 把对象接在标题后面。请求里的字段是稀疏的，没带参数时调用方用之前那条 tool_call 的
+/// `raw_input` 再算一次（见 `acp_session::apply` 的审批分支）。
+pub(crate) fn permission_view(
+    title: Option<&str>,
+    tool_call_id: &str,
+    kind: Option<agent_client_protocol::schema::v1::ToolKind>,
+    raw_input: Option<&serde_json::Value>,
+    paths: &[String],
+) -> (String, crate::acp_session::ApprovalDetailsView) {
+    use crate::acp_session::ApprovalDetailsView;
+    use agent_client_protocol::schema::v1::ToolKind as Acp;
+
+    /// 网址、命令过长时只留开头，卡片和系统通知都放得下。
+    const TARGET_MAX_CHARS: usize = 300;
+
+    let title = title
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("工具调用 {tool_call_id}"));
+    let input = raw_input.and_then(serde_json::Value::as_object);
+    let text = |keys: &[&str]| {
+        let input = input?;
+        keys.iter()
+            .find_map(|key| input.get(*key).and_then(serde_json::Value::as_str))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    let command = input
+        .and_then(|input| input.get("command"))
+        .and_then(|command| match command {
+            serde_json::Value::String(command) => {
+                Some(command.trim().to_string()).filter(|command| !command.is_empty())
+            }
+            serde_json::Value::Array(words) => {
+                let words: Vec<&str> = words.iter().filter_map(serde_json::Value::as_str).collect();
+                (!words.is_empty()).then(|| words.join(" "))
+            }
+            _ => None,
+        });
+    let path = text(&["file_path", "path", "notebook_path"]).or_else(|| paths.first().cloned());
+
+    let details = match kind {
+        Some(Acp::Execute) if command.is_some() => ApprovalDetailsView::Command {
+            command: command.clone().unwrap_or_default(),
+            cwd: text(&["cwd", "workdir"]),
+            reason: None,
+        },
+        Some(Acp::Edit | Acp::Delete | Acp::Move) if path.is_some() => {
+            ApprovalDetailsView::FileChange {
+                reason: None,
+                grant_root: path.clone(),
+            }
+        }
+        _ => ApprovalDetailsView::Generic,
+    };
+    let target = command
+        .or_else(|| text(&["url", "uri"]))
+        .or(path)
+        .or_else(|| text(&["pattern", "query"]));
+    let question = match target {
+        Some(target) if !title.contains(&target) => {
+            let mut clipped: String = target.chars().take(TARGET_MAX_CHARS).collect();
+            if clipped.len() < target.len() {
+                clipped.push('…');
+            }
+            format!("{title}：{clipped}")
+        }
+        _ => title,
+    };
+    (question, details)
 }
 
 /// ContentBlock 文本化：MVP 只取文本，资源/图片降级为占位（方案「已知不做」）。
@@ -5907,5 +5992,91 @@ mod runtime_diagnostics_wire_tests {
             decoded.for_terminal(TerminalAgentKind::Claude),
             Some(&claude)
         );
+    }
+}
+
+#[cfg(test)]
+mod permission_view_tests {
+    use super::permission_view;
+    use crate::acp_session::ApprovalDetailsView;
+    use agent_client_protocol::schema::v1::ToolKind;
+    use serde_json::json;
+
+    #[test]
+    fn a_fetch_names_its_url() {
+        let (question, details) = permission_view(
+            Some("Fetch URL"),
+            "t1",
+            Some(ToolKind::Fetch),
+            Some(&json!({"url": "https://example.com/a", "prompt": "summarize"})),
+            &[],
+        );
+        assert_eq!(question, "Fetch URL：https://example.com/a");
+        assert!(matches!(details, ApprovalDetailsView::Generic));
+    }
+
+    #[test]
+    fn a_command_gets_the_command_card() {
+        let (question, details) = permission_view(
+            Some("Run shell"),
+            "t1",
+            Some(ToolKind::Execute),
+            Some(&json!({"command": ["git", "push"], "cwd": "/repo"})),
+            &[],
+        );
+        assert_eq!(question, "Run shell：git push");
+        assert!(matches!(
+            details,
+            ApprovalDetailsView::Command { command, cwd, .. }
+                if command == "git push" && cwd.as_deref() == Some("/repo")
+        ));
+    }
+
+    #[test]
+    fn an_edit_takes_its_file_from_the_locations() {
+        let (_, details) = permission_view(
+            Some("Edit"),
+            "t1",
+            Some(ToolKind::Edit),
+            None,
+            &["/repo/src/main.rs".to_string()],
+        );
+        assert!(matches!(
+            details,
+            ApprovalDetailsView::FileChange { grant_root: Some(root), .. } if root == "/repo/src/main.rs"
+        ));
+    }
+
+    #[test]
+    fn the_target_is_not_repeated_when_the_title_already_has_it() {
+        let (question, _) = permission_view(
+            Some("`git status`"),
+            "t1",
+            Some(ToolKind::Execute),
+            Some(&json!({"command": "git status"})),
+            &[],
+        );
+        assert_eq!(question, "`git status`");
+    }
+
+    #[test]
+    fn without_a_title_or_input_it_falls_back_to_the_tool_id() {
+        let (question, details) = permission_view(None, "t9", None, None, &[]);
+        assert_eq!(question, "工具调用 t9");
+        assert!(matches!(details, ApprovalDetailsView::Generic));
+    }
+
+    #[test]
+    fn a_long_target_is_clipped() {
+        let url = format!("https://example.com/{}", "a".repeat(400));
+        let (question, _) = permission_view(
+            Some("Fetch URL"),
+            "t1",
+            None,
+            Some(&json!({ "url": url })),
+            &[],
+        );
+        assert!(question.ends_with('…'));
+        assert!(question.chars().count() < 320);
     }
 }

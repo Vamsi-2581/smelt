@@ -1622,6 +1622,45 @@ fn cancelled_turn_does_not_accept_another_steer() {
     );
 }
 
+/// 审批请求只带了标题时，用之前那条 tool_call 的参数认出对象，卡片上看得到网址。
+#[test]
+fn a_bare_permission_names_its_target_from_the_earlier_tool_call() {
+    let mut s = fresh_state();
+    note_prompt_sent(&mut s, "look it up".into(), Vec::new());
+    apply_event(
+        &mut s,
+        ConversationEvent::ToolDebug {
+            id: "fetch-1".into(),
+            name: None,
+            raw_input: Some(serde_json::json!({"url": "https://example.com/docs"})),
+        },
+    );
+    let ConversationEvent::Permission {
+        tool_call_id,
+        pub_options,
+        responder,
+        details,
+        raw_request_line,
+        ..
+    } = late_permission_event("fetch-1")
+    else {
+        unreachable!();
+    };
+    apply_event(
+        &mut s,
+        ConversationEvent::Permission {
+            question: "Fetch URL".into(),
+            tool_call_id,
+            pub_options,
+            responder,
+            details,
+            raw_request_line,
+        },
+    );
+    assert_eq!(s.permissions.len(), 1);
+    assert_eq!(s.permissions[0].question, "Fetch URL：https://example.com/docs");
+}
+
 #[test]
 fn cancel_request_dismisses_pending_approval_cards() {
     let mut s = fresh_state();
