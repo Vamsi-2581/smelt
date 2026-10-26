@@ -137,6 +137,7 @@ mod session_state;
 mod terminal_output;
 mod terminal_progress;
 mod terminal_registry;
+mod terminal_resume;
 mod terminal_snapshot;
 mod webhook;
 
@@ -2813,12 +2814,12 @@ fn main() {
     // 摘掉的是正在服务的那个守护的。在这之前收到信号按默认动作退出，本来也没有要收尾的。
     // 处理器只往自管道写一个字节，不改信号掩码，子进程仍能收到 Ctrl+C 和 SIGTERM。
     install_shutdown_signals();
-    // 崩溃恢复：落盘有内容就说明上次非正常退出（正常 shutdown 会清空）。
-    // 灌进身份目录，runtime=false，保留最后相位。
+    // 上次留下的会话：崩溃时是全部，正常停机时只有能续接的终端。灌进身份目录，
+    // runtime=false，保留最后相位；终端重新打开时据此接回原来的对话。
     let directory = SessionDirectory::restore_from_disk();
     let recovered = directory.snapshot().len();
     if recovered > 0 {
-        dlog(&format!("崩溃恢复：{recovered} 个会话恢复为已断连状态"));
+        dlog(&format!("上次留下 {recovered} 个会话，恢复为已断连状态"));
     }
     *SESSION_DIRECTORY.write().unwrap_or_else(|e| e.into_inner()) = Some(directory);
     let sessions = new_sessions();
@@ -3462,6 +3463,14 @@ fn launch_with_terminal_status_bridge(launch: &str, extension: &std::path::Path)
     }
 }
 
+/// 新终端要跑的命令，和记进会话状态的启动命令。平常是同一条；续接停机前那段对话时，
+/// 跑的那条多了续接参数，记的仍是原来那条（见 `terminal_resume`）。
+#[derive(Clone, Copy, Default)]
+struct TerminalLaunch<'a> {
+    run: Option<&'a str>,
+    recorded: Option<&'a str>,
+}
+
 /// 调用方必须握着 [`spawn_permit`]，并握到新会话登记、广播完（见
 /// `open_terminal_runtime`）：停机收割那一步才一定看得到它。
 fn spawn_session(
@@ -3470,7 +3479,7 @@ fn spawn_session(
     rows: u16,
     cols: u16,
     cwd: Option<&str>,
-    launch: Option<&str>,
+    launch: TerminalLaunch<'_>,
     event_hub: &EventHubHandle,
 ) -> anyhow::Result<(Session, Box<dyn PtyReader>)> {
     let pty_system = native_pty_system();
@@ -3490,7 +3499,7 @@ fn spawn_session(
     // 写进 .zshrc，只用 `-lc` 读不到，Dock 启动的 smeltd 又只有系统 PATH。
     let agent_token = uuid::Uuid::new_v4().simple().to_string();
     let status_extension = pi_status_extension_path();
-    let injected_launch = launch.map(|launch| {
+    let injected_launch = launch.run.map(|launch| {
         if status_extension.is_file() {
             launch_with_terminal_status_bridge(launch, &status_extension)
         } else {
@@ -3551,7 +3560,7 @@ fn spawn_session(
         id: id.to_string(),
         instance,
         cwd: cwd.map(String::from),
-        launch: launch.map(String::from),
+        launch: launch.recorded.map(String::from),
         agent_token,
         ..Default::default()
     }));

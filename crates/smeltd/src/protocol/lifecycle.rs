@@ -91,6 +91,19 @@ pub(crate) fn graceful_shutdown(
         save_active_automation_transcripts(&server.automations, &server.acp_sessions);
     }
 
+    // 停机前还开着的终端。收割之后它们就不在登记表里了，第 4 步要靠这份名单留下能续接的。
+    let terminal_ids: std::collections::HashSet<String> = super::SERVER
+        .get()
+        .map(|server| {
+            server
+                .sessions
+                .snapshot()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect()
+        })
+        .unwrap_or_default();
+
     // 3. 并发收割 ACP 进程组和 PTY。回执之前必须证明它们已经退出。
     if let Some(server) = super::SERVER.get() {
         let acp = server.acp_sessions.snapshot();
@@ -115,9 +128,10 @@ pub(crate) fn graceful_shutdown(
         }
     }
 
-    // 4. sidecar、身份目录、SQLite WAL。目录清空握着上面那把提交锁。
+    // 4. sidecar、身份目录、SQLite WAL。目录只留能续接的终端（桌面会用原来的 id 重新打开，
+    // 接回原来的对话），写入握着上面那把提交锁。
     crate::remote::cleanup_sidecar_services();
-    with_session_directory(crate::session_directory::SessionDirectory::clear_for_clean_shutdown);
+    with_session_directory(|directory| directory.keep_resumable_terminals(&terminal_ids));
     match smelt_core::sqlite_state::default_sqlite_store() {
         Ok(store) => {
             if let Err(error) = store.checkpoint_wal_truncate() {

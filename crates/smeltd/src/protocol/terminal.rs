@@ -456,13 +456,26 @@ pub(crate) fn open_terminal_runtime<R>(
             }
 
             let instance = next_session_instance();
+            // 守护停过，这个终端还留在目录里：接回它停下前那段对话，不另起一段。
+            let resume =
+                with_session_directory(|directory| directory.resume_launch(&id)).flatten();
+            let terminal_launch = match &resume {
+                Some(resume) => TerminalLaunch {
+                    run: Some(resume.run.as_str()),
+                    recorded: resume.launch.as_deref(),
+                },
+                None => TerminalLaunch {
+                    run: launch.as_deref(),
+                    recorded: launch.as_deref(),
+                },
+            };
             let result = spawn_session(
                 &id,
                 instance,
                 rows,
                 cols,
                 cwd.as_deref(),
-                launch.as_deref(),
+                terminal_launch,
                 event_hub,
             );
             let (sess, pty_reader) = match result {
