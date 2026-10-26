@@ -138,6 +138,7 @@ mod terminal_output;
 mod terminal_progress;
 mod terminal_registry;
 mod terminal_resume;
+mod terminal_shell;
 mod terminal_snapshot;
 mod webhook;
 
@@ -3287,31 +3288,6 @@ fn handle_upgrade<C: ClientSocket>(conn: C, req: &serde_json::Value) {
     protocol::graceful_shutdown(Some(c.into_client_conn()), Some(exe));
 }
 
-/// 开 PTY + 起 shell。交互环境在下面的 `apply_interactive_pty_env`：PTY 只活在守护里，
-/// GUI 的 `terminal.rs` 只消费字节流。
-/// `launch`：项目「+」悬浮菜单的 Claude Code / Codex 快捷入口——把要跑的命令直接编进
-/// 启动命令行（`-ilc '<launch>; exec <shell> -l'`），而不是等 shell 起来后再补发按键。
-/// 这样从根上没有"shell 是否已经在读 stdin"的时序问题，命令跑完会 exec 回一个
-/// 正常交互 login shell，之后就是一个普通会话。
-fn shell_launch_args(shell: &str, launch: Option<&str>) -> Vec<String> {
-    #[cfg(windows)]
-    {
-        // 交互终端：cmd 不读 profile（/d），/k 留下提示符。不走 zsh 的 -ilc。
-        let _ = shell;
-        match launch {
-            Some(launch) => vec!["/d".into(), "/k".into(), launch.to_string()],
-            None => vec!["/d".into(), "/k".into()],
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        match launch {
-            Some(launch) => vec!["-ilc".to_string(), format!("{launch}; exec {shell} -l")],
-            None => vec!["-l".to_string()],
-        }
-    }
-}
-
 /// 宿主终端的身份变量。smeltd 从别的终端里起（开发时 `cargo run`、命令行里跑 `smelt`）
 /// 会把它们带进会话：不少程序先看这些、再看 `TERM_PROGRAM`（Pi 认 `KITTY_WINDOW_ID`、
 /// Claude Code 认 `ITERM_SESSION_ID`），漏进来的 `TMUX` 还会让程序把转义序列包成 tmux
@@ -3370,10 +3346,6 @@ fn apply_interactive_pty_env(cmd: &mut CommandBuilder) {
     if std::env::var("LANG").is_err() {
         cmd.env("LANG", "en_US.UTF-8");
     }
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 const PI_STATUS_EXTENSION_SOURCE: &str = include_str!("../assets/pi-status-extension.ts");
@@ -3440,7 +3412,11 @@ fn launch_terminal_agent_kind(launch: &str) -> Option<smelt_core::agent_kind::Te
         .find(|kind| kind.cli_program() == program)
 }
 
-fn launch_with_terminal_status_bridge(launch: &str, extension: &std::path::Path) -> String {
+fn launch_with_terminal_status_bridge(
+    launch: &str,
+    extension: &std::path::Path,
+    shell: &terminal_shell::TerminalShell,
+) -> String {
     let Some(agent) = launch_terminal_agent_kind(launch) else {
         return launch.to_string();
     };
@@ -3451,7 +3427,10 @@ fn launch_with_terminal_status_bridge(launch: &str, extension: &std::path::Path)
             if launch.contains(extension.as_ref()) {
                 return launch.to_string();
             }
-            let option = format!("--extension {}", shell_quote(&extension));
+            let Some(extension) = shell.quote(&extension) else {
+                return launch.to_string();
+            };
+            let option = format!("--extension {extension}");
             if let Some(index) = launch.find(" -- ") {
                 format!("{} {option}{}", &launch[..index], &launch[index..])
             } else if let Some(prefix) = launch.strip_suffix(" --") {
@@ -3490,23 +3469,20 @@ fn spawn_session(
         pixel_height: 0,
     })?;
 
-    #[cfg(windows)]
-    let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
-    #[cfg(not(windows))]
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    let mut cmd = CommandBuilder::new(shell.clone());
-    // 快捷启动必须同时是 interactive + login：用户级 CLI 安装器通常把 PATH
-    // 写进 .zshrc，只用 `-lc` 读不到，Dock 启动的 smeltd 又只有系统 PATH。
+    // 交互环境在下面的 `apply_interactive_pty_env`：PTY 只活在守护里，GUI 的
+    // `terminal.rs` 只消费字节流。
+    let shell = terminal_shell::TerminalShell::detect();
+    let mut cmd = CommandBuilder::new(&shell.program);
     let agent_token = uuid::Uuid::new_v4().simple().to_string();
     let status_extension = pi_status_extension_path();
     let injected_launch = launch.run.map(|launch| {
         if status_extension.is_file() {
-            launch_with_terminal_status_bridge(launch, &status_extension)
+            launch_with_terminal_status_bridge(launch, &status_extension, &shell)
         } else {
             launch.to_string()
         }
     });
-    for arg in shell_launch_args(&shell, injected_launch.as_deref()) {
+    for arg in shell.launch_args(injected_launch.as_deref()) {
         cmd.arg(arg);
     }
     if let Some(dir) = cwd {

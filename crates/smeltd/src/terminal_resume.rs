@@ -71,26 +71,13 @@ fn is_assignment(word: &str) -> bool {
     })
 }
 
-/// 对话 id 平常是 uuid 一类，原样拼进命令行。别的字符在 Unix 上加单引号；Windows 的
-/// `cmd` 没有对应的转义，不续接，照旧起原来那条。
+/// 对话 id 平常是 uuid 一类，原样拼进命令行；别的字符按终端用的 shell 引用。shell 引用
+/// 不了（cmd 碰上 `"`、`%`）就不续接，照旧起原来那条。
 fn quote_id(id: &str) -> Option<String> {
     if id.is_empty() {
         return None;
     }
-    if id
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
-    {
-        return Some(id.to_string());
-    }
-    #[cfg(windows)]
-    {
-        None
-    }
-    #[cfg(not(windows))]
-    {
-        Some(crate::shell_quote(id))
-    }
+    crate::terminal_shell::TerminalShell::detect().quote(id)
 }
 
 #[cfg(test)]
