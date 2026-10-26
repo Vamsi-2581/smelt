@@ -305,6 +305,13 @@ pub(super) fn machines_page() -> SettingPage {
             }
             for (index, remote) in hub.remotes.iter().enumerate() {
                 let runtime_id = remote.connection.runtime_id.clone();
+                let key = remote.runtime.key().clone();
+                // 连得上就能升，不管兼不兼容（见 `runtime_events::upgrade_remote`）。
+                let can_upgrade = matches!(
+                    remote.status,
+                    crate::runtimes::RuntimeStatus::Online { .. }
+                        | crate::runtimes::RuntimeStatus::Incompatible { .. }
+                );
                 // 在线时再写走哪条路、多慢；慢了标黄。
                 let (link, link_tone) =
                     crate::runtimes::runtime_link_detail(remote.runtime.key(), cx);
@@ -356,8 +363,25 @@ pub(super) fn machines_page() -> SettingPage {
                                         .text_xs()
                                         .text_color(if is_online && slow { warning } else { muted })
                                         .child(status),
-                                ),
+                                )
+                                .children(remote.upgrade_note.clone().map(|note| {
+                                    div().text_xs().text_color(warning).child(note)
+                                })),
                         )
+                        .when(can_upgrade, |row| {
+                            row.child(
+                                Button::new(("upgrade-runtime", index))
+                                    .compact()
+                                    .label("升级")
+                                    .tooltip(format!(
+                                        "请这台机器升到 v{}",
+                                        crate::runtimes::DESKTOP_VERSION
+                                    ))
+                                    .on_click(move |_, _window, cx: &mut App| {
+                                        crate::runtime_events::upgrade_remote(&key, cx);
+                                    }),
+                            )
+                        })
                         .child(
                             Button::new(("remove-runtime", index))
                                 .compact()

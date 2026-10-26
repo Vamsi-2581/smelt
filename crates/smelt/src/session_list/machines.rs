@@ -87,6 +87,18 @@ fn machine_actions(
             },
         );
     }
+    // 连得上就能升，不管兼不兼容：升到这个桌面的版本。
+    if crate::runtimes::runtime_can_upgrade(&key, cx) {
+        actions.push(MachineAction {
+            label: "升级运行时",
+            icon: IconName::ArrowUp.into(),
+            separated: false,
+            run: Rc::new({
+                let key = key.clone();
+                move |_window, cx| crate::runtime_events::upgrade_remote(&key, cx)
+            }),
+        });
+    }
     let RuntimeKey::Remote(runtime_id) = key else {
         return actions;
     };

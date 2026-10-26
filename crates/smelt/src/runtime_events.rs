@@ -19,7 +19,7 @@
 //!
 //! 运行时比桌面旧时先请它升到桌面的版本（设计文档 D7，见 [`upgrade_then_probe`]），升完
 //! 再探；每条订阅线程只请一次，升了还对不上就照常标不兼容，不反复请，人点「重新连接」
-//! 才再请一次。
+//! 才再请一次。人也可以随时点「升级运行时」（[`upgrade_remote`]）：连得上就请，不管兼不兼容。
 //!
 //! 别处要读运行时的（工作区目录、配置、额度、终端重连），用 [`wait_online`] 等这里探到
 //! 在线再读，不各自拨号重试。
@@ -103,6 +103,71 @@ pub(crate) fn reconnect(key: &RuntimeKey, cx: &App) {
     {
         handle.reconnect();
     }
+}
+
+/// 人点了「升级运行时」：不管现在兼不兼容，连得上就请它升到这个桌面的版本。
+///
+/// 不经订阅线程：在线时它正阻塞在事件流上，叫不醒。升级走守护协议的 `runtime_upgrade`，
+/// 另开一条连接发，版本对不上也发得过去。升上去了运行时会重启，订阅线程自己察觉断线、
+/// 重连、再探；没升成就当场再探一次，把状态恢复成探到的样子，原因记在这台机器上。
+pub(crate) fn upgrade_remote(key: &RuntimeKey, cx: &mut App) {
+    use crate::runtimes::{DESKTOP_VERSION, PushUpgrade};
+
+    let Some(runtime) = crate::runtimes::runtime(key, cx) else {
+        return;
+    };
+    let Some(status_tx) = cx
+        .try_global::<RuntimeSubscriptions>()
+        .map(|subscriptions| subscriptions.status.clone())
+    else {
+        return;
+    };
+    crate::runtimes::set_upgrade_note(key, None, cx);
+    let _ = status_tx.try_send((
+        key.clone(),
+        RuntimeStatus::Upgrading(format!("正在升级到 v{DESKTOP_VERSION}")),
+    ));
+    let key = key.clone();
+    cx.spawn(async move |cx| {
+        let client = runtime.client().clone();
+        let (outcome, status) = cx
+            .background_executor()
+            .spawn(async move {
+                let outcome = crate::runtimes::push_upgrade(&client);
+                // 升上去了它正在重启，这会儿探只会是离线，留给订阅线程。
+                let status = (outcome != PushUpgrade::Restarting)
+                    .then(|| crate::runtimes::status_of(&client));
+                (outcome, status)
+            })
+            .await;
+        let note = match outcome {
+            PushUpgrade::Restarting => None,
+            PushUpgrade::Current => Some(format!("已经是 v{DESKTOP_VERSION}，没有可升的")),
+            PushUpgrade::Staged(reason) => Some(format!("新版本已装好，{reason}")),
+            PushUpgrade::Unsupported => Some(format!(
+                "这台运行时太旧，不会自动升级，到那台机器上执行一次：{}",
+                crate::runtimes::manual_upgrade_command()
+            )),
+            PushUpgrade::Failed(error) => Some(format!("升级失败：{error}")),
+        };
+        let restarting = note.is_none();
+        let _ = status_tx.try_send((
+            key.clone(),
+            status.unwrap_or_else(|| RuntimeStatus::Upgrading("正在重启".to_string())),
+        ));
+        cx.update(|cx| {
+            crate::runtimes::set_upgrade_note(&key, note, cx);
+            // 版本对不上时订阅线程睡在退避里，可能要等好几分钟：叫醒它照新版本再探。
+            if restarting
+                && let Some(handle) = cx
+                    .try_global::<RuntimeSubscriptions>()
+                    .and_then(|subscriptions| subscriptions.remotes.get(&key))
+            {
+                handle.wake(Wake::Probe);
+            }
+        });
+    })
+    .detach();
 }
 
 /// 请连不上、版本对不上的远程运行时立刻再探一次（打开设置窗口、应用回到前台时），不重新

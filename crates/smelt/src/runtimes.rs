@@ -143,6 +143,8 @@ pub(crate) struct RemoteRuntime {
     /// 最近一次读到的连接路径和延迟。只在连着时有：连上时、iroh 换了路径时、设置停在机器
     /// 页或悬停在机器名上时读（见 [`sync_link_watch`]、[`sample_links`]），不定时读。
     pub(crate) link: Option<RuntimeLink>,
+    /// 人点「升级运行时」之后没升成的原因（已是最新、正忙、太旧、出错）。再点一次清掉。
+    pub(crate) upgrade_note: Option<String>,
 }
 
 /// 到一个远程运行时的连接走哪条路。
@@ -353,6 +355,30 @@ pub(crate) fn local_upgrade_in_hand(cx: &gpui::App) -> bool {
             RuntimeStatus::Incompatible { .. } | RuntimeStatus::Upgrading(_)
         )
     })
+}
+
+/// 远程机器眼下连得上（在线，或连上了但版本对不上）：可以请它升级。升级走守护协议的
+/// `runtime_upgrade`，不经控制方法，版本对不上也发得过去。
+pub(crate) fn runtime_can_upgrade(key: &RuntimeKey, cx: &gpui::App) -> bool {
+    remote_of(key, cx).is_some_and(|remote| {
+        matches!(
+            remote.status,
+            RuntimeStatus::Online { .. } | RuntimeStatus::Incompatible { .. }
+        )
+    })
+}
+
+/// 记下（或清掉）一台远程机器最近一次手动升级没升成的原因。
+pub(crate) fn set_upgrade_note(key: &RuntimeKey, note: Option<String>, cx: &mut gpui::App) {
+    update_hub(cx, |hub| {
+        if let Some(remote) = hub
+            .remotes
+            .iter_mut()
+            .find(|remote| remote.runtime.key() == key)
+        {
+            remote.upgrade_note = note;
+        }
+    });
 }
 
 /// 连不上或版本对不上的远程机器，菜单里给「重新连接」。
@@ -800,6 +826,7 @@ pub(crate) fn start_runtime_hub(cx: &mut gpui::App) {
                         status: RuntimeStatus::Connecting,
                         route,
                         link: None,
+                        upgrade_note: None,
                     },
                     Err(error) => RemoteRuntime {
                         runtime: remote_runtime(
@@ -812,6 +839,7 @@ pub(crate) fn start_runtime_hub(cx: &mut gpui::App) {
                         status: RuntimeStatus::Offline(error),
                         route: RemoteRoute::default(),
                         link: None,
+                        upgrade_note: None,
                     },
                 })
                 .collect();
@@ -1083,6 +1111,7 @@ pub(crate) fn pair_with(uri: &str) -> Result<RemoteRuntime, String> {
         connection,
         route,
         link: None,
+        upgrade_note: None,
     })
 }
 
@@ -1295,6 +1324,7 @@ mod tests {
                     status: online(),
                     route: RemoteRoute::default(),
                     link: None,
+                    upgrade_note: None,
                 }],
                 ..Default::default()
             });
