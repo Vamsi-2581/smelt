@@ -85,7 +85,8 @@ pub(crate) fn ensure_smelt_pi() {
 #[cfg(not(target_os = "linux"))]
 fn install_release(_version: &semver::Version) -> RuntimeUpgradeReply {
     RuntimeUpgradeReply::Failed {
-        error: "只有 Linux 上的运行时这样升级；macOS 上运行时随桌面升级".to_string(),
+        error: "这台运行时随这台机器上的 Smelt 一起更新，不能远程升级：到这台机器上更新 Smelt"
+            .to_string(),
     }
 }
 

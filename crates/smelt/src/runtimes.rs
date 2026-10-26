@@ -125,11 +125,36 @@ pub(crate) enum RuntimeStatus {
         /// 运行时自己报的版本。
         version: String,
         detail: String,
-        /// 是运行时旧：可以请它升到这个桌面的版本（见 [`push_upgrade`]）。
-        runtime_outdated: bool,
+        fix: IncompatibleFix,
     },
     /// 正在请它升到这个桌面的版本，带着给人看的进展。
     Upgrading(String),
+}
+
+/// 版本对不上时该升级哪一边、怎么升。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IncompatibleFix {
+    /// 运行时旧，桌面请它自己升到这个桌面的版本（见 [`push_upgrade`]）。
+    UpgradeRuntime,
+    /// 运行时旧，但它随那台机器上的 Smelt 一起更新，桌面请不动它（见 [`upgrades_remotely`]）。
+    /// 本机守护照样由桌面重启换上 App 里的那份。
+    UpdateSmeltThere,
+    /// 运行时比桌面新：升级这个桌面。
+    UpdateDesktop,
+}
+
+impl IncompatibleFix {
+    /// 运行时比桌面旧。
+    pub(crate) fn runtime_outdated(self) -> bool {
+        !matches!(self, Self::UpdateDesktop)
+    }
+}
+
+/// 这台运行时能不能由桌面远程升级。`runtime_upgrade` 只在 Linux 上实现：Windows 和
+/// macOS 上运行时随那台机器上的 Smelt 桌面一起更新。不报 `os` 的旧运行时照常请它升，
+/// 它不认这个请求时 [`push_upgrade`] 回 `Unsupported`。
+pub(crate) fn upgrades_remotely(os: Option<&str>) -> bool {
+    os.is_none_or(|os| os == "linux")
 }
 
 /// 一个登记过的远程运行时。
@@ -283,6 +308,10 @@ fn indicator(status: &RuntimeStatus, link: Option<&RuntimeLink>) -> RuntimeIndic
     };
     let detail = match status {
         RuntimeStatus::Offline(error) => format!("离线：{error}"),
+        // 光说对不上不够：悬停要看得到为什么、该升级哪一边。
+        RuntimeStatus::Incompatible { detail, .. } if !detail.is_empty() => {
+            format!("{}\n{detail}", link_text(status, link).0)
+        }
         _ => link_text(status, link).0,
     };
     RuntimeIndicator {
@@ -357,14 +386,18 @@ pub(crate) fn local_upgrade_in_hand(cx: &gpui::App) -> bool {
     })
 }
 
-/// 远程机器眼下连得上（在线，或连上了但版本对不上）：可以请它升级。升级走守护协议的
-/// `runtime_upgrade`，不经控制方法，版本对不上也发得过去。
+/// 远程机器眼下连得上（在线，或运行时旧得对不上），而且能远程升级：可以请它升级。
+/// 升级走守护协议的 `runtime_upgrade`，不经控制方法，版本对不上也发得过去。
+/// 随 Smelt 桌面更新的运行时（Windows、macOS）不给这一项，见 [`upgrades_remotely`]。
 pub(crate) fn runtime_can_upgrade(key: &RuntimeKey, cx: &gpui::App) -> bool {
-    remote_of(key, cx).is_some_and(|remote| {
-        matches!(
-            remote.status,
-            RuntimeStatus::Online { .. } | RuntimeStatus::Incompatible { .. }
-        )
+    remote_of(key, cx).is_some_and(|remote| match &remote.status {
+        RuntimeStatus::Online { platform, .. } => upgrades_remotely(
+            platform
+                .as_deref()
+                .and_then(|platform| platform.split('/').next()),
+        ),
+        RuntimeStatus::Incompatible { fix, .. } => *fix == IncompatibleFix::UpgradeRuntime,
+        _ => false,
     })
 }
 
@@ -645,11 +678,21 @@ pub(crate) fn status_of(client: &RuntimeClient) -> RuntimeStatus {
     }
 }
 
-fn incompatible_status(incompatible: &smelt_client::compat::Incompatibility) -> RuntimeStatus {
+fn incompatible_status(
+    incompatible: &smelt_client::compat::Incompatibility,
+    os: Option<&str>,
+) -> RuntimeStatus {
+    use smelt_client::compat::Outdated;
+
+    let fix = match incompatible.outdated {
+        Outdated::Desktop => IncompatibleFix::UpdateDesktop,
+        Outdated::Runtime if upgrades_remotely(os) => IncompatibleFix::UpgradeRuntime,
+        Outdated::Runtime => IncompatibleFix::UpdateSmeltThere,
+    };
     RuntimeStatus::Incompatible {
         version: incompatible.runtime_version.clone(),
         detail: incompatible.to_string(),
-        runtime_outdated: incompatible.outdated == smelt_client::compat::Outdated::Runtime,
+        fix,
     }
 }
 
@@ -728,7 +771,7 @@ fn described_status(
     described: smelt_runtime_client::protocol::control::SystemDescribeResult,
 ) -> RuntimeStatus {
     if let Err(incompatible) = smelt_client::compat::check(&described) {
-        return incompatible_status(&incompatible);
+        return incompatible_status(&incompatible, described.daemon.os.as_deref());
     }
     RuntimeStatus::Online {
         desktop: described.daemon.desktop.unwrap_or(false),
@@ -1394,7 +1437,7 @@ mod tests {
         let incompatible = RuntimeStatus::Incompatible {
             version: "0.9.0-rc.3".into(),
             detail: "运行时 0.9.0-rc.3 较旧，需要升级运行时（控制协议 v1，桌面要 v2）".into(),
-            runtime_outdated: true,
+            fix: IncompatibleFix::UpgradeRuntime,
         };
         assert_eq!(
             link_text(
@@ -1435,7 +1478,7 @@ mod tests {
             &RuntimeStatus::Incompatible {
                 version: "0.9.0".into(),
                 detail: String::new(),
-                runtime_outdated: true,
+                fix: IncompatibleFix::UpgradeRuntime,
             },
             None,
         );
@@ -1537,16 +1580,51 @@ mod tests {
         let RuntimeStatus::Incompatible {
             version,
             detail,
-            runtime_outdated,
+            fix,
         } = status_of(&describe_without("workspace.load"))
         else {
             panic!("缺方法的运行时应判为不兼容");
         };
-        assert!(runtime_outdated, "运行时旧，可以请它升级");
+        assert_eq!(
+            fix,
+            IncompatibleFix::UpgradeRuntime,
+            "Linux 运行时旧，可以请它升级"
+        );
         assert_eq!(version, "0.0.1");
         assert!(detail.contains("0.0.1"), "{detail}");
         assert!(detail.contains("需要升级运行时"), "{detail}");
         assert!(detail.contains("workspace.load"), "{detail}");
+    }
+
+    /// Windows 上的运行时随那台机器上的 Smelt 一起更新：旧了也不请它远程升级。
+    #[test]
+    fn older_windows_runtime_is_updated_on_that_machine() {
+        use smelt_runtime_client::protocol::control::ControlResponse;
+        let client = runtime_answering(|request| {
+            let request_id = request["request_id"].as_str().unwrap();
+            let mut described = described_without("workspace.load");
+            described.daemon.os = Some("windows".to_string());
+            serde_json::to_value(ControlResponse::ok(request_id, described)).unwrap()
+        });
+        let RuntimeStatus::Incompatible { fix, .. } = status_of(&client) else {
+            panic!("缺必需方法的运行时应判为不兼容");
+        };
+        assert_eq!(fix, IncompatibleFix::UpdateSmeltThere);
+        assert!(fix.runtime_outdated());
+    }
+
+    /// 只缺最低协议版本之后才加的方法：照常在线，那一项功能自己降级。
+    #[test]
+    fn runtime_missing_only_optional_methods_is_online() {
+        use smelt_runtime_client::protocol::control::ControlMethod;
+        let optional = ControlMethod::OPTIONAL
+            .first()
+            .expect("至少有一个可选方法")
+            .as_str();
+        assert!(matches!(
+            status_of(&describe_without(optional)),
+            RuntimeStatus::Online { .. }
+        ));
     }
 
     /// 运行时的控制协议比桌面新，拒绝桌面的版本：按它的版本再问一次，读出它是什么版本，
@@ -1580,12 +1658,16 @@ mod tests {
         let RuntimeStatus::Incompatible {
             version,
             detail,
-            runtime_outdated,
+            fix,
         } = status_of(&client)
         else {
             panic!("控制协议对不上应判为不兼容");
         };
-        assert!(!runtime_outdated, "运行时比桌面新，只升不降，不能请它升级");
+        assert_eq!(
+            fix,
+            IncompatibleFix::UpdateDesktop,
+            "运行时比桌面新，只升不降，不能请它升级"
+        );
         assert_eq!(version, "9.9.9");
         assert!(detail.contains("需要升级桌面"), "{detail}");
     }
