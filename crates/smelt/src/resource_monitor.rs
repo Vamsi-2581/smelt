@@ -152,6 +152,8 @@ impl Workspace {
                 {
                     break;
                 }
+                // 轮询例外：CPU 和内存占用没有「变了」的事件，只能定时采；只在设置窗口停在
+                // 这一页时转，看不见就睡在唤醒信号上；周期 2s，上限是这一页开着的时长。
                 smol::future::race(
                     async {
                         let _ = wake_rx.recv().await;
