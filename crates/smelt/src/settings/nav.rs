@@ -4,7 +4,7 @@
 //! 滚动到分组，右侧仍是整页。这里把每个入口做成独立 `SettingsSection`，由壳层
 //! 只渲染当前这一页。分类是默认展开的一级节点，所有二级入口初始都直接可见。
 
-use gpui_component::IconName;
+use gpui_component::{Icon, IconName};
 
 /// 设置窗口当前选中的内容页。深链接（检查更新、登录）也走这里，不再用页下标。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -18,11 +18,15 @@ pub enum SettingsSection {
     AgentWorkspace,
     AgentNotify,
     AgentHooks,
+    /// 这台桌面连着的机器：添加、看状态、移除。
+    CollaborationMachines,
     CollaborationRemote,
     /// 应用更新只在 macOS 上提供（设计文档 D4）。
     #[cfg(target_os = "macos")]
     MaintenanceUpdate,
     MaintenanceDaemon,
+    /// 界面、守护进程和各会话的 CPU 与内存。停在这一页时才采样。
+    MaintenanceResources,
     MaintenanceStorage,
     Shortcuts,
 }
@@ -47,10 +51,12 @@ impl SettingsSection {
             Self::AgentWorkspace => "agent-workspace".into(),
             Self::AgentNotify => "agent-notify".into(),
             Self::AgentHooks => "agent-hooks".into(),
+            Self::CollaborationMachines => "collaboration-machines".into(),
             Self::CollaborationRemote => "collaboration-remote".into(),
             #[cfg(target_os = "macos")]
             Self::MaintenanceUpdate => "maintenance-update".into(),
             Self::MaintenanceDaemon => "maintenance-daemon".into(),
+            Self::MaintenanceResources => "maintenance-resources".into(),
             Self::MaintenanceStorage => "maintenance-storage".into(),
             Self::Shortcuts => "shortcuts".into(),
         }
@@ -79,7 +85,7 @@ impl SettingsCategoryId {
 #[derive(Clone)]
 pub struct SettingsNavLeaf {
     pub title: String,
-    pub icon: IconName,
+    pub icon: Icon,
     pub section: SettingsSection,
     pub keywords: Vec<String>,
 }
@@ -272,28 +278,47 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
             title: "工作区与远程",
             keywords: &["项目"],
             default_open: true,
-            children: vec![leaf(
-                "手机远程",
-                IconName::Globe,
-                SettingsSection::CollaborationRemote,
-                &[
-                    "远程访问",
-                    "开启远程",
-                    "Relay 地址",
-                    "允许远程写入",
-                    "远程",
-                    "手机",
-                    "移动端",
-                    "配对",
-                    "二维码",
-                    "token",
-                    "iroh",
-                    "relay",
-                    "分享",
-                    "只读",
-                    "写入",
-                ],
-            )],
+            children: vec![
+                leaf(
+                    "机器",
+                    Icon::new(gpui_kit_assets::IconName::Server),
+                    SettingsSection::CollaborationMachines,
+                    &[
+                        "多机器",
+                        "远程机器",
+                        "添加机器",
+                        "添加远程机器",
+                        "运行时",
+                        "其他运行时",
+                        "配对串",
+                        "smeltd pair",
+                        "离线",
+                        "版本不兼容",
+                    ],
+                ),
+                leaf(
+                    "手机远程",
+                    IconName::Globe,
+                    SettingsSection::CollaborationRemote,
+                    &[
+                        "远程访问",
+                        "开启远程",
+                        "Relay 地址",
+                        "允许远程写入",
+                        "远程",
+                        "手机",
+                        "移动端",
+                        "配对",
+                        "二维码",
+                        "token",
+                        "iroh",
+                        "relay",
+                        "分享",
+                        "只读",
+                        "写入",
+                    ],
+                ),
+            ],
         },
         SettingsNavCategory {
             id: SettingsCategoryId::System,
@@ -341,6 +366,24 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
                     ],
                 ),
                 leaf(
+                    "资源占用",
+                    IconName::MemoryStick,
+                    SettingsSection::MaintenanceResources,
+                    &[
+                        "资源",
+                        "性能",
+                        "内存",
+                        "内存占用",
+                        "CPU",
+                        "占用",
+                        "卡",
+                        "慢",
+                        "进程",
+                        "活动监视器",
+                        "GPUI",
+                    ],
+                ),
+                leaf(
                     "存储清理",
                     IconName::HardDrive,
                     SettingsSection::MaintenanceStorage,
@@ -365,13 +408,13 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
 
 fn leaf(
     title: &str,
-    icon: IconName,
+    icon: impl Into<Icon>,
     section: SettingsSection,
     keywords: &[&str],
 ) -> SettingsNavLeaf {
     SettingsNavLeaf {
         title: title.to_string(),
-        icon,
+        icon: icon.into(),
         section,
         keywords: keywords.iter().map(|word| (*word).to_string()).collect(),
     }
@@ -517,18 +560,18 @@ mod tests {
         );
         assert_eq!(
             child_titles(&nav, SettingsCategoryId::Workspace),
-            ["手机远程"]
+            ["机器", "手机远程"]
         );
         // 应用更新只在 macOS 上提供：替换的是 .app 包。
         #[cfg(target_os = "macos")]
         assert_eq!(
             child_titles(&nav, SettingsCategoryId::System),
-            ["应用更新", "后台服务", "存储清理"]
+            ["应用更新", "后台服务", "资源占用", "存储清理"]
         );
         #[cfg(not(target_os = "macos"))]
         assert_eq!(
             child_titles(&nav, SettingsCategoryId::System),
-            ["后台服务", "存储清理"]
+            ["后台服务", "资源占用", "存储清理"]
         );
 
         let general = nav
@@ -641,6 +684,8 @@ mod tests {
         for (query, expected) in [
             ("任务完成通知", SettingsSection::AgentNotify),
             ("Relay 地址", SettingsSection::CollaborationRemote),
+            ("添加机器", SettingsSection::CollaborationMachines),
+            ("内存占用", SettingsSection::MaintenanceResources),
             #[cfg(target_os = "macos")]
             ("自动下载安装", SettingsSection::MaintenanceUpdate),
         ] {
@@ -660,9 +705,9 @@ mod tests {
 
         // 少掉的一页是 macOS 的「应用更新」。
         #[cfg(target_os = "macos")]
-        let destination_count = 13;
+        let destination_count = 15;
         #[cfg(not(target_os = "macos"))]
-        let destination_count = 12;
+        let destination_count = 14;
         assert_eq!(visible_destinations.len(), destination_count);
         assert!(visible_destinations.contains(&SettingsSection::Shortcuts));
     }

@@ -1357,6 +1357,8 @@ struct SettingsRenderSnapshot {
     show_daemon_restart_confirm: bool,
     show_update_install_confirm: bool,
     session_manager_open: bool,
+    /// 资源页的数。只在停在资源页时取，别的页用不着拼它。
+    resources: Option<std::rc::Rc<crate::resource_monitor::PanelSnapshot>>,
 }
 
 /// 设置内容画在哪。两处共用同一套快照和节流刷新，只是外壳不同。

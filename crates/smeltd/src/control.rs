@@ -536,6 +536,17 @@ fn dispatch_control(
                 Err(error) => error_value(control_version, request_id, error),
             }
         }
+        ControlMethod::ResourceUsage => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            success_value(
+                control_version,
+                &request_id,
+                super::resource_usage::resource_usage(sessions, acp_sessions),
+            )
+        }
         ControlMethod::SessionAgentBindings => {
             let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
                 Ok(params) => params,

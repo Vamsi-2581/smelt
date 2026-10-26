@@ -113,7 +113,7 @@ pub(crate) enum RuntimeStatus {
     Online {
         version: String,
         platform: Option<String>,
-        /// 装了远程桌面，侧栏和机器面板才给「远程桌面」。
+        /// 装了远程桌面，侧栏才给「远程桌面」。
         desktop: bool,
         /// 运行时报的 `SMELT_HOME`，旧运行时不报。见 [`smelt_home`]。
         smelt_home: Option<String>,
@@ -140,8 +140,8 @@ pub(crate) struct RemoteRuntime {
     pub(crate) status: RuntimeStatus,
     /// 经哪个中继连它，和它的连接器共用：读眼下的连接路径、改中继都经这里。
     route: RemoteRoute,
-    /// 最近一次读到的连接路径和延迟。只在连着时有：连上时、iroh 换了路径时、有人打开机器
-    /// 面板或悬停在机器名上时读（见 [`sync_link_watch`]、[`sample_links`]），不定时读。
+    /// 最近一次读到的连接路径和延迟。只在连着时有：连上时、iroh 换了路径时、设置停在机器
+    /// 页或悬停在机器名上时读（见 [`sync_link_watch`]、[`sample_links`]），不定时读。
     pub(crate) link: Option<RuntimeLink>,
 }
 
@@ -214,7 +214,7 @@ pub(crate) enum LinkTone {
     Warning,
 }
 
-/// 一台机器的连接状态写成字，机器面板里的完整说明：走哪条路、多慢，版本不对时是什么版本。
+/// 一台机器的连接状态写成字：走哪条路、多慢，版本不对时是什么版本。
 fn link_text(status: &RuntimeStatus, link: Option<&RuntimeLink>) -> (String, LinkTone) {
     match status {
         RuntimeStatus::Connecting => ("连接中".to_string(), LinkTone::Muted),
@@ -305,7 +305,7 @@ fn status_of_key<'a>(key: &RuntimeKey, cx: &'a gpui::App) -> Option<&'a RuntimeS
     }
 }
 
-/// 走哪条路、多慢，机器面板里的写法。
+/// 走哪条路、多慢。
 fn link_summary(link: &RuntimeLink) -> String {
     match &link.kind {
         LinkKind::Direct => format!("直连 · {}ms", link.rtt_ms),
@@ -328,7 +328,7 @@ pub(crate) fn runtime_indicator(key: &RuntimeKey, cx: &gpui::App) -> Option<Runt
     }
 }
 
-/// 机器面板里的完整连接说明。
+/// 一台机器的完整连接说明，设置「机器」页用。
 pub(crate) fn runtime_link_detail(key: &RuntimeKey, cx: &gpui::App) -> (String, LinkTone) {
     match key {
         RuntimeKey::Local => ("这台 Mac".to_string(), LinkTone::Muted),
@@ -371,7 +371,7 @@ pub(crate) fn runtime_has_desktop(key: &RuntimeKey, cx: &gpui::App) -> bool {
         .is_some_and(|remote| matches!(remote.status, RuntimeStatus::Online { desktop: true, .. }))
 }
 
-/// 机器列表读不出来，或者有哪台机器离线、版本不对、走中继还很慢：机器按钮上挂个点提醒。
+/// 机器列表读不出来，或者有哪台机器离线、版本不对、走中继还很慢：侧栏「设置」按钮上挂个点提醒。
 pub(crate) fn any_runtime_needs_attention(cx: &gpui::App) -> bool {
     cx.try_global::<RuntimeHub>().is_some_and(|hub| {
         hub.load_error.is_some()
@@ -400,7 +400,7 @@ pub(crate) struct RuntimeHub {
     /// 最近一次添加、移除的失败原因。
     pub(crate) error: Option<String>,
     /// 启动时没读出登记过的机器（比如客户端库版本比程序新）。这时列表里只剩本机，不说
-    /// 一声就像机器全丢了，所以机器面板和设置页都要显示它。
+    /// 一声就像机器全丢了，所以设置「机器」页要显示它。
     pub(crate) load_error: Option<String>,
     /// 本机守护最近一次探到的状态，订阅线程报来（见 `runtime_events`）。还没探过是 `None`。
     pub(crate) local_status: Option<RuntimeStatus>,
@@ -901,7 +901,7 @@ pub(crate) fn sample_link(key: &RuntimeKey, cx: &mut gpui::App) {
     sample(target, cx);
 }
 
-/// 现在就重读各台连着的机器的连接路径和延迟：打开机器面板时调。延迟只在有人看时采样，
+/// 现在就重读各台连着的机器的连接路径和延迟：设置停在机器页时调。延迟只在有人看时采样，
 /// 平时只在 iroh 换了路径时读。
 pub(crate) fn sample_links(cx: &mut gpui::App) {
     let targets: Vec<_> = cx
@@ -1086,7 +1086,7 @@ pub(crate) fn pair_with(uri: &str) -> Result<RemoteRuntime, String> {
     })
 }
 
-/// 改一台机器在这台电脑上的显示名：先改 hub，侧栏和机器面板立刻换上；客户端库在后台写。
+/// 改一台机器在这台电脑上的显示名：先改 hub，侧栏和设置页立刻换上；客户端库在后台写。
 pub(crate) fn rename_runtime(runtime_id: String, name: String, cx: &mut gpui::App) {
     let mut renamed = None;
     update_hub(cx, |hub| {
@@ -1341,7 +1341,7 @@ mod tests {
         assert!(!link_changed(None, None));
     }
 
-    /// 机器面板里说全：走哪条路、多慢，慢了用警告色；版本不对时连上版本和连接路径。
+    /// 设置「机器」页里说全：走哪条路、多慢，慢了用警告色；版本不对时连上版本和连接路径。
     #[test]
     fn the_machine_panel_spells_the_link_out() {
         let status = online();

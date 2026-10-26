@@ -9,6 +9,7 @@ pub mod file_lock;
 pub mod named_pipe;
 pub mod pi_image;
 pub mod process;
+pub mod process_usage;
 pub mod process_wait;
 pub mod ready_pipe;
 pub mod tty_color;

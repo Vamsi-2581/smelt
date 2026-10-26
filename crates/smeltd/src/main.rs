@@ -121,6 +121,7 @@ mod menubar;
 mod peer_messages;
 mod pi_control;
 mod subagent_transcript;
+mod resource_usage;
 use devices::Principal;
 mod program_status;
 mod project_watch;
@@ -754,6 +755,12 @@ impl TerminalChild {
 
     fn pid(&self) -> i32 {
         self.pid
+    }
+
+    /// 还在跑时的 pid。回收之后这个 pid 可能已经给了别的进程，不能再拿它查占用。
+    fn running_pid(&self) -> Option<i32> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        matches!(*state, TerminalChildState::Running).then_some(self.pid)
     }
 
     fn wait_reaped(&self, timeout: Duration) -> bool {

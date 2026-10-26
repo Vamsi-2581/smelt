@@ -11032,6 +11032,7 @@ dependencies = [
  "libc",
  "sha2 0.10.9",
  "smelt-paths",
+ "sysinfo 0.37.2",
  "tempfile",
  "tokio",
  "uuid",
