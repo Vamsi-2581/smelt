@@ -5,7 +5,7 @@
 import { spawn } from "node:child_process";
 import { mkdtempSync, copyFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { basename, join, dirname } from "node:path";
 import { createInterface } from "node:readline";
 import pkg from "../packages/pi-agent/package.json" with { type: "json" };
 
@@ -29,7 +29,8 @@ writeFileSync(
 }
 `,
 );
-const binary = join(dir, "smelt-pi");
+// 沿用原文件名：Windows 上没有 .exe 后缀的文件起不了进程。
+const binary = join(dir, basename(source));
 copyFileSync(source, binary);
 copyFileSync(join(dirname(source), "photon_rs_bg.wasm"), join(dir, "photon_rs_bg.wasm"));
 const { chmodSync } = await import("node:fs");
@@ -52,6 +53,11 @@ const probeResult = await new Promise<{ text: string; code: number | null }>((re
 	});
 	probe.stderr.on("data", (chunk: string) => {
 		text += chunk;
+	});
+	// 起不来时只有 error 没有 exit；不接住它，这个 Promise 永远不落地，发版作业就挂到超时。
+	probe.on("error", (error) => {
+		clearTimeout(timer);
+		resolve({ text: `${text}${error.message}\n`, code: null });
 	});
 	probe.on("exit", (code) => {
 		clearTimeout(timer);
@@ -98,6 +104,8 @@ function fail(message: string): never {
 	rmSync(dir, { recursive: true, force: true });
 	process.exit(1);
 }
+
+child.on("error", (error) => fail(`smelt-pi 起不来：${error.message}`));
 
 child.on("exit", (code, signal) => {
 	if (failed || pending.size === 0) return;
