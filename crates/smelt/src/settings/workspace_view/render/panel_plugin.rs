@@ -199,6 +199,7 @@ fn plugin_item(
     detail.push(match plugin.source {
         PluginSource::User => format!("自己装的 · {}", plugin.root.display()),
         PluginSource::Bundled => "smelt 自带，跟着 smelt 更新".to_string(),
+        #[cfg(debug_assertions)]
         PluginSource::Repo => format!("开发构建从仓库加载 · {}", plugin.root.display()),
     });
     if let Some(error) = &plugin.error {

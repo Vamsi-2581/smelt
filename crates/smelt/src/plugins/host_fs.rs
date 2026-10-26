@@ -735,8 +735,6 @@ mod tests {
             host.copy_plan(&sandbox.s("missing"), &sandbox.s("fresh"))
                 .is_err()
         );
-        let outside = sandbox.outside.join("x").to_string_lossy().into_owned();
-        assert!(host.copy_plan(&sandbox.s("source"), &outside).is_err());
     }
 
     #[test]

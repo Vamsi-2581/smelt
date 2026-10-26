@@ -104,7 +104,8 @@ pub(crate) enum PluginSource {
     User,
     /// App 自带的，跟着 smelt 更新。
     Bundled,
-    /// 开发构建直接读仓库里的 `plugins/`。
+    /// 开发构建直接读仓库里的 `plugins/`。release 构建不从仓库加载，没有这一种。
+    #[cfg(debug_assertions)]
     Repo,
 }
 
