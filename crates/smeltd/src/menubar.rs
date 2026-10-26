@@ -5,17 +5,13 @@
 use objc::declare::ClassDecl;
 use objc::runtime::{Class, Object, Sel};
 use objc::{class, msg_send, sel, sel_impl};
-use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Child;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::thread;
 
 /// 应用图标母图，编进二进制当菜单栏图标（跟 workspace 用的是同一张）。
 const APP_ICON_PNG: &[u8] = include_bytes!("../../../assets/icon-1024.png");
-
-/// 菜单栏拉起、还没收尸的 GUI 启动器。exec 交接时交给继任者收。
-static GUI_CHILD_PIDS: Mutex<BTreeSet<i32>> = Mutex::new(BTreeSet::new());
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -43,7 +39,6 @@ fn spawn_gui(gui: &Path) -> std::io::Result<i32> {
 fn reap_gui_child(child: Child) -> i32 {
     let pid = child.id() as i32;
     drop(child);
-    GUI_CHILD_PIDS.lock().unwrap().insert(pid);
     let spawned = thread::Builder::new()
         .name("smelt-gui-reaper".into())
         .spawn(move || reap_tracked_gui_child(pid));
@@ -55,20 +50,12 @@ fn reap_gui_child(child: Child) -> i32 {
 }
 
 fn reap_tracked_gui_child(pid: i32) {
-    if smelt_sys::process_wait::reap_direct_child(pid) {
-        GUI_CHILD_PIDS.lock().unwrap().remove(&pid);
-    } else {
-        // 没确认收掉就不放弃：pid 留在表里，exec 交接时由继任者接着收。
+    if !smelt_sys::process_wait::reap_direct_child(pid) {
         super::dlog(&format!(
             "menubar: 回收 GUI launcher pid={pid} 失败：{}",
             std::io::Error::last_os_error()
         ));
     }
-}
-
-/// 本模块持有回收权的直接子进程。
-pub(crate) fn tracked_child_pids() -> Vec<i32> {
-    GUI_CHILD_PIDS.lock().unwrap().iter().copied().collect()
 }
 
 extern "C" fn on_open(_this: &Object, _cmd: Sel, _sender: *mut Object) {
@@ -249,7 +236,6 @@ mod tests {
             .spawn()
             .unwrap();
         let blocker_pid = reap_gui_child(blocker);
-        let handoff_contains_blocker = tracked_child_pids().contains(&blocker_pid);
 
         let short_pid = spawn_gui(Path::new("/usr/bin/true")).unwrap();
         let short_reaped =
@@ -262,10 +248,6 @@ mod tests {
         let _ = wait_until_reaped_without_stealing_status(blocker_pid, Duration::from_secs(1));
         let _ = wait_until_reaped_without_stealing_status(short_pid, Duration::from_secs(1));
 
-        assert!(
-            handoff_contains_blocker,
-            "仍存活且由菜单 reaper 持有的 PID 必须进入 exec handoff"
-        );
         assert!(
             short_reaped,
             "一个长生命周期 GUI 不能阻塞后续已退出启动器的回收"
