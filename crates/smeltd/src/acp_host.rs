@@ -1,4 +1,4 @@
-//! ACP 会话托管：open/watch/action/kill/restart，以及无缝升级所需的 ACP 快照。
+//! ACP 会话托管：open/watch/action/kill/restart。
 //!
 //! 从 `main.rs` 整块搬出。连接与归约仍在 `smelt_core::acp_session`；这里只跑守护侧的会话活体。
 
@@ -16,8 +16,9 @@ pub(crate) use watched::Watched;
 // `smelt_core::acp_session::apply_event` 把子进程 agent 发来的协议事件归约
 // 出来——归约逻辑本身跟 GPUI 无关，谁接手连接谁跑，见该模块文件头注释（核心
 // 原因：`ConversationEvent::Permission`/`Elicitation` 带的 responder 绑在连接线程上，
-// 没法跨进程传。因此每个会话由独立 session host 跑完整事件循环；主 smeltd
-// 只持有可重建镜像和一条控制 socket，exec 时不再搬 SDK 内存。
+// 没法跨进程传，只能留在持有连接的进程里）。生产上每个会话跑在独立 session host
+// 里，主 smeltd 只持有可重建镜像和一条控制 socket。拆出宿主原本是为了 exec 升级
+// 不打断对话，这条已随停机升级去掉；是否改回同进程托管见 #128。
 //
 // 状态管理复用终端会话已有的 `SessionState`/`Phase`/`broadcast_state`/
 // `subscribe` 机制：`AcpSession.state` 就是一份跟终端会话同类型的
@@ -61,11 +62,9 @@ pub(crate) use watched::Watched;
 // 断开 acp_open 连接（切标签/关标签/App 退出）只摘连接，不杀会话——这正是
 // 这层要解决的问题（GUI 退出不该带走 ACP 对话）。真要杀走 acp_kill。
 //
-// 「无缝升级」交接 session host 控制 socket + 镜像水位。SDK future、outstanding
-// callback、审批 responder 和 prompt 队列始终留在宿主进程，因此底层 handoff 具备
-// 恢复活跃回合的能力；但正常升级仍在主 daemon 统一等待回合 idle，避免主动打断
-// 用户对话。新 daemon 接管后发 Refresh 全量追平 exec 窗口。旧版 direct-fd handoff
-// 仍保留兼容，接管后立即迁入独立宿主。
+// 升级时停掉旧守护：收割所有 session host 和 provider 进程，进行中的回合记为
+// Interrupted（见 `protocol::lifecycle`）。会话正文在 agent 自己的历史里，新守护
+// 再 open 时用 session/load 续上。
 
 pub(crate) struct AcpOut {
     /// 控制连接和旁观连接各自一条快照写线程。不复用终端的 8MB 字节邮箱：
@@ -192,16 +191,15 @@ pub(crate) struct AcpSession {
     /// 重启时复用——`state.launch` 只存了命令字符串给状态展示用，重启需要
     /// 完整结构化的 `ConversationLaunchSpec`（env 可能带空格，不能靠字符串拼回去）。
     pub(crate) launch_spec: Mutex<Option<smelt_core::agent_kind::ConversationLaunchSpec>>,
-    /// 完整 launch + 临时环境的单向摘要。handoff 不落临时凭据本体，但必须
-    /// 保留相等性判断，否则 daemon exec 后 GUI 一重连就会误判配置变化、杀掉
-    /// 仍在活跃的独立宿主。
+    /// 完整 launch + 临时环境的单向摘要，不存临时凭据本体。GUI 重连 `acp_open`
+    /// 时据此判断启动配置变没变：没变就接回仍在跑的 runtime，不误杀。
     pub(crate) runtime_spec_fingerprint: Mutex<Option<String>>,
     /// ACP 恢复 supervisor 的生命周期状态，不属于可持久化的对话投影。
     pub(crate) restore_state: Mutex<AcpRestoreState>,
     /// 外部智能体/网页配置的临时环境变量。仅在当前 daemon 生命周期内保存，以便
-    /// 强制重启同一 ACP 子进程；不参与 handoff/落盘，防止凭据写入磁盘。
+    /// 强制重启同一 ACP 子进程；不落盘，防止凭据写入磁盘。
     pub(crate) ephemeral_env: Mutex<BTreeMap<String, String>>,
-    /// 用户输入的宿主级路由。`None` 表示尚未确认（旧 handoff 缺失该字段），
+    /// 用户输入的宿主级路由。`None` 表示尚未确认，
     /// 不能当成 Direct；第一次 attach 才采用客户端值。Task Runtime delivery
     /// 不读取它，只由 `acp_submit_input` 使用。
     pub(crate) conversation_binding: Mutex<Option<smelt_core::conversation::ConversationBinding>>,
@@ -450,7 +448,7 @@ pub(crate) fn acp_open_needs_relaunch(
 ) -> bool {
     created
         || (!alive && has_launch_command)
-        // A handoff/reconnect can leave a live handle in Starting without a
+        // A reconnect can leave a live handle in Starting without a
         // canonical id.  Do not hot-attach that half-started runtime when the
         // GUI still has the persisted history identity; relaunch it with that
         // identity so the normal load/new supervisor runs again.
@@ -748,7 +746,7 @@ struct SnapshotLinkInner {
     mailbox: Mutex<SnapshotMailbox>,
     cv: Condvar,
     /// 下一帧发整段帧并重建发送方镜像：对方要了完整快照（`Refresh`），
-    /// 例如守护交接后接手的读端手里没有镜像。
+    /// 例如对方刚连上、手里还没有镜像。
     resync: AtomicBool,
     closed: AtomicBool,
     finishing: AtomicBool,
@@ -1829,8 +1827,7 @@ pub(crate) fn start_acp_event_drain(
 
 /// 主 daemon 的镜像 drain。权威状态和所有 responder 都在独立 session host；
 /// 这里仅按版本合并快照、维护 provider-session 所有权并向 GUI/状态总线广播。
-/// 交接前旧读端会停在安全边界，已预取的半行交给继任者当前缀。版本缺口或
-/// entry 前缀缺失时仍要求 host 发 offset=0 的全量快照。
+/// 版本缺口或 entry 前缀缺失时要求 host 发 offset=0 的全量快照。
 pub(crate) fn start_hosted_snapshot_drain(
     slot: Arc<AcpSlot<AcpSession>>,
     snapshot_rx: smol::channel::Receiver<acp_runtime_host::HostedSnapshotEnvelope>,
@@ -2099,7 +2096,7 @@ pub(crate) fn acp_relaunch(
     // 会话跑独立宿主还是同进程 direct driver，由注册表在构造时定好，而不是在这里
     // 反问「我是不是测试构建」。单测二进制的 `current_exe()` 是 libtest harness，
     // 不是可用的 smeltd entrypoint，所以测试注册表选 SameProcess；独立宿主边界由
-    // 专门的 IPC/handoff 用例覆盖。
+    // 专门的 IPC 用例覆盖。
     if acp_sessions.spawn_policy() == acp_registry::AcpSpawnPolicy::HostedProcess
         && !acp_runtime_host::is_session_host_process()
     {
@@ -2200,8 +2197,8 @@ pub(crate) fn upgrade_released_adapter_launch(
 
 /// 在会话生命周期锁内淘汰当前 provider。先推进 generation，旧 drain 从此不能
 /// 再改归约状态；随后等待连接线程退出，再 SIGKILL + 死亡证明。只有证明了才
-/// 返回 true（亲生：`waitpid`；收养：组缺席探针——handoff 后 successor 永远
-/// 不是父进程）。失败时留下 unreaped_pid，调用方不得 spawn。
+/// 返回 true（亲生：`waitpid`；收养：组缺席探针。收养只出现在 fd 交接之后，
+/// 交接去掉后已不再发生，见 #128）。失败时留下 unreaped_pid，调用方不得 spawn。
 pub(crate) fn retire_acp_runtime(sess: &AcpSession) -> bool {
     sess.connection_generation.fetch_add(1, Ordering::SeqCst);
     // unreaped 重试只观察、不收尸、也不重杀。上次的 wait 还占着这个 pid，

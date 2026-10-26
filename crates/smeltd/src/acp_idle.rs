@@ -18,10 +18,10 @@
 //! - 没有排队的输入；
 //! - 没有在跑的后台任务；
 //! - 不归自动化或插件驱动；
-//! - 不是手机建的远程会话。远程会话只靠槽位里的启动规格才能恢复，升级交接不会
-//!   带走已挂起的槽位。
+//! - 不是手机建的远程会话。远程会话只靠槽位里的启动规格才能恢复，守护重启后
+//!   槽位就不在了。
 //!
-//! 已挂起的槽位没有可交接的 fd，daemon 升级后就不在了。桌面端断线重连会
+//! daemon 升级会停掉旧守护，已挂起的槽位随之不在。桌面端断线重连会
 //! `acp_open`，把它们重新拉起来，再过一轮闲置期后再次挂起。
 //!
 //! 唤醒要把挂起那一刻的会话配置（模型、推理强度、权限模式等）写回新 runtime。
@@ -34,7 +34,7 @@ use super::*;
 /// 没有任何活动这么久之后挂起。
 pub(crate) const ACP_IDLE_SUSPEND_AFTER: Duration = Duration::from_secs(30 * 60);
 /// 到点该挂起、却抢不到会话生命周期锁或 spawn 闸门时，隔多久再试。锁被占着说明
-/// 有人正在操作这个会话（拉起、交接），这样的操作多半会记一次活动，把截止往后推。
+/// 有人正在操作这个会话（拉起、重启），这样的操作多半会记一次活动，把截止往后推。
 /// 上限取改成事件驱动之前的扫描周期。
 // 轮询例外：生命周期锁和 spawn 闸门放开时没有通知可等；周期 1 秒起翻倍，上限 1 分钟。
 const ACP_IDLE_RETRY_FIRST: Duration = Duration::from_secs(1);
@@ -46,7 +46,7 @@ const ACP_CONFIG_RESTORE_TIMEOUT: Duration = Duration::from_secs(10);
 /// 驱动写配置失败时 `status_line` 的前缀（pi_rpc 与 acp_conn 同一句）。
 const CONFIG_UPDATE_FAILURE_PREFIX: &str = "更新会话配置失败";
 
-/// 会话的闲置账本。构造时记一次活动：刚建好或刚交接过来的会话不能在第一轮扫描就被挂起。
+/// 会话的闲置账本。构造时记一次活动：刚建好的会话不能在第一轮扫描就被挂起。
 pub(crate) struct AcpIdleState {
     last_activity_ms: AtomicU64,
     suspended: AtomicBool,
@@ -316,7 +316,7 @@ pub(crate) struct IdleSweep {
 /// 挂起所有闲置够久的会话。
 ///
 /// 每个会话在自己的生命周期锁里复核一遍再动手，锁拿不到就记下，稍后重试。随后拿
-/// spawn 闸门的读锁，挡住升级收集交接。锁序与 `ensure_acp_session` 一致：先
+/// spawn 闸门的读锁，挡住停机收割。锁序与 `ensure_acp_session` 一致：先
 /// 生命周期锁，后闸门。
 pub(crate) fn suspend_idle_acp_sessions(
     acp_sessions: &AcpSessions,

@@ -429,8 +429,8 @@ fn dispatch_snapshot_line(
         let _ = peer_requests.try_send(request.clone());
         return true;
     }
-    // 增量帧经镜像还原成完整的快照帧，和整段帧一样交给合并。镜像接不上只会发生在
-    // 交接后接手的读端上，父进程这时已经要了整段帧，丢掉这一帧等它即可。
+    // 增量帧经镜像还原成完整的快照帧，和整段帧一样交给合并。镜像接不上就丢掉这一帧：
+    // 下一帧的版本缺口会让父进程要整段帧。
     let value = match value.get("delta") {
         Some(delta) => {
             let restored = serde_json::from_value(delta.clone())
@@ -454,7 +454,7 @@ fn dispatch_snapshot_line(
             // 旧实现在这里 `continue`，结果是主 daemon（进而 GUI）的镜像永久冻在
             // 最后一份可解析的快照上，且没有任何日志——会话看起来「只恢复了一半」
             // 并永远停在「正在建立连接」。宁可断开镜像让上层落成可重连的终态，
-            // 也不能静默冻结。半行被撕开也走这里，所以交接必须在停手时把预取字节交出去。
+            // 也不能静默冻结。
             crate::dlog(&format!(
                 "acp 宿主快照无法解析，判定协议不兼容并断开镜像：{error}（{} 字节）",
                 line.len()
