@@ -268,6 +268,7 @@ gpui::actions!(
         OpenSettings,
         CheckForUpdate,
         ReportIssue,
+        OpenDocs,
         SendSelectionToTerminal,
         PrevSession,
         NextSession,
@@ -1417,7 +1418,7 @@ fn next_session_ui_id() -> u64 {
 enum RenameTarget {
     Session(usize),
     Pane(Entity<TerminalView>),
-    /// 侧栏和设置「机器」页里一台远程机器的名字，只在这台电脑上生效。
+    /// 侧栏和设置「远程」页的机器一节里一台远程机器的名字，只在这台电脑上生效。
     Runtime(String),
     History {
         agent: settings::HistorySourceKind,
@@ -2768,7 +2769,7 @@ struct Workspace {
     show_quit_confirm: bool,
     /// 用户已确认退出；防止异步更新收尾期间重复提交退出动作。
     quit_requested: bool,
-    /// 在线更新状态机（检查/下载/暂存就绪），驱动设置页"更新"分区 + 齿轮强调色。
+    /// 在线更新状态机（检查/下载/暂存就绪），驱动设置页"更新"分区 + 侧栏「设置」红点。
     /// 只在 macOS 上存在：更新器替换的是 .app 包（设计文档 D4）。
     #[cfg(target_os = "macos")]
     update_status: updater::UpdateStatus,
@@ -2797,6 +2798,8 @@ struct Workspace {
     /// 编进 id，就能强制它按新的 default 重建一次。不用页号本身当 id：用户手动切走后
     /// 再点同一个入口，页号没变，id 也就没变，照样跳不过去。
     settings_page_nonce: usize,
+    /// 设置「Agent → 高级 → 对话适配器命令」是否展开。只在本次运行内记住。
+    settings_acp_commands_open: bool,
     /// 能力库正文。只在能力库路由可见时存在，见 `sync_capabilities_view`。
     capabilities_view: Option<Entity<settings::SettingsContentView>>,
     /// 设置页字体下拉的选项，首次渲染时算一次就缓存住。
@@ -3325,6 +3328,7 @@ impl Workspace {
             move_app_error: None,
             settings_section: settings::SettingsSection::default(),
             settings_page_nonce: 0,
+            settings_acp_commands_open: false,
             capabilities_view: None,
             font_options: std::cell::OnceCell::new(),
             dock_badge_count: None,
@@ -4124,11 +4128,11 @@ impl Render for Workspace {
             .font_family(settings::resolved_ui_font_family(
                 cx.global::<Appearance>(),
             ))
-            .drag_over::<ExternalPaths>(|style, _paths, _window, _cx| {
+            .drag_over::<ExternalPaths>(|style, _paths, _window, cx| {
                 style
-                    .bg(ui_theme::tint(ui_theme::blue(), 0x28))
+                    .bg(cx.theme().drop_target)
                     .border_2()
-                    .border_color(rgb(ui_theme::blue()))
+                    .border_color(cx.theme().drag_border)
             })
             .on_drop::<ExternalPaths>(cx.listener(
                 |this, paths: &ExternalPaths, _window, cx| {
@@ -4169,12 +4173,9 @@ impl Render for Workspace {
                 this.show_quit_confirm = true;
                 cx.notify();
             }))
-            // Cmd+, / 应用菜单「设置…」：跟齿轮图标共用同一个独立设置窗口。
+            // Cmd+, / 应用菜单「设置…」：跟侧栏「设置」同一个入口，见 `open_settings`。
             .on_action(cx.listener(|this, _: &OpenSettings, _window, cx| {
-                // 不动 nonce：窗口已开着就保持用户当前所在页，只是把它提到前台；
-                // 但下次新开窗口得回到外观页，不能停在「检查更新…」跳过去的那页。
-                this.settings_section = settings::SettingsSection::appearance();
-                this.open_settings_window(cx);
+                this.open_settings(cx);
             }))
             // Cmd+↑ / Cmd+↓：上/下一个会话（按侧栏视觉顺序）。
             .on_action(cx.listener(|this, _: &PrevSession, window, cx| {
@@ -4190,11 +4191,14 @@ impl Render for Workspace {
             if this.update_status.can_check() || this.update_status.can_retry_recovery() {
                 this.check_or_recover_update(false, cx);
             }
-            this.open_settings_section(settings::SettingsSection::maintenance_update(), cx);
+            this.open_settings_section(settings::SettingsSection::app_update(), cx);
         }));
-        // 应用菜单「反馈问题…」：跳内部飞书反馈群。
+        // 应用菜单「帮助」：反馈渠道和帮助文档，链接打包时可换（见 settings::FEEDBACK_URL）。
         frame.on_action(cx.listener(|_this, _: &ReportIssue, _window, cx| {
                 cx.open_url(settings::FEEDBACK_URL);
+            }))
+            .on_action(cx.listener(|_this, _: &OpenDocs, _window, cx| {
+                cx.open_url(settings::DOCS_URL);
             }))
             // 文件内容视图右键菜单里的「发送选中内容到会话」，见 send_open_file_selection。
             .on_action(
@@ -4642,7 +4646,25 @@ fn agent_icon_svg(path: &str) -> Option<&'static [u8]> {
 
 // 组件库的 `Assets` 只打包组件自己用的那一百来个图标；目录里其余的 Lucide 图标要在这里
 // 点名才会编进来，没点名的路径加载不到，图标位置空着。用时写 `gpui_kit_assets::IconName`。
-gpui_kit_assets::icon_assets!(LucideExtras, [Coffee, MessageSquare, Puzzle, Server]);
+gpui_kit_assets::icon_assets!(
+    LucideExtras,
+    [
+        BellOff,
+        Clock,
+        Coffee,
+        Keyboard,
+        MessageSquare,
+        Pin,
+        Puzzle,
+        RefreshCw,
+        RotateCw,
+        Server,
+        SlidersHorizontal,
+        Webhook,
+        Workflow,
+        Wrench,
+    ]
+);
 
 struct SmeltAssets;
 
@@ -4908,7 +4930,8 @@ fn main() {
             ])
             .expect("加载内嵌字体失败");
         // 应用菜单栏：macOS 顶部「Smelt」菜单，含当前版本、「设置… ⌘,」+「退出 Smelt ⌘Q」
-        // （跟齿轮图标一样开独立设置窗口，符合 mac 惯例——系统偏好设置一般都在这）。
+        // （跟侧栏「设置」一样开独立设置窗口，符合 mac 惯例）；帮助文档和反馈问题按 mac 惯例
+        // 放「帮助」菜单。设置「关于」页也有这两项，没有菜单栏的平台从那里进。
         cx.bind_keys(app_key_bindings());
         cx.set_menus(vec![
             Menu::new("Smelt").items([
@@ -4920,9 +4943,12 @@ fn main() {
                 MenuItem::action("检查更新…", CheckForUpdate),
                 MenuItem::Separator,
                 MenuItem::action("设置…", OpenSettings),
-                MenuItem::action("反馈问题…", ReportIssue),
                 MenuItem::Separator,
                 MenuItem::action("退出 Smelt", Quit),
+            ]),
+            Menu::new("帮助").items([
+                MenuItem::action("帮助文档", OpenDocs),
+                MenuItem::action("反馈问题", ReportIssue),
             ]),
         ]);
 

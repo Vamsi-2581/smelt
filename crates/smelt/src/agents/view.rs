@@ -104,7 +104,7 @@ impl Workspace {
         &self,
         id: &'static str,
         label: &'static str,
-        icon: IconName,
+        icon: impl Into<Icon>,
         attention: bool,
         route: WorkspaceRoute,
         entity: Entity<Workspace>,
@@ -936,7 +936,7 @@ impl Workspace {
                                 .on_click(move |_, _, cx| {
                                     entity.update(cx, |workspace, cx| {
                                         workspace.open_settings_section(
-                                            crate::settings::SettingsSection::CollaborationMachines,
+                                            crate::settings::SettingsSection::Remote,
                                             cx,
                                         );
                                     });
@@ -1334,11 +1334,7 @@ impl Workspace {
             })
     }
 
-    fn render_capabilities_needs_runtime(
-        &self,
-        entity: Entity<Workspace>,
-        cx: &App,
-    ) -> AnyElement {
+    fn render_capabilities_needs_runtime(&self, entity: Entity<Workspace>, cx: &App) -> AnyElement {
         let (fg, muted) = {
             let theme = cx.theme();
             (theme.foreground, theme.muted_foreground)
@@ -1377,7 +1373,7 @@ impl Workspace {
                     .on_click(move |_, _, cx| {
                         entity.update(cx, |workspace, cx| {
                             workspace.open_settings_section(
-                                crate::settings::SettingsSection::CollaborationMachines,
+                                crate::settings::SettingsSection::Remote,
                                 cx,
                             );
                         });

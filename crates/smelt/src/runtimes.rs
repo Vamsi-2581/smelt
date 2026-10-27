@@ -86,7 +86,7 @@ pub(crate) fn has_remote_runtimes(cx: &gpui::App) -> bool {
         .is_some_and(|hub| !hub.remotes.is_empty())
 }
 
-/// 设置、能力库里只管本机运行时的页面挂的标签：有远程运行时以后，这些页面改的东西
+/// 设置里只管本机运行时的页面挂的标签：有远程运行时以后，这些页面改的东西
 /// 对远程不生效，得说清楚。
 pub(crate) fn local_runtime_scope_chip() -> gpui_component::tag::Tag {
     use gpui::{ParentElement as _, Styled as _};
@@ -375,7 +375,7 @@ pub(crate) fn runtime_indicator(key: &RuntimeKey, cx: &gpui::App) -> Option<Runt
     }
 }
 
-/// 一台机器的完整连接说明，设置「机器」页用。
+/// 一台机器的完整连接说明，设置「远程」页的机器一节用。
 pub(crate) fn runtime_link_detail(key: &RuntimeKey, cx: &gpui::App) -> (String, LinkTone) {
     match key {
         RuntimeKey::Local => ("这台 Mac".to_string(), LinkTone::Muted),
@@ -475,7 +475,7 @@ pub(crate) struct RuntimeHub {
     /// 最近一次添加、移除的失败原因。
     pub(crate) error: Option<String>,
     /// 启动时没读出登记过的机器（比如客户端库版本比程序新）。这时列表里只剩本机，不说
-    /// 一声就像机器全丢了，所以设置「机器」页要显示它。
+    /// 一声就像机器全丢了，所以设置「远程」页的机器一节要显示它。
     pub(crate) load_error: Option<String>,
     /// 本机守护最近一次探到的状态，订阅线程报来（见 `runtime_events`）。还没探过是 `None`。
     pub(crate) local_status: Option<RuntimeStatus>,
@@ -1235,9 +1235,11 @@ pub(crate) fn runtime_relay(key: &RuntimeKey, cx: &gpui::App) -> String {
 /// 改一台远程机器的中继，`relay` 空着就是 n0 的公共 relay。
 ///
 /// 在线：先请它自己改用新中继（它的远程配置），成了再改这边记下的地址。顺序不能反：先改
-/// 这边就连不上它，没法再请它改。不在线：只改这边记下的——那台机器多半已经在那边改过
-/// （`smeltd relay`），这边跟上才连得回去。改完立刻重连，开着的终端和对话下次开流就走
-/// 新中继（见 [`RemoteRoute`]）。
+/// 这边就连不上它，没法再请它改。它换中继会关掉回复要走的那条连接，回复常常丢：丢了就
+/// 按新中继连过去读它的配置，确认改了再记（见 [`RelaySetReply`]）。
+///
+/// 不在线：只改这边记下的——那台机器多半已经在那边改过（`smeltd relay`），这边跟上才
+/// 连得回去。改完立刻重连，开着的终端和对话下次开流就走新中继（见 [`RemoteRoute`]）。
 pub(crate) fn set_runtime_relay(
     runtime_id: String,
     relay: String,
@@ -1270,10 +1272,29 @@ pub(crate) fn set_runtime_relay(
                         .call::<RemoteConfigGet>(&EmptyParams::default(), timeout)
                         .map_err(|error| format!("读不到那台机器的远程配置：{error}"))?;
                     if config.iroh_relay != relay {
-                        config.iroh_relay = relay;
-                        client
-                            .call::<RemoteConfigSet>(&config, timeout)
-                            .map_err(|error| format!("那台机器没改成：{error}"))?;
+                        config.iroh_relay = relay.clone();
+                        match relay_set_reply(client.call::<RemoteConfigSet>(&config, timeout)) {
+                            RelaySetReply::Applied => {}
+                            RelaySetReply::Rejected(error) => {
+                                return Err(format!("那台机器没改成：{error}"));
+                            }
+                            // 改没改成以它眼下的配置为准：按新中继连过去问一次。它要重绑
+                            // 新中继，拨号由 iroh 的拨号时限兜着，不另外等。
+                            RelaySetReply::Lost(error) => {
+                                let (confirm, _route) = remote_client(&saved)?;
+                                let now = confirm
+                                    .call::<RemoteConfigGet>(&EmptyParams::default(), timeout)
+                                    .map_err(|confirm_error| {
+                                        format!(
+                                            "没收到那台机器的回复（{error}），按新中继也没连上它\
+                                             （{confirm_error}）"
+                                        )
+                                    })?;
+                                if now.iroh_relay != relay {
+                                    return Err(format!("那台机器没改成：{error}"));
+                                }
+                            }
+                        }
                     }
                 }
                 smelt_client_store::client_store()
@@ -1297,6 +1318,28 @@ pub(crate) fn set_runtime_relay(
         });
         Ok(())
     })
+}
+
+/// 请远程机器改中继之后，从回复里能看出的结果。
+#[derive(Debug, PartialEq, Eq)]
+enum RelaySetReply {
+    Applied,
+    /// 它明确回了错：没改。
+    Rejected(String),
+    /// 没拿到回复。它换中继要关掉旧 endpoint，回复走的正是这条连接，常常发不回来；
+    /// 这时它多半已经改了，不能当成没改。
+    Lost(String),
+}
+
+fn relay_set_reply<T>(
+    result: Result<T, smelt_runtime_client::protocol::control::ControlClientError>,
+) -> RelaySetReply {
+    use smelt_runtime_client::protocol::control::ControlClientError;
+    match result {
+        Ok(_) => RelaySetReply::Applied,
+        Err(error @ ControlClientError::Protocol(_)) => RelaySetReply::Rejected(error.to_string()),
+        Err(error) => RelaySetReply::Lost(error.to_string()),
+    }
 }
 
 /// 配对要走公网拨号，比本机调用慢得多。
@@ -1419,7 +1462,10 @@ mod tests {
             assert!(client(&RuntimeKey::Remote("gone".into()), cx).is_none());
             assert!(client(&RuntimeKey::Local, cx).is_some());
             // 远程机器的 SMELT_HOME 取连上时记下的，跟本机的无关。
-            assert_eq!(smelt_home(&far, cx), Some("C:\\Users\\far\\.smelt".to_string()));
+            assert_eq!(
+                smelt_home(&far, cx),
+                Some("C:\\Users\\far\\.smelt".to_string())
+            );
             assert!(smelt_home(&RuntimeKey::Remote("gone".into()), cx).is_none());
             // 路径按那台机器的系统切，跟本机是什么系统无关。
             assert_eq!(path_style(&far, cx), PathStyle::Windows);
@@ -1429,6 +1475,32 @@ mod tests {
             );
             assert_eq!(path_style(&RuntimeKey::Local, cx), PathStyle::LOCAL);
         });
+    }
+
+    /// 改中继的回复丢了不等于没改：那台机器换中继时会关掉回复要走的那条连接。
+    #[test]
+    fn lost_relay_reply_is_not_taken_as_rejected() {
+        use smelt_runtime_client::protocol::control::{
+            ControlClientError, ControlError, ControlErrorCode,
+        };
+        assert_eq!(relay_set_reply(Ok(())), RelaySetReply::Applied);
+        assert!(matches!(
+            relay_set_reply::<()>(Err(ControlClientError::Protocol(ControlError::new(
+                ControlErrorCode::InvalidParams,
+                "bad relay",
+            )))),
+            RelaySetReply::Rejected(_)
+        ));
+        assert!(matches!(
+            relay_set_reply::<()>(Err(ControlClientError::Transport(
+                "smeltd closed the control request without a response".into()
+            ))),
+            RelaySetReply::Lost(_)
+        ));
+        assert!(matches!(
+            relay_set_reply::<()>(Err(ControlClientError::InvalidResponse("eof".into()))),
+            RelaySetReply::Lost(_)
+        ));
     }
 
     #[test]
@@ -1457,7 +1529,7 @@ mod tests {
         assert!(!link_changed(None, None));
     }
 
-    /// 设置「机器」页里说全：走哪条路、多慢，慢了用警告色；版本不对时连上版本和连接路径。
+    /// 设置「远程」页的机器一节里说全：走哪条路、多慢，慢了用警告色；版本不对时连上版本和连接路径。
     #[test]
     fn the_machine_panel_spells_the_link_out() {
         let status = online();
@@ -1760,14 +1832,22 @@ mod tests {
         );
 
         handle.reconnect();
-        // 首档退避 30 秒；叫醒了就不用等。
-        let again = smol::block_on(smol::future::or(
-            async { status_rx.recv().await.ok() },
-            async {
-                smol::Timer::after(std::time::Duration::from_secs(5)).await;
-                None
-            },
-        ));
+        // 首档退避 30 秒；叫醒了就不用等。叫醒先报「连接中」，再报探到的结果。
+        let next = || {
+            smol::block_on(smol::future::or(
+                async { status_rx.recv().await.ok() },
+                async {
+                    smol::Timer::after(std::time::Duration::from_secs(5)).await;
+                    None
+                },
+            ))
+        };
+        let connecting = next();
+        assert!(
+            matches!(connecting, Some((_, RuntimeStatus::Connecting))),
+            "{connecting:?}"
+        );
+        let again = next();
         assert!(
             matches!(again, Some((_, RuntimeStatus::Incompatible { .. }))),
             "{again:?}"
