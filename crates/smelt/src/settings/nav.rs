@@ -66,25 +66,6 @@ impl SettingsSection {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SettingsCategoryId {
-    General,
-    Agent,
-    Workspace,
-    System,
-}
-
-impl SettingsCategoryId {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::General => "general",
-            Self::Agent => "agent",
-            Self::Workspace => "workspace",
-            Self::System => "system",
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct SettingsNavLeaf {
     pub title: String,
@@ -95,10 +76,8 @@ pub struct SettingsNavLeaf {
 
 #[derive(Clone)]
 pub struct SettingsNavCategory {
-    pub id: SettingsCategoryId,
     pub title: &'static str,
     pub keywords: &'static [&'static str],
-    pub default_open: bool,
     pub children: Vec<SettingsNavLeaf>,
 }
 
@@ -106,10 +85,8 @@ pub struct SettingsNavCategory {
 pub fn settings_nav() -> Vec<SettingsNavCategory> {
     vec![
         SettingsNavCategory {
-            id: SettingsCategoryId::General,
             title: "通用",
             keywords: &["常规", "偏好设置"],
-            default_open: true,
             children: vec![
                 leaf(
                     "主题与界面",
@@ -208,10 +185,8 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
             ],
         },
         SettingsNavCategory {
-            id: SettingsCategoryId::Agent,
             title: "模型与 Agent",
             keywords: &["Agent", "智能体", "AI"],
-            default_open: true,
             children: vec![
                 leaf(
                     "Agent 运行环境",
@@ -295,10 +270,8 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
             ],
         },
         SettingsNavCategory {
-            id: SettingsCategoryId::Workspace,
             title: "工作区与远程",
             keywords: &["项目"],
-            default_open: true,
             children: vec![
                 leaf(
                     "机器",
@@ -342,10 +315,8 @@ pub fn settings_nav() -> Vec<SettingsNavCategory> {
             ],
         },
         SettingsNavCategory {
-            id: SettingsCategoryId::System,
             title: "系统",
             keywords: &["维护", "高级"],
-            default_open: true,
             children: vec![
                 #[cfg(target_os = "macos")]
                 leaf(
@@ -537,9 +508,9 @@ mod tests {
         nav.iter().map(|category| category.title).collect()
     }
 
-    fn child_titles(nav: &[SettingsNavCategory], id: SettingsCategoryId) -> Vec<String> {
+    fn child_titles(nav: &[SettingsNavCategory], title: &str) -> Vec<String> {
         nav.iter()
-            .find(|category| category.id == id)
+            .find(|category| category.title == title)
             .map(|category| {
                 category
                     .children
@@ -566,11 +537,11 @@ mod tests {
             ["通用", "模型与 Agent", "工作区与远程", "系统"]
         );
         assert_eq!(
-            child_titles(&nav, SettingsCategoryId::General),
+            child_titles(&nav, "通用"),
             ["主题与界面", "终端", "窗口与背景", "键盘快捷键", "面板插件"]
         );
         assert_eq!(
-            child_titles(&nav, SettingsCategoryId::Agent),
+            child_titles(&nav, "模型与 Agent"),
             [
                 "Agent 运行环境",
                 "新建与启动",
@@ -580,24 +551,24 @@ mod tests {
             ]
         );
         assert_eq!(
-            child_titles(&nav, SettingsCategoryId::Workspace),
+            child_titles(&nav, "工作区与远程"),
             ["机器", "手机远程"]
         );
         // 应用更新只在 macOS 上提供：替换的是 .app 包。
         #[cfg(target_os = "macos")]
         assert_eq!(
-            child_titles(&nav, SettingsCategoryId::System),
+            child_titles(&nav, "系统"),
             ["应用更新", "后台服务", "资源占用", "存储清理"]
         );
         #[cfg(not(target_os = "macos"))]
         assert_eq!(
-            child_titles(&nav, SettingsCategoryId::System),
+            child_titles(&nav, "系统"),
             ["后台服务", "资源占用", "存储清理"]
         );
 
         let general = nav
             .iter()
-            .find(|category| category.id == SettingsCategoryId::General)
+            .find(|category| category.title == "通用")
             .unwrap();
         let sections = general
             .children
@@ -621,15 +592,11 @@ mod tests {
     }
 
     #[test]
-    fn nav_categories_are_default_open_two_level_branches() {
+    fn every_group_has_pages() {
         let nav = settings_nav();
         assert!(
             nav.iter().all(|category| !category.children.is_empty()),
-            "一级分类下面必须有二级页面，不能混入同级叶子"
-        );
-        assert!(
-            nav.iter().all(|category| category.default_open),
-            "所有一级分类都应默认展开，让二级页面直接可见"
+            "分组下面必须有页面，不能混入同级叶子"
         );
     }
 
@@ -637,20 +604,15 @@ mod tests {
     fn search_filters_visible_entries_without_changing_page_structure() {
         let nav = settings_nav();
         let filtered = filter_settings_nav(&nav, "守护");
-        assert_ne!(
-            filtered[0].id, nav[0].id,
-            "搜索会让分类换位，折叠状态必须按 SettingsCategoryId 记账，不能按下标"
-        );
-        assert_eq!(filtered[0].id, SettingsCategoryId::System);
         assert_eq!(titles(&filtered), ["系统"]);
         assert_eq!(
-            child_titles(&filtered, SettingsCategoryId::System),
+            child_titles(&filtered, "系统"),
             ["后台服务"]
         );
 
         let by_category = filter_settings_nav(&nav, "通用");
         assert_eq!(
-            child_titles(&by_category, SettingsCategoryId::General).len(),
+            child_titles(&by_category, "通用").len(),
             5
         );
     }
@@ -662,7 +624,7 @@ mod tests {
         assert!(
             child_titles(
                 &filter_settings_nav(&nav, "模型"),
-                SettingsCategoryId::Agent,
+                "模型与 Agent",
             )
             .is_empty(),
             "分类标题里的一个宽泛词不能把整组结果都留下"
@@ -670,35 +632,35 @@ mod tests {
         assert_eq!(
             child_titles(
                 &filter_settings_nav(&nav, "agent 通知"),
-                SettingsCategoryId::Agent,
+                "模型与 Agent",
             ),
             ["通知", "Agent Hooks"]
         );
         assert_eq!(
             child_titles(
                 &filter_settings_nav(&nav, "agent通知"),
-                SettingsCategoryId::Agent,
+                "模型与 Agent",
             ),
             ["通知"]
         );
         assert_eq!(
             child_titles(
                 &filter_settings_nav(&nav, "后台服务"),
-                SettingsCategoryId::System,
+                "系统",
             ),
             ["后台服务"]
         );
         assert_eq!(
             child_titles(
                 &filter_settings_nav(&nav, "清缓存"),
-                SettingsCategoryId::System,
+                "系统",
             ),
             ["存储清理"]
         );
         assert_eq!(
             child_titles(
                 &filter_settings_nav(&nav, "预设 prompt"),
-                SettingsCategoryId::Agent,
+                "模型与 Agent",
             ),
             ["对话与工作区"]
         );

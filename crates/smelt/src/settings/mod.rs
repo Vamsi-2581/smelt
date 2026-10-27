@@ -40,9 +40,7 @@ mod remote;
 mod workspace;
 mod workspace_view;
 
-pub(crate) use nav::{
-    SettingsCategoryId, SettingsNavCategory, SettingsSection, filter_settings_nav, settings_nav,
-};
+pub(crate) use nav::{SettingsNavCategory, SettingsSection, filter_settings_nav, settings_nav};
 pub(super) use remote::*;
 
 /// 「反馈问题」入口统一跳转的链接。应用菜单 / 侧栏用户菜单 / 设置页三处共用。

@@ -3,12 +3,12 @@
 //! 快照构建和独立窗口生命周期留在父模块；这里只组装各设置页。
 //! 各页实现按主题拆到同目录的 sibling 模块。
 //!
-//! 左侧用默认全部展开的两级导航展示内容页；一级分类只负责分层与折叠，点击二级
-//! 入口只渲染对应页面，不再把整类设置堆进一个可滚动长页。
+//! 左侧导航按分组列出各页：分组只是一行小标题，不折叠、不缩进；点一页只渲染那一页，
+//! 不把整组设置堆进一个可滚动长页。
 
 use super::*;
 use gpui_component::input::{Input, InputState};
-use gpui_component::sidebar::{Sidebar, SidebarItem, SidebarMenuItem};
+use gpui_component::sidebar::{Sidebar, SidebarGroup, SidebarMenu, SidebarMenuItem};
 use gpui_component::tag::Tag;
 
 mod agent;
@@ -23,7 +23,7 @@ mod pi_model;
 mod pi_plugin;
 mod shortcuts;
 
-/// 渲染独立设置页面：左侧两级菜单切换内容页，右侧只显示当前选中项。
+/// 渲染独立设置页面：左侧分组导航切换内容页，右侧只显示当前选中项。
 pub(super) fn render_settings_content(
     entity: Entity<Workspace>,
     snapshot: &SettingsRenderSnapshot,
@@ -151,67 +151,18 @@ fn render_nav(
         .collapsible(false)
         .collapsed(false)
         .header(header)
-        .child(SettingsNavMenu {
-            collapsed: false,
-            items: nav
-                .iter()
-                .map(|category| {
-                    (
-                        category.id,
-                        SidebarMenuItem::new(category.title)
-                            .default_open(category.default_open)
-                            .click_to_toggle(true)
-                            .children(category.children.iter().map(|child| {
-                                let is_active = selected == &child.section;
-                                let entity = entity.clone();
-                                let section = child.section.clone();
-                                SidebarMenuItem::new(child.title.clone())
-                                    .icon(child.icon.clone())
-                                    .active(is_active)
-                                    .on_click(move |_, _, cx| {
-                                        select_section(&entity, section.clone(), cx)
-                                    })
-                            })),
-                    )
-                })
-                .collect(),
-        })
-}
-
-#[derive(Clone)]
-struct SettingsNavMenu {
-    collapsed: bool,
-    items: Vec<(SettingsCategoryId, SidebarMenuItem)>,
-}
-
-impl Collapsible for SettingsNavMenu {
-    fn is_collapsed(&self) -> bool {
-        self.collapsed
-    }
-
-    fn collapsed(mut self, collapsed: bool) -> Self {
-        self.collapsed = collapsed;
-        self
-    }
-}
-
-impl SidebarItem for SettingsNavMenu {
-    fn render(
-        self,
-        _id: impl Into<ElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> impl IntoElement {
-        let mut items = Vec::with_capacity(self.items.len());
-        for (id, item) in self.items {
-            items.push(
-                item.collapsed(self.collapsed)
-                    .render(format!("settings-cat-{}", id.as_str()), window, cx)
-                    .into_any_element(),
-            );
-        }
-        v_flex().gap_2().children(items)
-    }
+        .children(nav.iter().map(|category| {
+            SidebarGroup::new(category.title).child(SidebarMenu::new().children(
+                category.children.iter().map(|child| {
+                    let entity = entity.clone();
+                    let section = child.section.clone();
+                    SidebarMenuItem::new(child.title.clone())
+                        .icon(child.icon.clone())
+                        .active(selected == &child.section)
+                        .on_click(move |_, _, cx| select_section(&entity, section.clone(), cx))
+                }),
+            ))
+        }))
 }
 
 fn select_section(entity: &Entity<Workspace>, section: SettingsSection, cx: &mut App) {
