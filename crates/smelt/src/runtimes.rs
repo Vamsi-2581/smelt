@@ -404,8 +404,12 @@ pub(crate) fn local_upgrade_in_hand(cx: &gpui::App) -> bool {
 
 /// 远程机器眼下连得上（在线，或运行时旧得对不上），而且能远程升级：可以请它升级。
 /// 升级走守护协议的 `runtime_upgrade`，不经控制方法，版本对不上也发得过去。
-/// 随 Smelt 桌面更新的运行时（Windows、macOS）不给这一项，见 [`upgrades_remotely`]。
+/// 随 Smelt 桌面更新的运行时（Windows、macOS）不给这一项，见 [`upgrades_remotely`]。开发构建
+/// 没有对应的发版可升，也不给。
 pub(crate) fn runtime_can_upgrade(key: &RuntimeKey, cx: &gpui::App) -> bool {
+    if smelt_version::RELEASE.is_none() {
+        return false;
+    }
     remote_of(key, cx).is_some_and(|remote| match &remote.status {
         RuntimeStatus::Online { platform, .. } => upgrades_remotely(
             platform
@@ -712,8 +716,13 @@ fn incompatible_status(
     }
 }
 
-/// 这个桌面的版本：请远程运行时升级时就升到它。
-pub(crate) const DESKTOP_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// 这个桌面出自的发版：请远程运行时升级时就升到它。tag 之后的构建，完整版本号带构建信息（见
+/// `smelt_version`），升级要的是 GitHub 上真有的那个 Release。开发构建没有对应的发版，这里
+/// 退回完整版本号只为显示，[`push_upgrade`] 不拿它去请运行时升级。
+pub(crate) const DESKTOP_VERSION: &str = match smelt_version::RELEASE {
+    Some(release) => release,
+    None => smelt_version::VERSION,
+};
 
 /// 请运行时升级（[`push_upgrade`]）的结局。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -736,6 +745,15 @@ const PUSH_UPGRADE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// 请远程运行时升到这个桌面的版本：它自己去 GitHub Release 下载、装好、交接（协议见
 /// `smelt_runtime_client::protocol::runtime_upgrade`）。阻塞，只在后台调。
 pub(crate) fn push_upgrade(client: &RuntimeClient) -> PushUpgrade {
+    match smelt_version::RELEASE {
+        Some(release) => push_upgrade_to(client, release),
+        None => PushUpgrade::Failed(
+            "这是开发构建，没有对应的发版可升：用发布的 Smelt 来升级这台运行时".to_string(),
+        ),
+    }
+}
+
+fn push_upgrade_to(client: &RuntimeClient, version: &str) -> PushUpgrade {
     use smelt_runtime_client::protocol::daemon::DaemonOperation;
     use smelt_runtime_client::protocol::runtime_upgrade::RuntimeUpgradeReply;
     use std::io::BufRead as _;
@@ -746,7 +764,7 @@ pub(crate) fn push_upgrade(client: &RuntimeClient) -> PushUpgrade {
     };
     let request = serde_json::json!({
         "op": DaemonOperation::RuntimeUpgrade,
-        "version": DESKTOP_VERSION,
+        "version": version,
     });
     if let Err(error) = smelt_runtime_client::protocol::write_json_line(&mut stream, &request) {
         return PushUpgrade::Failed(format!("发不出升级请求：{error}"));
@@ -1855,6 +1873,8 @@ mod tests {
         handle.stop();
     }
 
+    const UPGRADE_TARGET: &str = "2026.1027.0";
+
     /// 假运行时：读到首行升级请求后按顺序回这几行，然后断开。
     fn runtime_replying(lines: &'static [&'static str]) -> RuntimeClient {
         use std::io::{BufRead, Write};
@@ -1867,7 +1887,7 @@ mod tests {
                     .unwrap();
                 let request: serde_json::Value = serde_json::from_str(&line).unwrap();
                 assert_eq!(request["op"], "runtime_upgrade");
-                assert_eq!(request["version"], DESKTOP_VERSION);
+                assert_eq!(request["version"], UPGRADE_TARGET);
                 for reply in lines {
                     writeln!(&server, "{reply}").unwrap();
                 }
@@ -1881,7 +1901,7 @@ mod tests {
     #[test]
     fn a_runtime_that_hangs_up_without_a_word_cannot_upgrade_itself() {
         assert_eq!(
-            push_upgrade(&runtime_replying(&[])),
+            push_upgrade_to(&runtime_replying(&[]), UPGRADE_TARGET),
             PushUpgrade::Unsupported
         );
     }
@@ -1890,7 +1910,7 @@ mod tests {
     #[test]
     fn hanging_up_after_accepting_means_go_look_again() {
         assert_eq!(
-            push_upgrade(&runtime_replying(&[r#"{"state":"accepted"}"#])),
+            push_upgrade_to(&runtime_replying(&[r#"{"state":"accepted"}"#]), UPGRADE_TARGET),
             PushUpgrade::Restarting
         );
     }
@@ -1898,21 +1918,27 @@ mod tests {
     #[test]
     fn the_runtime_says_how_the_upgrade_ended() {
         assert_eq!(
-            push_upgrade(&runtime_replying(&[
-                r#"{"state":"accepted"}"#,
-                r#"{"state":"failed","error":"GitHub 上没有 v9.9.9"}"#,
-            ])),
+            push_upgrade_to(
+                &runtime_replying(&[
+                    r#"{"state":"accepted"}"#,
+                    r#"{"state":"failed","error":"GitHub 上没有 v9.9.9"}"#,
+                ]),
+                UPGRADE_TARGET,
+            ),
             PushUpgrade::Failed("GitHub 上没有 v9.9.9".into())
         );
         assert_eq!(
-            push_upgrade(&runtime_replying(&[
-                r#"{"state":"accepted"}"#,
-                r#"{"state":"staged","reason":"ACP 会话仍有未完成请求"}"#,
-            ])),
+            push_upgrade_to(
+                &runtime_replying(&[
+                    r#"{"state":"accepted"}"#,
+                    r#"{"state":"staged","reason":"ACP 会话仍有未完成请求"}"#,
+                ]),
+                UPGRADE_TARGET,
+            ),
             PushUpgrade::Staged("ACP 会话仍有未完成请求".into())
         );
         assert_eq!(
-            push_upgrade(&runtime_replying(&[r#"{"state":"current"}"#])),
+            push_upgrade_to(&runtime_replying(&[r#"{"state":"current"}"#]), UPGRADE_TARGET),
             PushUpgrade::Current
         );
     }
