@@ -53,6 +53,9 @@ pub struct Palette {
     // ---- 文字（由强到弱） ----
     /// 标题 / 强调正文。
     pub text_bright: u32,
+    /// 选中行的字：主题的 `sidebar.accent.foreground`。跟组件库侧栏选中项一样，选中靠底色、
+    /// 这个字色和中等字重一起表达。
+    pub text_selected: u32,
     /// 正文。
     pub text: u32,
     /// 次级正文。正文和 `muted_foreground` 的中间。
@@ -152,6 +155,7 @@ struct ThemeRoles {
     list_hover: Hsla,
     list_active: Hsla,
     sidebar_accent: Hsla,
+    sidebar_accent_foreground: Hsla,
     list_active_border: Hsla,
     title_bar: Hsla,
     status_bar: Hsla,
@@ -179,6 +183,7 @@ fn palette_from_theme(theme: &gpui_component::Theme) -> Palette {
         list_hover: theme.list_hover,
         list_active: theme.list_active,
         sidebar_accent: theme.sidebar_accent,
+        sidebar_accent_foreground: theme.sidebar_accent_foreground,
         list_active_border: theme.list_active_border,
         title_bar: theme.title_bar,
         status_bar: theme.status_bar,
@@ -229,6 +234,8 @@ fn palette_from_roles(theme: &ThemeRoles) -> Palette {
     let yellow = solid(theme.warning, theme.background);
     let blue = solid(theme.blue, theme.background);
     let accent = emphasis(link, fg, bg, active_border, blue);
+    let selected = selected_fill(theme.sidebar_accent, theme.list_active, theme.sidebar);
+    let text_selected = solid(theme.sidebar_accent_foreground, theme.sidebar);
     Palette {
         bg_rail: bg,
         bg_stage: bg,
@@ -237,7 +244,7 @@ fn palette_from_roles(theme: &ThemeRoles) -> Palette {
         bg_card: card,
         bg_hover: control_hover,
         bg_row_hover: row_hover,
-        bg_selected: selected_fill(theme.sidebar_accent, theme.list_active, theme.sidebar),
+        bg_selected: selected,
         bg_status: solid(theme.status_bar, theme.background),
         border_dim: solid(theme.sidebar_border, theme.background),
         border,
@@ -245,6 +252,7 @@ fn palette_from_roles(theme: &ThemeRoles) -> Palette {
         border_loud: solid(theme.input, theme.background),
         border_focus: solid(theme.ring, theme.background),
         text_bright: fg,
+        text_selected,
         text: fg,
         text_mid: mix(fg, muted_fg, TEXT_MID_MIX),
         text_muted: muted_fg,
@@ -344,6 +352,7 @@ pub(crate) fn builtin_fallback(light: bool) -> Palette {
         border_loud: border,
         border_focus: border,
         text_bright: fg,
+        text_selected: fg,
         text: fg,
         text_mid: mix(fg, muted, TEXT_MID_MIX),
         text_muted: muted,
@@ -472,6 +481,7 @@ slots!(
     border_loud,
     border_focus,
     text_bright,
+    text_selected,
     text,
     text_mid,
     text_muted,
@@ -774,6 +784,7 @@ mod tests {
             list_hover: rgba(0xffffff40).into(),
             list_active: rgba(0x1e40af33).into(),
             sidebar_accent: opaque(0x3a3a3a),
+            sidebar_accent_foreground: opaque(0xfafafa),
             list_active_border: opaque(0x1d4ed8),
             title_bar: opaque(0x171717),
             status_bar: opaque(0x0a0a0a),
@@ -871,6 +882,13 @@ mod tests {
             palette.bg_selected,
             solid(roles.sidebar_accent, roles.sidebar)
         );
+    }
+
+    #[test]
+    fn selected_rows_use_the_sidebar_accent_ink() {
+        let mut roles = sample_roles();
+        roles.sidebar_accent_foreground = opaque(0xffd866);
+        assert_eq!(palette_from_roles(&roles).text_selected, 0xffd866);
     }
 
     #[test]
