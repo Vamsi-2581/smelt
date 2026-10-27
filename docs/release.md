@@ -1,6 +1,6 @@
 # 发版
 
-推 `v*` tag 触发 `.github/workflows/release.yml`，产物都传到同一个 GitHub Release：
+推 `v*` tag 触发 `.github/workflows/release.yml`，产物都传到同一个 GitHub Release（iOS 例外，传到 TestFlight）：
 
 | 产物 | job | 说明 |
 |---|---|---|
@@ -8,6 +8,7 @@
 | `smeltd-<版本>-linux-{x86_64,aarch64}.tar.gz`、`install.sh` | `linux` → `linux-release` | 两种架构各自原生构建，见 `docs/archive/remote-runtime.html` 的 D7 |
 | `Smelt-<版本>-android-arm64.apk` | `android` → `android-release` | 正式签名（`SMELT_ANDROID_*` secrets），没配签名直接失败 |
 | `smelt-<版本>-windows-x86_64-setup.exe` | `windows` → `windows-release` | Inno Setup 安装程序，`smelt.exe`、`smelt.com`、`smeltd.exe`、`smelt-notify.exe`、`smelt-pi.exe` 装在同一个目录。第一版不签名，见下面的「Windows」 |
+| iOS 构建（TestFlight） | `ios`（macos-26） | 传到 App Store Connect，处理完自动发给 TestFlight 内部测试组，不挂 Release。签名见下面的「iOS 签名」 |
 | `SHA256SUMS` | `linux-release` → `checksums` | 先只含 Linux 包（一键安装和运行时自动升级马上能用），全部产物到齐后重写成覆盖所有产物 |
 
 ## 发版步骤
@@ -69,17 +70,22 @@ tag 带 `-` 后缀就发成预发布：不会成为 Latest，Linux 一键安装�
 直接是 `2026.1105.0`），App Store 只要求递增。
 
 - Android：发版流水线自动出包，跟着每次发版走，见上面的「版本号」。
-- iOS：本地出包、手动上传。`scripts/release.sh` 在本地打好 tag 之后就能出包，不必等推送：协议抬高最低版本的
-  那种发版，按「本地打 tag → 出 iOS 包传 TestFlight → 推送」的顺序走。在 tag 上执行：
+- iOS：发版流水线的 `ios` job 每次发版都传一个构建到 TestFlight，内部测试组自动收到（组设置里要开着「自动分发」；
+  出口合规已在 `Info.plist` 声明，构建不会卡在「缺少合规证明」）。外部测试和上架都要过 Apple 审核，暂时不做；
+  要不要提交 App Store 审核，按上面两种情况在 App Store Connect 里手动选构建提交。
+
+  协议抬高最低版本的那种发版要先上 TestFlight 再推 tag，流水线做不到这个顺序，要在本地出包上传。
+  `scripts/release.sh` 在本地打好 tag 之后就能出包，不必等推送，按「本地打 tag → 出 iOS 包传 TestFlight → 推送」走。
+  推送后流水线会再传一个同版本号的构建，构建号更大，不冲突。在 tag 上执行：
 
   ```sh
   git checkout v<版本>
-  make ios        # = scripts/build-ios.sh，产物在 mobile/build/ios/ipa/
+  scripts/build-ios.sh --upload   # 出包直接上传；不带 --upload（= make ios）只出 ipa，在 mobile/build/ios/ipa/
   ```
 
   脚本只在当前提交正好是工作区版本的 tag、`mobile/` 和 `crates/` 没有未提交改动时出包，保证包和发版的代码对得上。
   签名用 `mobile/ios/Flutter/SigningDefaults.xcconfig` 里的正式团队和 Bundle ID，导出设置在
-  `mobile/ios/ExportOptions.plist`。上传用 Transporter 或 Xcode。
+  `mobile/ios/ExportOptions.plist`。本地用 Xcode 里登录的账号签名。
 
 ## Windows
 
@@ -122,4 +128,20 @@ cd mobile && flutter build apk --release --target-platform android-arm64 \
   --build-name 2026.1023.0 --build-number <比线上大的数>
 ```
 
-iOS 没有发版流水线：免费开发者账号只能直装到自己的设备（`scripts/install-ios-profile.sh`）。
+## iOS 签名
+
+自动签名，团队和 Bundle ID 见上面的「移动端」。CI 上没有 Xcode 账号，用 repo secrets 代替：
+
+- App Store Connect API 密钥：导出时用云端托管的分发证书签名，再直接上传。私钥在 Apple，CI 上不放分发证书。
+  在 App Store Connect → 用户和访问 → 集成 → 团队密钥里建，权限选 Admin（云端托管证书要这个权限）。
+  - `SMELT_ASC_API_KEY_P8`：下载的 `AuthKey_<Key ID>.p8` 的全部内容（只能下载一次）
+  - `SMELT_ASC_API_KEY_ID`：Key ID
+  - `SMELT_ASC_API_ISSUER_ID`：同一页上方的 Issuer ID
+- 一张固定的 Apple Development 证书：归档时要一张本机有私钥的开发证书，不给的话 Xcode 每次用密钥新建一张，
+  团队里越攒越多。从钥匙串导出证书和私钥成 .p12：
+  - `SMELT_IOS_DEV_CERT_P12_BASE64`：`base64 -i dev.p12 | pbcopy`
+  - `SMELT_IOS_DEV_CERT_P12_PASSWORD`：导出时设的密码
+
+  证书一年过期，到期换一张、更新这两个 secret。
+
+缺任何一个 `ios` job 都直接失败。

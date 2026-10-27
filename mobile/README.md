@@ -52,8 +52,10 @@ that developer build's Keychain pairing data across upgrades.
 
 Release does not load developer overrides: it signs with the production team
 and Bundle ID in `ios/Flutter/SigningDefaults.xcconfig`. Build App Store /
-TestFlight packages with `make ios` from the repository root, on the release
-tag; it stamps the release version (see `docs/release.md`, section 移动端).
+TestFlight packages are built and uploaded by the release workflow on every
+tag; to build one locally, run `make ios` (or `scripts/build-ios.sh --upload`)
+from the repository root on the release tag. Both stamp the release version
+(see `docs/release.md`, section 移动端).
 
 ## Android development
 
