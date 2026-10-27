@@ -2,8 +2,10 @@
 # 发版：按日期取号，改工作区版本、更新 Cargo.lock、提交、打 tag。不推送，最后打印推送命令。
 # 取号规则见 docs/release.md 的「版本号」。
 #
-#   scripts/release.sh             正式版：有进行中的 rc 就去掉 -rc.N 发它，否则取今天的新号
-#   scripts/release.sh --rc        预发布：有进行中的 rc 就 rc.N+1，否则今天的新号加 -rc.1
+#   scripts/release.sh             正式版：今天有进行中的 rc 就去掉 -rc.N 发它，否则取今天的新号
+#   scripts/release.sh --rc        预发布：今天有进行中的 rc 就 rc.N+1，否则今天的新号加 -rc.1
+#
+# 日期一律是打 tag 那天：前几天没发完的 rc 不再接着用旧日期，取今天的新号。
 #   scripts/release.sh --dry-run   只算出版本号，什么都不改（可与 --rc 同用）
 #
 # Cargo.toml 的版本平时就是最近发过的那个 tag，脚本靠它判断有没有进行中的 rc。
@@ -54,10 +56,11 @@ current="$(workspace_version)"
 git rev-parse -q --verify "refs/tags/v$current" >/dev/null \
   || die "Cargo.toml 的 $current 还没有对应的 tag v${current}；版本号应只由本脚本改"
 
+today="$(date +%Y).$((10#$(date +%m)))$(date +%d)"
+
 # 今天的新号：当天已有的号（含 rc）里最大的 N 加一，没有就从 0 起。
 next_today() {
-  local today n=-1 tag rest
-  today="$(date +%Y).$((10#$(date +%m)))$(date +%d)"
+  local n=-1 tag rest
   while read -r tag; do
     rest="${tag#"v$today."}"
     rest="${rest%%-*}"
@@ -66,7 +69,7 @@ next_today() {
   echo "$today.$((n + 1))"
 }
 
-if [[ "$current" == *-rc.* ]]; then
+if [[ "$current" == *-rc.* && "${current%%-*}" == "$today".* ]]; then
   base="${current%%-*}"
   if ((rc)); then
     version="$base-rc.$((${current##*-rc.} + 1))"
