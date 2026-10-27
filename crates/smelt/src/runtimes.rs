@@ -1,6 +1,7 @@
 //! 桌面挂着的运行时（设计文档 D6）。本机运行时总在；远程运行时来自
 //! 客户端库里登记的连接。会话、视图各自记着自己属于哪个运行时，调用、连接都发给它。
 
+use smelt_client::runtime_path::PathStyle;
 use smelt_runtime_client::RuntimeClient;
 
 pub(crate) use smelt_client::runtime::{Runtime, RuntimeKey};
@@ -33,6 +34,21 @@ pub(crate) fn smelt_home(key: &RuntimeKey, cx: &gpui::App) -> Option<String> {
             smelt_paths::smelt_home().and_then(|path| path.to_str().map(str::to_owned))
         }
         RuntimeKey::Remote(_) => remote_of(key, cx)?.connection.smelt_home.clone(),
+    }
+}
+
+/// 那台机器上的路径（会话 cwd、项目根）按哪种系统的规则切：本机就是这台电脑；远程的取
+/// 连上时记下的 `os`，还没连上过当 POSIX——运行时开始支持 Windows 之前就在报 `os` 了，
+/// 不报的只会是 Linux、macOS。
+pub(crate) fn path_style(key: &RuntimeKey, cx: &gpui::App) -> PathStyle {
+    match key {
+        RuntimeKey::Local => PathStyle::LOCAL,
+        RuntimeKey::Remote(_) => {
+            match remote_of(key, cx).and_then(|remote| remote.connection.os.as_deref()) {
+                Some("windows") => PathStyle::Windows,
+                _ => PathStyle::Posix,
+            }
+        }
     }
 }
 
@@ -800,7 +816,7 @@ pub(crate) fn set_status(key: &RuntimeKey, status: RuntimeStatus, cx: &mut gpui:
         return;
     }
     let online = matches!(status, RuntimeStatus::Online { .. });
-    let mut learned_home = None;
+    let mut learned = None;
     update_hub(cx, |hub| match key {
         RuntimeKey::Local => hub.local_status = Some(status),
         RuntimeKey::Remote(_) => {
@@ -809,16 +825,33 @@ pub(crate) fn set_status(key: &RuntimeKey, status: RuntimeStatus, cx: &mut gpui:
                 .iter_mut()
                 .find(|remote| remote.runtime.key() == key)
             {
-                // SMELT_HOME 记在机器上并落库：离线时、下次启动还没连上时也要认得出它的
-                // 智能体对话。
+                // SMELT_HOME 和所在系统记在机器上并落库：离线时、下次启动还没连上时也要
+                // 认得出它的智能体对话、切得对它的路径。
                 if let RuntimeStatus::Online {
-                    smelt_home: Some(home),
+                    smelt_home,
+                    platform,
                     ..
                 } = &status
-                    && remote.connection.smelt_home.as_ref() != Some(home)
                 {
-                    remote.connection.smelt_home = Some(home.clone());
-                    learned_home = Some(remote.connection.clone());
+                    let os = platform
+                        .as_deref()
+                        .and_then(|platform| platform.split('/').next());
+                    let mut changed = false;
+                    if let Some(home) = smelt_home
+                        && remote.connection.smelt_home.as_ref() != Some(home)
+                    {
+                        remote.connection.smelt_home = Some(home.clone());
+                        changed = true;
+                    }
+                    if let Some(os) = os
+                        && remote.connection.os.as_deref() != Some(os)
+                    {
+                        remote.connection.os = Some(os.to_string());
+                        changed = true;
+                    }
+                    if changed {
+                        learned = Some(remote.connection.clone());
+                    }
                 }
                 if !connected(&status) {
                     remote.link = None;
@@ -827,13 +860,13 @@ pub(crate) fn set_status(key: &RuntimeKey, status: RuntimeStatus, cx: &mut gpui:
             }
         }
     });
-    if let Some(connection) = learned_home {
+    if let Some(connection) = learned {
         cx.background_executor()
             .spawn(async move {
                 if let Err(error) = smelt_client_store::client_store()
                     .and_then(|store| store.put_runtime_connection(&connection))
                 {
-                    eprintln!("[runtimes] 保存机器的 SMELT_HOME 失败：{error}");
+                    eprintln!("[runtimes] 保存机器的 SMELT_HOME / 系统失败：{error}");
                 }
             })
             .detach();
@@ -1116,6 +1149,7 @@ pub(crate) fn pair_with(uri: &str) -> Result<RemoteRuntime, String> {
         endpoint_id: pairing.endpoint_id,
         relay_url: pairing.relay_url,
         smelt_home: None,
+        os: None,
         added_at_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_millis() as i64)
@@ -1145,6 +1179,7 @@ pub(crate) fn pair_with(uri: &str) -> Result<RemoteRuntime, String> {
         .clone()
         .unwrap_or_else(|| connection.endpoint_id.chars().take(8).collect());
     connection.smelt_home = described.daemon.smelt_home.clone();
+    connection.os = described.daemon.os.clone();
     smelt_client_store::client_store()
         .and_then(|store| store.put_runtime_connection(&connection))
         .map_err(|error| format!("保存运行时失败：{error}"))?;
@@ -1358,7 +1393,8 @@ mod tests {
                         endpoint_id: String::new(),
                         relay_url: None,
                         added_at_ms: 0,
-                        smelt_home: Some("/home/far/.smelt".into()),
+                        smelt_home: Some("C:\\Users\\far\\.smelt".into()),
+                        os: Some("windows".into()),
                     },
                     runtime: remote_runtime(
                         "far",
@@ -1383,8 +1419,15 @@ mod tests {
             assert!(client(&RuntimeKey::Remote("gone".into()), cx).is_none());
             assert!(client(&RuntimeKey::Local, cx).is_some());
             // 远程机器的 SMELT_HOME 取连上时记下的，跟本机的无关。
-            assert_eq!(smelt_home(&far, cx), Some("/home/far/.smelt".to_string()));
+            assert_eq!(smelt_home(&far, cx), Some("C:\\Users\\far\\.smelt".to_string()));
             assert!(smelt_home(&RuntimeKey::Remote("gone".into()), cx).is_none());
+            // 路径按那台机器的系统切，跟本机是什么系统无关。
+            assert_eq!(path_style(&far, cx), PathStyle::Windows);
+            assert_eq!(
+                path_style(&RuntimeKey::Remote("gone".into()), cx),
+                PathStyle::Posix
+            );
+            assert_eq!(path_style(&RuntimeKey::Local, cx), PathStyle::LOCAL);
         });
     }
 

@@ -97,6 +97,7 @@ use gpui_component::input::{
 use gpui_component::resizable::ResizableState;
 use gpui_component::slider::SliderState;
 use gpui_component::*;
+use smelt_client::runtime_path::PathStyle;
 use terminal_view::TerminalView;
 
 use file_tree::{DeleteFileTarget, OpenFile, SearchState};
@@ -1254,6 +1255,9 @@ impl Session {
                 let view = view.read(cx);
                 let title = view.auto_title();
                 let cwd = view.cwd();
+                let dir = cwd.as_deref().and_then(|cwd| {
+                    crate::runtimes::path_style(view.runtime().key(), cx).file_name(cwd.trim())
+                });
                 let fallback = self
                     .agent_definition_id
                     .as_deref()
@@ -1269,11 +1273,7 @@ impl Session {
                         .unwrap_or(fallback)
                         .to_string()
                 } else {
-                    smelt_model::session_title::acp_display_title(
-                        title.as_deref(),
-                        fallback,
-                        cwd.as_deref(),
-                    )
+                    smelt_model::session_title::acp_display_title(title.as_deref(), fallback, dir)
                 }
             }),
         }
@@ -2000,14 +2000,17 @@ pub(crate) fn sidebar_groups(
 }
 
 /// 显示名撞车时往前补 `extra` 段父目录：`/a/b/smelt` + 1 → `b · smelt`。
-/// base 是这一组本来的显示名（目录末段）。
-fn label_with_parents(root: &str, base: &str, extra: usize) -> String {
+/// base 是这一组本来的显示名（目录末段）。root 按那台机器的系统切（`style`）。
+fn label_with_parents(style: PathStyle, root: &str, base: &str, extra: usize) -> String {
     if extra == 0 {
         return base.to_string();
     }
+    let (separators, joiner): (&[char], &str) = match style {
+        PathStyle::Posix => (&['/'], "/"),
+        PathStyle::Windows => (&['\\', '/'], "\\"),
+    };
     let segs: Vec<&str> = root
-        .trim_end_matches('/')
-        .split('/')
+        .split(separators)
         .filter(|s| !s.is_empty())
         .collect();
     let end = segs.len().saturating_sub(1); // base 已经代表末段
@@ -2015,11 +2018,12 @@ fn label_with_parents(root: &str, base: &str, extra: usize) -> String {
     if start >= end {
         return base.to_string();
     }
-    format!("{} · {}", segs[start..end].join("/"), base)
+    format!("{} · {}", segs[start..end].join(joiner), base)
 }
 
-/// 给重名的分组逐步补父目录段，直到互不相同（或路径已经补到顶）。
-fn disambiguate_labels(groups: &mut [ProjectGroup]) {
+/// 给重名的分组逐步补父目录段，直到互不相同（或路径已经补到顶）。分组都在同一个运行时
+/// 上，路径按它的系统切（`style`）。
+fn disambiguate_labels(style: PathStyle, groups: &mut [ProjectGroup]) {
     let bases: Vec<String> = groups.iter().map(|group| group.label.clone()).collect();
     let mut extra = vec![0usize; groups.len()];
     // 每轮给所有重名组多补一段；路径最深也就那么几段，8 轮足够收敛。
@@ -2040,7 +2044,7 @@ fn disambiguate_labels(groups: &mut [ProjectGroup]) {
         let mut changed = false;
         for i in dup {
             let next = extra[i] + 1;
-            let candidate = label_with_parents(&groups[i].root, &bases[i], next);
+            let candidate = label_with_parents(style, &groups[i].root, &bases[i], next);
             if candidate != groups[i].label {
                 extra[i] = next;
                 groups[i].label = candidate;
@@ -2057,15 +2061,15 @@ fn disambiguate_labels(groups: &mut [ProjectGroup]) {
 /// cwd 归属哪个项目根：cwd 就是根、或落在根之下（必须是完整路径段，`/a/bc` 不算
 /// 落在 `/a/b` 下）。多个根都匹配时取最深的那个——`~/dev/a` 和 `~/dev/a/sub` 都打开
 /// 过时，子目录的会话归后者。空 cwd 或谁都不沾 → None（调用方按 cwd 自建隐式组）。
-fn project_root_of(projects: &[String], cwd: &str) -> Option<String> {
+/// 路径是运行时那台机器上的，按它的系统比（`style`）。
+fn project_root_of(style: PathStyle, projects: &[String], cwd: &str) -> Option<String> {
     if cwd.is_empty() {
         return None;
     }
-    let cwd = cwd.trim_end_matches('/');
     projects
         .iter()
         .map(|p| p.trim_end_matches('/'))
-        .filter(|root| !root.is_empty() && (cwd == *root || cwd.starts_with(&format!("{root}/"))))
+        .filter(|root| !root.is_empty() && style.starts_with(cwd, root))
         .max_by_key(|root| root.len())
         .map(str::to_string)
 }
@@ -3749,7 +3753,7 @@ impl Workspace {
             agent_definition_id.as_deref(),
             cwd.as_deref(),
         ) {
-            self.remember_session_project(&RuntimeKey::Local, cwd.as_deref());
+            self.remember_session_project(&RuntimeKey::Local, cwd.as_deref(), cx);
         }
         let view = cx.new(|cx| {
             acp_view::AcpView::placeholder(
@@ -3866,7 +3870,11 @@ impl Workspace {
                 continue;
             }
             let runtime = crate::runtimes::Runtime::local();
-            self.remember_session_project(&RuntimeKey::Local, Some(record.cwd.as_str()));
+            self.remember_session_project(
+                &RuntimeKey::Local,
+                Some(record.cwd.as_str()),
+                cx,
+            );
             let (tx, rx) = smol::channel::bounded(1);
             let runtime_bg = runtime.clone();
             let cwd_bg = record.cwd.clone();
@@ -4452,15 +4460,11 @@ fn current_dir() -> Option<String> {
         .and_then(|p| p.to_str().map(String::from))
 }
 
-/// cwd → 侧栏项目分组显示名，统一取目录末段，不为特定 cwd 做额外分支。
+/// cwd → 侧栏项目分组显示名，统一取目录末段，不为特定 cwd 做额外分支。cwd 是运行时那台
+/// 机器上的路径，按它的系统切（`style`）。
 /// Workspace::project_groups（侧栏渲染）和拖拽排序（找会话/插入点归属的项目）共用。
-fn project_name_for_cwd(cwd: &str) -> String {
-    cwd.trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("项目")
-        .to_string()
+fn project_name_for_cwd(style: PathStyle, cwd: &str) -> String {
+    style.file_name(cwd).unwrap_or("项目").to_string()
 }
 
 /// file:// URL → 本地路径（percent 解码，支持中文 / 空格目录名）。

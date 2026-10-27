@@ -662,8 +662,13 @@ impl Workspace {
         &self,
         runtime: &crate::runtimes::RuntimeKey,
         cwd: &str,
+        cx: &App,
     ) -> Option<String> {
-        project_root_of(&self.space(runtime)?.projects, cwd)
+        project_root_of(
+            crate::runtimes::path_style(runtime, cx),
+            &self.space(runtime)?.projects,
+            cwd,
+        )
     }
 
     /// 确保一个会话 cwd 背后的项目是实体，而不是只靠 `project_groups` 临时推导出来的
@@ -671,12 +676,17 @@ impl Workspace {
     /// 顺手删了项目。
     ///
     /// 已落在某个已打开项目之下时不新增子项目；只有完全无主的 cwd 才成为项目根。
-    pub(crate) fn remember_session_project(&mut self, runtime: &RuntimeKey, cwd: Option<&str>) {
+    pub(crate) fn remember_session_project(
+        &mut self,
+        runtime: &RuntimeKey,
+        cwd: Option<&str>,
+        cx: &App,
+    ) {
         let Some(cwd) = cwd.map(str::trim).filter(|cwd| !cwd.is_empty()) else {
             return;
         };
         let root = cwd.trim_end_matches('/');
-        if self.project_root_for_cwd(runtime, root).is_some() {
+        if self.project_root_for_cwd(runtime, root, cx).is_some() {
             return;
         }
         let Some(space) = self.space_mut(runtime) else {
@@ -709,6 +719,7 @@ impl Workspace {
         };
         let mut groups: Vec<ProjectGroup> = Vec::new();
         let same_root = |a: &str, b: &str| a.trim_end_matches('/') == b.trim_end_matches('/');
+        let style = crate::runtimes::path_style(runtime, cx);
 
         // 骨架：已打开的项目按列表顺序占位，先不管有没有会话。
         for root in &space.projects {
@@ -718,7 +729,7 @@ impl Workspace {
             groups.push(ProjectGroup {
                 runtime: runtime.clone(),
                 root: root.clone(),
-                label: crate::project_name_for_cwd(root),
+                label: crate::project_name_for_cwd(style, root),
                 sessions: Vec::new(),
             });
         }
@@ -729,20 +740,20 @@ impl Workspace {
             }
             let cwd = s.cwd(cx).unwrap_or_default();
             let root = self
-                .project_root_for_cwd(runtime, &cwd)
+                .project_root_for_cwd(runtime, &cwd, cx)
                 .unwrap_or_else(|| cwd.clone());
             match groups.iter_mut().find(|g| same_root(&g.root, &root)) {
                 Some(g) => g.sessions.push(ix),
                 None => groups.push(ProjectGroup {
                     runtime: runtime.clone(),
-                    label: crate::project_name_for_cwd(&root),
+                    label: crate::project_name_for_cwd(style, &root),
                     root,
                     sessions: vec![ix],
                 }),
             }
         }
 
-        disambiguate_labels(&mut groups);
+        disambiguate_labels(style, &mut groups);
         groups
     }
 
@@ -1144,7 +1155,7 @@ impl Workspace {
             agent_definition_id.as_deref(),
             request.cwd.as_deref(),
         ) {
-            self.remember_session_project(&runtime, request.cwd.as_deref());
+            self.remember_session_project(&runtime, request.cwd.as_deref(), cx);
         }
         if agent_definition_id.is_none() {
             request.config_values = settings::initial_acp_config_for(
@@ -1224,7 +1235,7 @@ impl Workspace {
             cwd.as_deref(),
         );
         if !is_agent_conversation && automation_id.is_none() {
-            self.remember_session_project(runtime.key(), cwd.as_deref());
+            self.remember_session_project(runtime.key(), cwd.as_deref(), cx);
         }
         let mut initial_config = if is_agent_conversation {
             settings::initial_agent_conversation_config_for(runtime.key(), agent, cx)
@@ -1468,7 +1479,7 @@ impl Workspace {
         entry: Option<settings::LaunchEntry>,
         cx: &mut Context<Self>,
     ) {
-        self.remember_session_project(runtime.key(), cwd.as_deref());
+        self.remember_session_project(runtime.key(), cwd.as_deref(), cx);
         let runtime_bg = runtime.clone();
         // spawn 在后台；先把项目落盘，即使进程启动失败也不能让用户刚选中的项目消失。
         self.save_state(cx);
@@ -2125,7 +2136,7 @@ impl Workspace {
             .into_iter()
             .find(|g| g.sessions.contains(&ix))
             .map(|g| g.root);
-        self.remember_session_project(&runtime, project_root.as_deref());
+        self.remember_session_project(&runtime, project_root.as_deref(), cx);
         let attention_ids: Vec<String> = match &self.sessions[ix].kind {
             SessionKind::Term { .. } => self.sessions[ix]
                 .term_leaves()
