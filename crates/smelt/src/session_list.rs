@@ -449,8 +449,8 @@ pub(crate) mod row;
 use machines::machine_menu;
 use new_session::new_session_picker;
 use row::{
-    FooterQuota, acp_provider_icon, effective_pane_updated_at, footer_quota_chips, group_disclosure,
-    focus_ring, inline_rename_input, new_row_flash, project_header_is_selected, provider_icon,
+    FooterQuota, acp_provider_icon, effective_pane_updated_at, focus_ring, group_disclosure,
+    inline_rename_input, new_row_flash, project_header_is_selected, provider_icon,
     provider_quota_row, row_trailing_slot, session_progress_bar, session_row_is_selected,
     session_row_status_label, session_updated_at_text, status_text,
 };
@@ -2135,8 +2135,9 @@ impl Workspace {
 
         // ---- 底部额度：跟设置同一条底栏，放在右边 ----
         // provider 账户额度（Codex / Claude / Copilot / Grok / Cursor），只列「检测到额度」
-        // 的。底栏放不下五家，常显哪几家见 `footer_quota_chips`，其余收成「+N」；悬停哪块
-        // 看哪块的各窗口和重置时间；点开是全部：每家一行，点哪家刷新哪家。
+        // 的。一家就是一个图标加百分比，几家都常显，不收起来：要看额度还得悬停就白放在
+        // 底栏了。侧栏窄、一行放不下时折到第二行，底栏跟着长高。悬停哪块看哪块的各窗口
+        // 和重置时间；点开是全部：每家一行，点哪家刷新哪家。
         // Pi 不在这里：它底下几家 provider 是独立账户，额度跟在对话模型菜单的
         // provider 名字后面（括号），那里才说得清数字属于谁。
         // 状态在这里一次性读完，弹层的构造闭包里不再碰全局。
@@ -2171,79 +2172,62 @@ impl Workspace {
                     .into_any_element()
             })
         } else {
-            let used: Vec<f64> = quotas.iter().map(|quota| quota.used).collect();
-            let shown = footer_quota_chips(&used);
-            // 悬停哪块看哪块：一家的图标和百分比看这家的各窗口和重置时间，「+N」看收起的
-            // 那几家，一家一行。
-            let folded_tip = (0..quotas.len())
-                .filter(|ix| !shown.contains(ix))
-                .map(|ix| quotas[ix].hint.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-            let folded = quotas.len() - shown.len();
-            let trigger = Button::new("sidebar-quota")
-                .quiet()
-                .compact()
-                .accessibility_label(format!("账户额度，共 {} 家", quotas.len()))
-                .child(
+            // 能折行的触发器：按钮高度固定折不了行，换成侧栏的列表行（悬停、弹层开着时的
+            // 选中底都跟别的行一样）。
+            let trigger = ListRow::new("sidebar-quota")
+                .min_w_0()
+                .px_1p5()
+                .py_1()
+                .rounded(ui_theme::row_radius())
+                .flex()
+                .flex_wrap()
+                .justify_end()
+                .items_center()
+                .gap_x_2()
+                .gap_y_1()
+                .text_xs()
+                .font_family(crate::terminal_view::font_family())
+                .children(quotas.iter().map(|quota| {
+                    let tip = if quota.refreshing {
+                        format!("{} 正在刷新…", quota.hint)
+                    } else {
+                        quota.hint.clone()
+                    };
                     h_flex()
-                        .gap_2()
+                        .id(SharedString::from(format!(
+                            "quota-chip-{}",
+                            quota.target.id()
+                        )))
+                        .flex_shrink_0()
+                        .gap_1()
                         .items_center()
-                        .text_xs()
-                        .font_family(crate::terminal_view::font_family())
-                        .children(shown.iter().map(|&ix| {
-                            let quota = &quotas[ix];
-                            let tip = if quota.refreshing {
-                                format!("{} 正在刷新…", quota.hint)
+                        .text_color(rgb(quota.color))
+                        .child(acp_provider_icon(quota.target.agent).size(px(12.)))
+                        .map(|chip| {
+                            if quota.refreshing {
+                                chip.child(smelt_ui::motion::ambient_spinner(
+                                    SharedString::from(format!(
+                                        "quota-chip-refresh-{}",
+                                        quota.target.id()
+                                    )),
+                                    rgb(quota.color).into(),
+                                    true,
+                                ))
                             } else {
-                                quota.hint.clone()
-                            };
-                            h_flex()
-                                .id(SharedString::from(format!(
-                                    "quota-chip-{}",
-                                    quota.target.id()
-                                )))
-                                .gap_1()
-                                .items_center()
-                                .text_color(rgb(quota.color))
-                                .child(acp_provider_icon(quota.target.agent).size(px(12.)))
-                                .map(|chip| {
-                                    if quota.refreshing {
-                                        chip.child(smelt_ui::motion::ambient_spinner(
-                                            SharedString::from(format!(
-                                                "quota-chip-refresh-{}",
-                                                quota.target.id()
-                                            )),
-                                            rgb(quota.color).into(),
-                                            true,
-                                        ))
-                                    } else {
-                                        chip.child(quota.text.clone())
-                                    }
-                                })
-                                .tooltip(move |window, cx| {
-                                    gpui_component::tooltip::Tooltip::new(tip.clone())
-                                        .build(window, cx)
-                                })
-                        }))
-                        .when(folded > 0, |chips| {
-                            chips.child(
-                                div()
-                                    .id("quota-chip-folded")
-                                    .text_color(rgb(ui_theme::text_muted()))
-                                    .child(format!("+{folded}"))
-                                    .tooltip(move |window, cx| {
-                                        gpui_component::tooltip::Tooltip::new(folded_tip.clone())
-                                            .build(window, cx)
-                                    }),
-                            )
-                        }),
-                );
+                                chip.child(quota.text.clone())
+                            }
+                        })
+                        .tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                        })
+                }));
             Some(
                 gpui_component::popover::Popover::new("sidebar-quota-popover")
                     .anchor(Anchor::BottomRight)
                     .w(px(QUOTA_POPOVER_WIDTH))
                     .p_0()
+                    // 弹层的触发容器要能收窄，额度才会在里面折行，不把底栏撑出侧栏。
+                    .trigger_style(StyleRefinement::default().min_w_0())
                     .trigger(trigger)
                     .content(move |_, _window, _cx| {
                         quota_popover(quotas.clone(), quota_this.clone())
@@ -2255,7 +2239,8 @@ impl Workspace {
         // 底栏一条：左边设置，右边额度。设置是普通入口，不做成通栏的大按钮。
         let footer = div()
             .flex_shrink_0()
-            .h(px(44.))
+            .min_h(px(44.))
+            .py_1()
             .flex()
             .items_center()
             .gap_2()

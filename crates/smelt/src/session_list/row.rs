@@ -339,25 +339,6 @@ pub(super) struct FooterQuota {
     pub(super) refreshing: bool,
 }
 
-/// 底栏常显哪几家（下标，按原顺序）。底栏放不下五家：只常显快用完的；都还宽裕时只显
-/// 用得最多的那一家，好歹看得到一个数。其余收进「+N」。按原顺序不按用量排，数字变了
-/// 图标也不跳位置。
-pub(super) fn footer_quota_chips(used: &[f64]) -> Vec<usize> {
-    let warn: Vec<usize> = (0..used.len())
-        .filter(|&ix| used[ix] >= QUOTA_WARN_PERCENT)
-        .collect();
-    if !warn.is_empty() {
-        return warn;
-    }
-    let mut top: Option<usize> = None;
-    for (ix, value) in used.iter().enumerate() {
-        if top.is_none_or(|top| *value > used[top]) {
-            top = Some(ix);
-        }
-    }
-    top.into_iter().collect()
-}
-
 pub(super) struct ProviderQuotaRow {
     pub(super) text: String,
     pub(super) color: u32,
@@ -419,8 +400,7 @@ pub(super) fn provider_quota_row(
 #[cfg(test)]
 mod tests {
     use super::{
-        effective_pane_updated_at, footer_quota_chips, progress_fraction, provider_quota_row,
-        session_updated_at_text,
+        effective_pane_updated_at, progress_fraction, provider_quota_row, session_updated_at_text,
     };
     use crate::provider_quota::{ProviderQuotaData, QuotaStatus, QuotaTarget};
     use crate::settings::ConversationAgentKind;
@@ -480,18 +460,6 @@ mod tests {
         assert_eq!(row.text, "25%");
         assert_eq!(row.color, ui_theme::text_muted());
         assert_eq!(row.hint, "Copilot 本周期 25 / 100 premium requests（25%）");
-    }
-
-    #[test]
-    fn footer_shows_providers_running_low_or_else_the_busiest_one() {
-        assert_eq!(footer_quota_chips(&[]), Vec::<usize>::new());
-        assert_eq!(footer_quota_chips(&[32.0, 81.0, 25.0, 94.0]), vec![1, 3]);
-        assert_eq!(footer_quota_chips(&[32.0, 12.0, 40.0]), vec![2]);
-        assert_eq!(
-            footer_quota_chips(&[40.0, 40.0]),
-            vec![0],
-            "并列时取前面那家，不跳"
-        );
     }
 
     #[test]
