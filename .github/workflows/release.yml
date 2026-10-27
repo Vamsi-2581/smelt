@@ -1,5 +1,5 @@
 # 打 tag（v*）→ 在 Apple Silicon runner 上打包 Smelt.dmg → 发布到 GitHub Release，
-# 再附上 Linux 运行时两种架构的包、Windows 桌面 zip 和一键安装脚本。
+# 再附上 Linux 运行时两种架构的包、Windows 安装程序和一键安装脚本。
 # 本地打包链路复用：make dist-build → scripts/package-mac.sh；Linux 用 scripts/package-linux.sh。
 name: release
 
@@ -167,7 +167,7 @@ jobs:
 
           ## Windows
 
-          \`smelt-${version}-windows-x86_64.zip\` 里是 \`smelt.exe\`、\`smelt.com\`（命令行入口）、\`smeltd.exe\`、\`smelt-notify.exe\`、\`smelt-pi.exe\`（以及 Pi 要的 wasm）。这一版没有代码签名。打开时 Windows SmartScreen 可能提示未知发布者，选择仍要运行即可。自动更新还没有做。升级本机守护会重启进程，终端会话不保留。
+          下载 \`smelt-${version}-windows-x86_64-setup.exe\` 运行即可。按用户安装，不要管理员权限，默认装到 \`%LOCALAPPDATA%\\Programs\\Smelt\`，可选把 \`smelt\` 命令加入 PATH。升级直接运行新版本的安装程序，覆盖安装前先关掉 Smelt。这一版没有代码签名。打开时 Windows SmartScreen 可能提示未知发布者，选择仍要运行即可。自动更新还没有做。升级本机守护会重启进程，终端会话不保留。
           EOF
           cat "$RUNNER_TEMP/release-notes.md"
 
@@ -379,7 +379,8 @@ jobs:
           files: dist/Smelt-*-android-arm64.apk
           prerelease: ${{ contains(github.ref_name, '-') }}
 
-  # Windows 本机运行时：smelt、smeltd、smelt-notify、smelt-pi 打在同一个目录里。第一版不签名。
+  # Windows 本机运行时：smelt、smeltd、smelt-notify、smelt-pi 装在同一个目录里，打成 Inno Setup
+  # 安装程序（scripts/windows-installer.iss）。第一版不签名。
   # 构建和 dmg 并行；上传在 windows-release，等 Release 建好再挂，避免两边同时建。
   windows:
     runs-on: windows-latest
@@ -398,10 +399,26 @@ jobs:
         shell: bash
         run: bash scripts/build-smelt-pi.sh --out target/smelt-pi
 
+      # Inno Setup 7 自带简体中文界面。钉版本、对哈希，不用 choco 装「最新版」。
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $url = "https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe"
+          $sha256 = "0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f"
+          $setup = "$env:RUNNER_TEMP\innosetup.exe"
+          Invoke-WebRequest -Uri $url -OutFile $setup
+          if ((Get-FileHash $setup -Algorithm SHA256).Hash.ToLower() -ne $sha256) { throw "Inno Setup 安装程序的哈希对不上" }
+          $dir = "$env:RUNNER_TEMP\inno"
+          Start-Process -FilePath $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/DIR=$dir" -Wait
+          if (-not (Test-Path "$dir\ISCC.exe")) { throw "Inno Setup 没装上" }
+          "INNO_DIR=$dir" >> $env:GITHUB_ENV
+
       - name: Package
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}" -replace '^v', ''
+          # 文件版本只能是数字段：2026.1026.0-rc.2 取 2026.1026.0。
+          $numeric = ($version -split '-')[0]
           $stage = "dist/stage"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item target/release/smelt.exe, target/release/smeltd.exe, target/release/smelt-notify.exe -Destination $stage
@@ -410,8 +427,14 @@ jobs:
           Copy-Item target/smelt-pi/smelt-pi.exe, target/smelt-pi/photon_rs_bg.wasm -Destination $stage
           if (Test-Path target/smelt-pi/skills) { Copy-Item target/smelt-pi/skills -Destination $stage -Recurse }
           if (Test-Path target/smelt-pi/native) { Copy-Item target/smelt-pi/native -Destination $stage -Recurse }
-          $name = "smelt-$version-windows-x86_64.zip"
-          Compress-Archive -Path "$stage/*" -DestinationPath "dist/$name"
+          & "$env:INNO_DIR\ISCC.exe" -q `
+            "/DAppVersion=$version" `
+            "/DAppVersionNumeric=$numeric" `
+            "/DStageDir=$((Resolve-Path $stage).Path)" `
+            "/DOutputDir=$((Resolve-Path dist).Path)" `
+            scripts/windows-installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC 编安装程序失败（退出码 $LASTEXITCODE）" }
+          $name = "smelt-$version-windows-x86_64-setup.exe"
           $hash = (Get-FileHash "dist/$name" -Algorithm SHA256).Hash.ToLower()
           Write-Output "$hash  $name"
           Get-Item "dist/$name" | Select-Object Name, Length
@@ -420,7 +443,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: smelt-windows
-          path: dist/smelt-*-windows-x86_64.zip
+          path: dist/smelt-*-windows-x86_64-setup.exe
           if-no-files-found: error
 
   windows-release:
@@ -436,11 +459,11 @@ jobs:
       - name: Add to GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          files: dist/smelt-*-windows-x86_64.zip
+          files: dist/smelt-*-windows-x86_64-setup.exe
           prerelease: ${{ contains(github.ref_name, '-') }}
 
   # 所有产物都上传后，把 SHA256SUMS 重写成覆盖全部产物（dmg、自更新 zip、APK、
-  # Linux 包、Windows 桌面 zip、install.sh）。
+  # Linux 包、Windows 安装程序、install.sh）。
   checksums:
     needs: [linux-release, android-release, windows-release]
     runs-on: ubuntu-24.04
@@ -451,7 +474,7 @@ jobs:
         run: |
           mkdir dist && cd dist
           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-            --pattern 'Smelt.dmg' --pattern 'Smelt.app.zip' --pattern 'Smelt-*.apk' --pattern 'smeltd-*.tar.gz' --pattern 'smelt-*-windows-x86_64.zip' --pattern 'install.sh'
+            --pattern 'Smelt.dmg' --pattern 'Smelt.app.zip' --pattern 'Smelt-*.apk' --pattern 'smeltd-*.tar.gz' --pattern 'smelt-*-windows-x86_64-setup.exe' --pattern 'install.sh'
           sha256sum -- * | sort -k2 > SHA256SUMS
           cat SHA256SUMS
           gh release upload "$GITHUB_REF_NAME" SHA256SUMS --clobber --repo "$GITHUB_REPOSITORY"

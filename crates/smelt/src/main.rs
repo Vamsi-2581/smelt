@@ -4782,6 +4782,9 @@ fn main() {
             std::process::exit(75);
         }
     };
+    // Windows 安装程序靠它认出 Smelt 还开着，覆盖装和卸载前先请用户关掉。
+    #[cfg(windows)]
+    smelt_sys::mark_desktop_running();
     // GUI 启动失败时用户通常看不到终端输出；把原始 panic 先落到统一日志，
     // 尤其能保留 GPUI 清理阶段二次 panic 之前的第一条错误。
     smelt_sys::app_log::install_panic_hook("smelt");

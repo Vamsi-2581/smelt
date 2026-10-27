@@ -255,7 +255,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 
 ### Windows 桌面与本机运行时
 
-发布包是 `smelt-<版本>-windows-x86_64.zip`（`.github/workflows/release.yml` 的 `windows` job，由 `windows-release` 挂到同一个 Release）。第一版只出 x86_64，系统是 Windows 10 1803 及以上。zip 根目录放在一起：
+发布包是安装程序 `smelt-<版本>-windows-x86_64-setup.exe`（`.github/workflows/release.yml` 的 `windows` job 用 Inno Setup 按 `scripts/windows-installer.iss` 编，由 `windows-release` 挂到同一个 Release）。第一版只出 x86_64，系统是 Windows 10 1803 及以上。按用户安装，默认装到 `%LOCALAPPDATA%\Programs\Smelt`，安装目录里放在一起：
 
 - `smelt.exe`
 - `smelt.com`：`smelt-cli.exe` 改名。`smelt.exe` 是 GUI 子系统；cmd / PowerShell 敲 `smelt` 先找到 `.com`，子命令才有控制台输出
@@ -264,7 +264,7 @@ UI 线程对网格做快照并重绘。PTY 本身在 `smeltd`。
 - `smelt-pi.exe`
 - Pi 要的 `photon_rs_bg.wasm`（打出来的 `skills/`、`native/` 也在）
 
-没有安装包，exe 不签名，没有自动更新。下载后 SmartScreen 可能提示未知发布者。桌面在自己旁边找 `smeltd.exe`、`smelt-notify.exe`、`smelt-pi.exe`，按需拉起本机守护（`spawn_detached`，尽量脱离调用方的 Job）。没有 systemd。
+不签名，没有自动更新。下载后 SmartScreen 可能提示未知发布者。桌面运行时持有命名互斥量 `SmeltDesktop`，安装程序覆盖装和卸载前靠它请用户先关掉 Smelt。桌面在自己旁边找 `smeltd.exe`、`smelt-notify.exe`、`smelt-pi.exe`，按需拉起本机守护（`spawn_detached`，尽量脱离调用方的 Job）。没有 systemd。
 
 数据目录是 `%USERPROFILE%\.smelt`。Rust 客户端（桌面、`smelt-notify`、runtime client）连 `%USERPROFILE%\.smelt\smeltd.sock`（`uds_windows` 的 AF_UNIX）。Bun / Pi 不连这个文件：交给它们的 `SMELT_SOCK` 是当前用户的命名管道 `\\.\pipe\smelt-<sid>-daemon`。守护映像不建符号链接，复制或硬链接成 `smeltd-<指纹>.exe`。启动名是旁边名为 `smeltd` 的指针文件（首行 `smelt-image-v1`，下一行是映像文件名），不是符号链接。Pi 发布到 `smelt-pi-<指纹>/smelt-pi.exe`，启动名是 `smelt-pi.current` 指针文件。受管 Bun 取 `bun-windows-x64.zip`（Bun 1.4.3），装成 `%USERPROFILE%\.smelt\runtime` 下的 `bin/bun.exe`。
 
