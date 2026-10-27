@@ -1605,7 +1605,9 @@ impl Render for SettingsWindow {
             .relative()
             .size_full()
             .font_family(resolved_ui_font_family(cx.global::<Appearance>()))
+            .key_context("SettingsWindow")
             .track_focus(&self.focus_handle)
+            .on_action(|_: &crate::CloseSettingsWindow, window, _| window.remove_window())
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 let keystroke = &event.keystroke;
                 if keystroke.modifiers.platform && keystroke.modifiers.shift && keystroke.key == "f"
