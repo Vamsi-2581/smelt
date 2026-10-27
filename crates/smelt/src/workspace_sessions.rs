@@ -1284,6 +1284,8 @@ impl Workspace {
         self.session_list_revision = self.session_list_revision.wrapping_add(1);
         let ix = self.sessions.len() - 1;
         if activate {
+            // 人点出来的新对话：侧栏里那一行闪一下。
+            self.sidebar_flash = Some(self.sessions[ix].ui_id);
             self.activate(ix, window, cx);
         } else {
             self.save_state(cx);
@@ -1549,7 +1551,12 @@ impl Workspace {
                     let session = Session::single(view, window, cx);
                     this.sessions.push(session);
                     this.session_list_revision = this.session_list_revision.wrapping_add(1);
-                    this.active_session = this.sessions.len() - 1;
+                    let ix = this.sessions.len() - 1;
+                    // 新的一行闪一下，并且得看得见：所在项目折着就展开，再滚到它。
+                    this.sidebar_flash = Some(this.sessions[ix].ui_id);
+                    this.reveal_session_in_sidebar(ix, cx);
+                    this.active_session = ix;
+                    this.note_session_viewed(ix);
                     this.save_state(cx);
                     this.schedule_visible_refresh(cx);
                     eprintln!(
@@ -2124,6 +2131,27 @@ impl Workspace {
         self.remove_session(ix, false, cx);
     }
 
+    /// 记下刚看过的会话，关掉当前会话时回到上一个（见 `remove_session`）。
+    pub(crate) fn note_session_viewed(&mut self, ix: usize) {
+        if let Some(ui_id) = self.sessions.get(ix).map(|session| session.ui_id) {
+            self.recent_sessions.retain(|id| *id != ui_id);
+            self.recent_sessions.push(ui_id);
+        }
+    }
+
+    /// 除了 `closed`，最近看过、还开着、`eligible` 认的那个会话的下标。
+    fn previous_viewed_session(
+        &self,
+        closed: u64,
+        eligible: impl Fn(&Session) -> bool,
+    ) -> Option<usize> {
+        let position = |ui_id: u64| self.sessions.iter().position(|s| s.ui_id == ui_id);
+        crate::sidebar_order::previous_viewed(&self.recent_sessions, closed, |ui_id| {
+            position(ui_id).is_some_and(|ix| eligible(&self.sessions[ix]))
+        })
+        .and_then(position)
+    }
+
     pub(crate) fn remove_session(&mut self, ix: usize, kill_runtime: bool, cx: &mut Context<Self>) {
         if ix >= self.sessions.len() {
             return;
@@ -2131,11 +2159,28 @@ impl Workspace {
         // 兼容旧存档/旧创建路径留下的隐式项目：在移除最后一个能提供 cwd 的会话前，
         // 先把它对应的项目实体化。这样“关闭会话”和“关闭项目”始终是两件事。
         let runtime = self.sessions[ix].runtime(cx).key().clone();
-        let project_root = self
+        let group = self
             .project_groups(&runtime, cx)
             .into_iter()
-            .find(|g| g.sessions.contains(&ix))
-            .map(|g| g.root);
+            .find(|g| g.sessions.contains(&ix));
+        let closed_ui_id = self.sessions[ix].ui_id;
+        // 关的是当前项目会话：回到上一个看过的项目会话；还没看过别的就落到同一个项目里
+        // 挨着的那个。不按 sessions 下标顺延，也不跳去智能体对话（那要换页）。
+        let closing_current_project_session =
+            ix == self.active_session && !self.sessions[ix].is_product_conversation(cx);
+        let project_next = if closing_current_project_session {
+            self.previous_viewed_session(closed_ui_id, |session| {
+                !session.is_product_conversation(cx)
+            })
+            .or_else(|| {
+                group
+                    .as_ref()
+                    .and_then(|g| crate::sidebar_order::neighbor_in_group(&g.sessions, ix))
+            })
+        } else {
+            None
+        };
+        let project_root = group.map(|g| g.root);
         self.remember_session_project(&runtime, project_root.as_deref(), cx);
         let attention_ids: Vec<String> = match &self.sessions[ix].kind {
             SessionKind::Term { .. } => self.sessions[ix]
@@ -2175,18 +2220,25 @@ impl Workspace {
         };
         let closed_current_conversation =
             closed_conversation_sid.as_deref() == self.nav.agents().conversation_sid();
+        // 关的是正在看的对话：回到上一个看过的对话，没有就落到最后一段。
         let next_conversation_ix = if closed_current_conversation {
-            self.sessions
-                .iter()
-                .enumerate()
-                .rev()
-                .find_map(|(other, session)| {
-                    (other != ix && session.is_agent_conversation(cx)).then_some(other)
-                })
+            self.previous_viewed_session(closed_ui_id, |session| {
+                session.is_agent_conversation(cx)
+            })
+            .or_else(|| {
+                self.sessions
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(other, session)| {
+                        (other != ix && session.is_agent_conversation(cx)).then_some(other)
+                    })
+            })
         } else {
             None
         };
         self.sessions.remove(ix);
+        self.recent_sessions.retain(|ui_id| *ui_id != closed_ui_id);
         self.session_list_revision = self.session_list_revision.wrapping_add(1);
         if let Some(next) = next_conversation_ix {
             let next = if next > ix { next - 1 } else { next };
@@ -2206,7 +2258,10 @@ impl Workspace {
                 self.nav.agents_mut().pop_to_root();
             }
             // 空列表时 active_session 归 0（各处都是 sessions.get(ix) 取，取不到就是无会话态）。
-            if self.sessions.is_empty() {
+            if let Some(next) = project_next {
+                self.active_session_revision = self.active_session_revision.wrapping_add(1);
+                self.active_session = if next > ix { next - 1 } else { next };
+            } else if self.sessions.is_empty() {
                 self.active_session = 0;
             } else if self.active_session >= self.sessions.len() {
                 self.active_session = self.sessions.len() - 1;
@@ -2426,8 +2481,13 @@ impl Workspace {
             return;
         }
         if ix < self.sessions.len() {
+            // 换到别的会话时（⌘↑↓、点通知、新建），它在侧栏里得看得见。
+            if ix != self.active_session {
+                self.reveal_session_in_sidebar(ix, cx);
+            }
             self.active_session_revision = self.active_session_revision.wrapping_add(1);
             self.active_session = ix;
+            self.note_session_viewed(ix);
             // 活动项目跟着活动会话走：切到别的项目的会话时侧栏高亮同步换过去。
             if let Some(g) = self
                 .all_project_groups(cx)
@@ -2560,14 +2620,21 @@ impl Workspace {
         let input = cx.new(|cx| InputState::new(window, cx).default_value(current));
         // 先记下打开前的焦点，再把焦点交给输入框。顺序反了，关掉时会把输入框当成返回点。
         self.begin_main_modal_focus(window, cx);
-        input.update(cx, |s, cx| s.focus(window, cx));
+        // 名字整段选中：直接打字就是换掉，按方向键才是在原名上改。
+        input.update(cx, |s, cx| {
+            s.focus(window, cx);
+            s.select_all(window, cx);
+        });
+        let inline = target.is_inline();
         self._rename_sub = Some(cx.subscribe_in(
             &input,
             window,
-            |this, _input, ev: &InputEvent, window, cx| {
-                if matches!(ev, InputEvent::PressEnter { .. }) {
-                    this.confirm_rename(window, cx);
-                }
+            move |this, _input, ev: &InputEvent, window, cx| match ev {
+                InputEvent::PressEnter { .. } => this.confirm_rename(window, cx),
+                // 行内改名没有「确定」按钮，点别处就是改完了。弹窗里失焦多半是去点
+                // 「取消」，不能替人提交。
+                InputEvent::Blur if inline => this.confirm_rename(window, cx),
+                _ => {}
             },
         ));
         self.rename_target = Some(target);

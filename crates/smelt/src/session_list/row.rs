@@ -91,24 +91,177 @@ pub(super) fn session_progress_bar(progress: TerminalProgress) -> Div {
         )
 }
 
-/// 侧栏第二行的最近活动时间。采用不会随分钟流逝而过期的本地日历文案：今天和
-/// 昨天保留时分，更早的会话显示日期；旧存档没有时间时明确写“时间未知”。
+/// 侧栏行尾的最近活动时间。用不会随分钟流逝而过期的本地日历文案，侧栏不必为它
+/// 定时重画：今天只写时分，昨天写「昨天」，今年更早的写月日，再早的写年月日；旧存档
+/// 没有时间时写「未知」。行尾一格放不下「今天 14:05」这种长写法。
 pub(crate) fn session_updated_at_text(timestamp: u64, now: &DateTime<Local>) -> String {
     if timestamp == 0 {
-        return "时间未知".to_string();
+        return "未知".to_string();
     }
     let Some(updated) = Local
         .timestamp_opt(timestamp.min(i64::MAX as u64) as i64, 0)
         .single()
     else {
-        return "时间未知".to_string();
+        return "未知".to_string();
     };
     match (now.date_naive() - updated.date_naive()).num_days() {
-        days if days <= 0 => format!("今天 {}", updated.format("%H:%M")),
-        1 => format!("昨天 {}", updated.format("%H:%M")),
-        _ if updated.year() == now.year() => updated.format("%m-%d %H:%M").to_string(),
+        days if days <= 0 => updated.format("%H:%M").to_string(),
+        1 => "昨天".to_string(),
+        _ if updated.year() == now.year() => updated.format("%m-%d").to_string(),
         _ => updated.format("%Y-%m-%d").to_string(),
     }
+}
+
+/// 键盘焦点环：盖在行上的一圈描边，不占排版，前后的行不会挪。
+pub(crate) fn focus_ring() -> Div {
+    div()
+        .absolute()
+        .inset_0()
+        .rounded(ui_theme::row_radius())
+        .border_2()
+        .border_color(rgb(ui_theme::border_focus()))
+}
+
+/// 刚新建那一行闪多久。
+const NEW_ROW_FLASH_MS: u64 = 600;
+
+/// 刚新建的那一行：铺一层强调色再淡回，让人看见新东西落在了哪。只播一次，播完是
+/// 透明的；放在行的第一个子元素，压在图标和文字下面。
+pub(crate) fn new_row_flash(id: impl Into<ElementId>) -> impl IntoElement {
+    ambient_animation(id, Duration::from_millis(NEW_ROW_FLASH_MS), true, |phase| {
+        div()
+            .absolute()
+            .inset_0()
+            .rounded(ui_theme::row_radius())
+            .bg(rgb(ui_theme::accent()))
+            .opacity(0.28 * (1.0 - phase))
+    })
+}
+
+/// 行内改名的输入框，占标题那一格。回车、点别处保存（见 `start_rename` 里的订阅），
+/// Esc 取消：输入框自己用不上 Esc 时会往上传，在这里接住。按下不往行上传，免得点进
+/// 输入框就起拖拽或切会话。
+pub(crate) fn inline_rename_input(
+    input: &Entity<gpui_component::input::InputState>,
+    workspace: Entity<Workspace>,
+) -> Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_action(move |_: &gpui_component::input::Escape, _window, cx| {
+            workspace.update(cx, |ws, cx| ws.cancel_rename(cx));
+        })
+        .child(gpui_component::input::Input::new(input).small())
+}
+
+/// 分组行开头那一格的宽度。项目、「对话」两种分组共用，下面会话的引导线对着它的中线。
+pub(crate) const GROUP_ICON_BOX: f32 = 14.;
+
+/// 分组箭头转一次多久。
+const DISCLOSURE_TURN_MS: u64 = 120;
+
+/// 分组行开头的图标：平时是分组自己的图标（文件夹、对话气泡），悬停整行时换成展开 /
+/// 收起箭头，告诉人点这一行会折起来。分组空着、没东西可折时只有图标。两个图标叠在
+/// 同一格里只切透明度，换的时候后面的名字不动。
+///
+/// 箭头收起时朝右、展开时朝下，开合时转过去。动画的 id 带着开合状态：一换状态就是
+/// 一个新动画，从另一头转过来；转完不再要帧。
+pub(crate) fn group_disclosure(
+    id: impl Into<ElementId>,
+    group: &'static str,
+    icon: Icon,
+    collapsed: bool,
+    collapsible: bool,
+) -> Stateful<Div> {
+    let id = id.into();
+    let turn_id = ElementId::from((id.clone(), if collapsed { "collapsed" } else { "expanded" }));
+    div()
+        .id(id)
+        .relative()
+        .w(px(GROUP_ICON_BOX))
+        .h(px(16.))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(rgb(ui_theme::text_muted()))
+        .group_hover(group, |style| {
+            style.text_color(rgb(ui_theme::text_bright()))
+        })
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .when(collapsible, |d| {
+                    d.group_hover(group, |style| style.opacity(0.0))
+                })
+                .child(icon),
+        )
+        .when(collapsible, |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .opacity(0.0)
+                    .group_hover(group, |style| style.opacity(1.0))
+                    .child(ambient_animation(
+                        turn_id,
+                        Duration::from_millis(DISCLOSURE_TURN_MS),
+                        true,
+                        move |phase| {
+                            let (from, to) = if collapsed { (90.0, 0.0) } else { (0.0, 90.0) };
+                            let degrees: f32 =
+                                from + (to - from) * smelt_ui::motion::ease_snap(phase);
+                            Icon::new(IconName::ChevronRight)
+                                .size(px(14.))
+                                .transform(Transformation::rotate(radians(degrees.to_radians())))
+                        },
+                    )),
+            )
+        })
+}
+
+/// 行尾一格：平时写时间或要人管的状态，悬停这一行时同一格换成关闭键。两样叠在一起，
+/// 换的时候这一格不变宽，标题不跟着伸缩。`group` 是整行的 hover group 名。
+pub(crate) fn row_trailing_slot(
+    group: &'static str,
+    meta: Option<(SharedString, Hsla)>,
+    close: Button,
+) -> Div {
+    div()
+        .relative()
+        .flex_shrink_0()
+        .min_w(px(20.))
+        .h(px(20.))
+        .flex()
+        .items_center()
+        .justify_end()
+        .children(meta.map(|(text, color)| {
+            div()
+                .text_xs()
+                .text_color(color)
+                .group_hover(group, |style| style.opacity(0.0))
+                .child(text)
+        }))
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .right_0()
+                .bottom_0()
+                .flex()
+                .items_center()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    close
+                        .opacity(0.0)
+                        .group_hover(group, |style| style.opacity(1.0)),
+                ),
+        )
 }
 
 /// 分屏优先展示自己的守护更新时间；守护镜像尚未到达时，回退到所属会话时间。
@@ -120,11 +273,14 @@ pub(super) fn effective_pane_updated_at(pane_updated_at: u64, session_updated_at
     }
 }
 
+/// 用到这个百分比就算快用完：标黄，并且在底栏常显。
+pub(super) const QUOTA_WARN_PERCENT: f64 = 75.0;
+
 /// 按已用百分比取行内颜色：>=90% 红、>=75% 黄、否则灰（额度充足，默认不抢眼）。
 pub(super) fn quota_color(used_percent: f64) -> u32 {
     if used_percent >= 90.0 {
         ui_theme::red()
-    } else if used_percent >= 75.0 {
+    } else if used_percent >= QUOTA_WARN_PERCENT {
         ui_theme::yellow()
     } else {
         ui_theme::text_muted()
@@ -176,6 +332,37 @@ pub(super) fn quota_reset_text(window: &smelt_model::provider_quota::ProviderQuo
         };
     }
     "重置时间未知".to_string()
+}
+
+/// 底栏上一家 provider 的额度。
+#[derive(Clone)]
+pub(super) struct FooterQuota {
+    pub(super) target: crate::provider_quota::QuotaTarget,
+    pub(super) text: String,
+    pub(super) color: u32,
+    pub(super) hint: String,
+    pub(super) used: f64,
+    /// 用户手点刷新、还没回来。只有这种在百分比的位置转圈；启动首查和定时刷新不打扰。
+    pub(super) refreshing: bool,
+}
+
+/// 底栏常显哪几家（下标，按原顺序）。底栏放不下五家：只常显快用完的；都还宽裕时只显
+/// 用得最多的那一家，好歹看得到一个数。其余收进「+N」。按原顺序不按用量排，数字变了
+/// 图标也不跳位置。
+pub(super) fn footer_quota_chips(used: &[f64]) -> Vec<usize> {
+    let warn: Vec<usize> = (0..used.len())
+        .filter(|&ix| used[ix] >= QUOTA_WARN_PERCENT)
+        .collect();
+    if !warn.is_empty() {
+        return warn;
+    }
+    let mut top: Option<usize> = None;
+    for (ix, value) in used.iter().enumerate() {
+        if top.is_none_or(|top| *value > used[top]) {
+            top = Some(ix);
+        }
+    }
+    top.into_iter().collect()
 }
 
 pub(super) struct ProviderQuotaRow {
@@ -235,7 +422,8 @@ pub(super) fn provider_quota_row(
 #[cfg(test)]
 mod tests {
     use super::{
-        effective_pane_updated_at, progress_fraction, provider_quota_row, session_updated_at_text,
+        effective_pane_updated_at, footer_quota_chips, progress_fraction, provider_quota_row,
+        session_updated_at_text,
     };
     use crate::provider_quota::{ProviderQuotaData, QuotaStatus, QuotaTarget};
     use crate::settings::ConversationAgentKind;
@@ -298,6 +486,18 @@ mod tests {
     }
 
     #[test]
+    fn footer_shows_providers_running_low_or_else_the_busiest_one() {
+        assert_eq!(footer_quota_chips(&[]), Vec::<usize>::new());
+        assert_eq!(footer_quota_chips(&[32.0, 81.0, 25.0, 94.0]), vec![1, 3]);
+        assert_eq!(footer_quota_chips(&[32.0, 12.0, 40.0]), vec![2]);
+        assert_eq!(
+            footer_quota_chips(&[40.0, 40.0]),
+            vec![0],
+            "并列时取前面那家，不跳"
+        );
+    }
+
+    #[test]
     fn progress_bar_fills_by_percent_and_fully_when_unknown() {
         let bar = |state, percent| progress_fraction(TerminalProgress { state, percent });
         let close = |a: f32, b: f32| (a - b).abs() < 1e-6;
@@ -336,21 +536,21 @@ mod tests {
 
         assert_eq!(
             session_updated_at_text(today.timestamp() as u64, &now),
-            "今天 14:05"
+            "14:05"
         );
         assert_eq!(
             session_updated_at_text(yesterday.timestamp() as u64, &now),
-            "昨天 23:15"
+            "昨天"
         );
         assert_eq!(
             session_updated_at_text(earlier.timestamp() as u64, &now),
-            "08-01 09:30"
+            "08-01"
         );
         assert_eq!(
             session_updated_at_text(previous_year.timestamp() as u64, &now),
             "2025-12-31"
         );
-        assert_eq!(session_updated_at_text(0, &now), "时间未知");
+        assert_eq!(session_updated_at_text(0, &now), "未知");
     }
 
     #[test]

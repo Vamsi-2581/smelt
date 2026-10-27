@@ -273,6 +273,7 @@ gpui::actions!(
         NextSession,
         ToggleSidebar,
         ToggleToolPanel,
+        NewConversation,
         ToggleCommandPalette,
         CyclePanePrev,
         CyclePaneNext,
@@ -289,6 +290,13 @@ gpui::actions!(
         FileTreeMoveLeft,
         FileTreeMoveRight,
         FileTreeActivate,
+        FocusSidebar,
+        SidebarUp,
+        SidebarDown,
+        SidebarCollapse,
+        SidebarExpand,
+        SidebarOpen,
+        SidebarExit,
         CloseSettingsWindow,
     ]
 );
@@ -1420,6 +1428,14 @@ enum RenameTarget {
     },
 }
 
+impl RenameTarget {
+    /// 侧栏里的会话行、分屏行、对话行就地改名：输入框画在那一行里，回车或点别处保存，
+    /// Esc 取消。历史会话和机器名不在侧栏的行上，还用弹窗。
+    fn is_inline(&self) -> bool {
+        matches!(self, Self::Session(_) | Self::Pane(_))
+    }
+}
+
 /// 单个终端 pane 自动推导的标题。
 ///
 /// 会话名只来自守护已经发布的那份（provider 标题或首条 prompt 兜底）。
@@ -2540,8 +2556,8 @@ struct Workspace {
     sidebar_grouping: SidebarGrouping,
     /// 按项目分组时是否把无会话的项目从侧栏藏起来（固定的 / 当前项目除外）。
     sidebar_hide_empty_projects: bool,
-    /// 侧栏「最近对话」是否展开全部。只在本次运行内记住。
-    sidebar_recent_conversations_expanded: bool,
+    /// 侧栏「对话」分组是否收起。只在本次运行内记住。
+    sidebar_conversations_collapsed: bool,
     /// 会话拖拽悬停中的插入位置：(目标会话 ui_id, 插它前面?)。
     sess_drop_hint: Option<(u64, bool)>,
     /// 项目拖拽悬停中的插入位置：(目标项目 root, 插它前面?)。
@@ -2556,6 +2572,19 @@ struct Workspace {
     sidebar_drop_origin: Option<(SidebarDrag, Pixels)>,
     /// 侧栏会话列表的滚动位置；拖到顶底边缘时靠它自动滚。
     sidebar_scroll: ScrollHandle,
+    /// 侧栏要滚到哪一行、视口外有没有「需要你」，见 `session_list::reveal`。
+    sidebar_reveal: std::rc::Rc<session_list::SidebarReveal>,
+    /// 刚新建、要闪一下的那一行（会话 `ui_id`）。新建下一个时换掉。
+    sidebar_flash: Option<u64>,
+    /// 侧栏键盘焦点。挂在列表里一个零大小的元素上，见 `session_list::keyboard`。
+    sidebar_focus: FocusHandle,
+    /// 侧栏键盘光标停在哪一行。
+    sidebar_cursor: Option<session_list::SidebarItem>,
+    /// 打字跳转攒的前缀和最后一次按键的时间。
+    sidebar_typeahead: Option<(String, std::time::Instant)>,
+    /// 看过的会话（`ui_id`），最近的在最后。关掉当前会话时回到上一个看过的；只在本次
+    /// 运行内记，重启后从当前会话重新记起。
+    recent_sessions: Vec<u64>,
     sidebar_auto_scroll: gpui_component::scroll::AutoScroll,
     /// 已发现 IDE 的按需缓存。没有项目目录时完全不触发；首次打开 IDE 菜单才后台
     /// 填充，之后菜单只读这里的快照。
@@ -3188,7 +3217,7 @@ impl Workspace {
                 .as_ref()
                 .map(|s| s.sidebar_hide_empty_projects)
                 .unwrap_or(false),
-            sidebar_recent_conversations_expanded: false,
+            sidebar_conversations_collapsed: false,
             sess_drop_hint: None,
             proj_drop_hint: None,
             sidebar_drag: None,
@@ -3196,6 +3225,12 @@ impl Workspace {
             shown_session_facts: Vec::new(),
             sidebar_drop_origin: None,
             sidebar_scroll: ScrollHandle::new(),
+            sidebar_reveal: Default::default(),
+            sidebar_flash: None,
+            recent_sessions: Vec::new(),
+            sidebar_focus: cx.focus_handle(),
+            sidebar_cursor: None,
+            sidebar_typeahead: None,
             sidebar_auto_scroll: gpui_component::scroll::AutoScroll::default(),
             ide_catalog: ide::IdeCatalog::default(),
             ide_popup_waiters: Vec::new(),
@@ -4174,6 +4209,13 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ToggleToolPanel, window, cx| {
                 this.toggle_tool_panel(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &FocusSidebar, window, cx| {
+                this.focus_sidebar(window, cx);
+            }))
+            // ⌘N：跟侧栏最顶的「新对话」同一个动作。
+            .on_action(cx.listener(|this, _: &NewConversation, window, cx| {
+                this.begin_new_conversation(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 if this.palette.is_some() {
                     this.close_palette(window, cx);
@@ -4600,7 +4642,7 @@ fn agent_icon_svg(path: &str) -> Option<&'static [u8]> {
 
 // 组件库的 `Assets` 只打包组件自己用的那一百来个图标；目录里其余的 Lucide 图标要在这里
 // 点名才会编进来，没点名的路径加载不到，图标位置空着。用时写 `gpui_kit_assets::IconName`。
-gpui_kit_assets::icon_assets!(LucideExtras, [Puzzle, Server]);
+gpui_kit_assets::icon_assets!(LucideExtras, [Coffee, MessageSquare, Puzzle, Server]);
 
 struct SmeltAssets;
 
@@ -4704,6 +4746,7 @@ fn app_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-up", PrevSession, Some("Workspace")),
         KeyBinding::new("cmd-down", NextSession, Some("Workspace")),
         KeyBinding::new("cmd-k", ToggleCommandPalette, Some("Workspace")),
+        KeyBinding::new("cmd-n", NewConversation, Some("Workspace")),
         KeyBinding::new("cmd-[", CyclePanePrev, Some("Workspace")),
         KeyBinding::new("cmd-]", CyclePaneNext, Some("Workspace")),
         KeyBinding::new("cmd-d", SplitBeside, Some("Workspace")),
@@ -4724,6 +4767,14 @@ fn app_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("left", FileTreeMoveLeft, Some("FileTree")),
         KeyBinding::new("right", FileTreeMoveRight, Some("FileTree")),
         KeyBinding::new("enter", FileTreeActivate, Some("FileTree")),
+        // 侧栏键盘操作，见 `session_list::keyboard`。⌘⇧E 跟 VS Code「聚焦资源管理器」一样。
+        KeyBinding::new("cmd-shift-e", FocusSidebar, Some("Workspace")),
+        KeyBinding::new("up", SidebarUp, Some("Sidebar")),
+        KeyBinding::new("down", SidebarDown, Some("Sidebar")),
+        KeyBinding::new("left", SidebarCollapse, Some("Sidebar")),
+        KeyBinding::new("right", SidebarExpand, Some("Sidebar")),
+        KeyBinding::new("enter", SidebarOpen, Some("Sidebar")),
+        KeyBinding::new("escape", SidebarExit, Some("Sidebar")),
         // readline / Grok TUI 行编辑：Ctrl+U 删到行首、Ctrl+K 删到行尾、
         // Ctrl+W 删词。绑在 Input context，所有输入框（ACP composer 等）生效。
         KeyBinding::new("ctrl-u", DeleteToBeginningOfLine, Some("Input")),
