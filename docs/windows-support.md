@@ -5,7 +5,7 @@
 1. Windows 桌面端连远程运行时（Linux / macOS 上的 smeltd）。
 2. Windows 本机跑 smeltd：冷启动、Rust 客户端走 AF_UNIX、Bun 走命名管道、升级即重启。
 
-数据目录是 `%USERPROFILE%\.smelt`，和其它平台同一套 `smelt_paths`。第一版只出 x86_64，不签名，没有自动更新。发版起初是 zip 便携包，后来换成按用户安装的 Inno Setup 安装程序（`scripts/windows-installer.iss`）。
+数据目录是 `%USERPROFILE%\.smelt`，和其它平台同一套 `smelt_paths`。第一版只出 x86_64，不签名。发版起初是 zip 便携包，后来换成按用户安装的 Inno Setup 安装程序（`scripts/windows-installer.iss`）。
 
 ## 第 1 步的范围
 
@@ -119,7 +119,7 @@
 | `smelt-paths` `smelt_home()` | `dirs::home_dir().join(".smelt")` | 待定，见末尾 |
 | `smelt-iroh/src/lib.rs` 密钥文件权限 | `cfg(unix)` 设 0600，已有非 Unix 分支 | 不改，用户目录默认 ACL 只给本人 |
 | `smelt-client-store` `path_bytes` | Unix `OsStrExt` | 只服务更新器状态，随更新器 `cfg` |
-| `smelt-client/src/updater.rs`、`app_location.rs` | `.app` 替换，`flock`、`renamex_np`、`dlopen` | `cfg(target_os = "macos")`，设置页的更新入口在 Windows 上隐藏 |
+| `smelt-client/src/updater/macos.rs`、`app_location.rs` | `.app` 替换，`flock`、`renamex_np`、`dlopen` | `cfg(target_os = "macos")`；Windows 的更新另走 `updater/windows.rs`，见「待办」上面的「应用内更新」 |
 | `smelt/src/plugins/host_fs.rs` | 软链接、原子交换 | 软链接用 `std::os::windows::fs::symlink_file` / `symlink_dir`，失败按不支持报错；原子交换走现有的「不支持」分支 |
 | `smelt/src/terminal.rs` 其余部分 | 前端渲染与连接 | D1 换类型，smeltd 部分已在 D3 挪走 |
 
@@ -128,7 +128,7 @@
 - **CI**：`ci.yml` 加 `windows-latest` 任务，跑 `cargo check -p smelt` 和受影响 crate 的测试（smelt-runtime-client、smelt-iroh、smelt-client）。在 Windows runner 上原生编译，不交叉编译。桌面端在 Windows 上编过之前不设为必需检查，编过后加进 `ci-ok`。
 - **发版**：`release.yml` 加 Windows 任务，只编 `smelt`，产出 `smelt-<版本>-windows-x86_64.zip`，挂到同一个 Release，写进校验和清单。
 - **图标与清单**：Windows 清单由 `gpui-pre-platform` 的 `windows-manifest` 特性带上；exe 图标要新加 `crates/smelt/build.rs`，只在 Windows 目标上嵌资源。
-- **签名与更新**：第一版不签名，下载后有 SmartScreen 提示，在 Release 说明里写明。安装包已定为 Inno Setup 按用户安装；自动更新还没做。
+- **签名与更新**：第一版不签名，下载后有 SmartScreen 提示，在 Release 说明里写明。安装包已定为 Inno Setup 按用户安装；应用内更新见下面「应用内更新」。
 
 ## 施工顺序
 
@@ -153,6 +153,17 @@
 - **Shell 和进程**。交互终端是 `COMSPEC` 或 `cmd.exe`，参数 `/d /k`。没有参数的自动化 Shell 脚本同样走 `cmd.exe /d /c`，不调用 bash。子进程放进 Job Object，`KILL_ON_JOB_CLOSE`。ConPTY 不能 `CREATE_SUSPENDED`，shell 起来之后立刻 `attach_running`。PTY 尺寸走 master 的 `resize`，不用 `as_raw_fd`。
 - **发版**。安装程序 `smelt-<版本>-windows-x86_64-setup.exe` 装进安装目录的是 `smelt.exe`、`smelt.com`、`smeltd.exe`、`smelt-notify.exe`、`smelt-pi.exe`，外加 Pi 要的 wasm。桌面在自己旁边找这几个 exe。`smelt.com` 是控制台子系统的命令行入口（`smelt-cli.exe` 改名），cmd / PowerShell 敲 `smelt` 先找到它。
 
+## 应用内更新
+
+已实现。通道、查新版、设置页和 macOS 共用（`smelt-client/src/updater.rs`），Windows 只换「下什么、怎么装」（`updater/windows.rs`）：
+
+- **谁能更新**。只有安装程序装的发版构建：有发版号 `smelt_version::RELEASE`，exe 旁边有 Inno 的卸载程序 `unins000.exe`。开发构建、拷出来的 exe 停在「这个 Smelt 不能自动更新」，不检查、不下载。
+- **查**。认 Release 里的 `smelt-<版本>-windows-x86_64-setup.exe`，同一个 Release 还要有 `SHA256SUMS`，而且清单里已经有它（发版流水线等所有产物到齐才重写清单）；最新的还没齐就退到上一个，最多看三个。是不是新版比的是发版号：只有比装着的新才装，切回生产通道或退到比装着的旧时都不装回去（旧版读不了新版升级过的客户端库）。版本号认不出的候选跳过，所以更新清单要给出能解析的版本号。
+- **下**。下到 `%LOCALAPPDATA%\Smelt\update`，边下边算 SHA-256，对上清单才算下好；同一版本下过就不再下。不记持久化事务：下好的安装程序只在这次运行里等着装，重启后重新检查。启动时删掉已经装上的那个版本的安装程序和日志。
+- **装**。拉起前再校验一遍，再用 `spawn_detached` 拉起 `setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /WAITPID=<桌面 pid> /LOG=<日志> [/RELAUNCH=<桌面 exe>]`，脱离桌面的 Job，桌面随即退出。安装程序在 `InitializeSetup` 里等桌面进程退出（上限 2 分钟，超时这次不装），之后才查 `AppMutex`、换文件（Inno 源码里这两步就是这个顺序）。给了 `/RELAUNCH` 时，装好由 `[Run]` 打开新版；没装成（超时、文件被占用、又有 Smelt 开着）由 `DeinitializeSetup` 把原来那个打开。下次启动在 app.log 里记一笔，指向留下的安装日志。
+- **退出时装**。Quit 动作和关掉主窗口（Windows 上关主窗口就是退出，不走 Quit）都会装待装的更新，不重新打开。
+- **守护不停**。smeltd、smelt-pi、smelt-notify 跑的都是 `~/.smelt/bin` 里的副本，不占安装目录，换文件不用停守护，会话不断，也就不用像 macOS 那样先确认。新版桌面起来后照「守护落后就在空闲时重启」换守护。安装目录里还可能被占着的是 `smelt.com`（终端里开着的命令行），交给 Inno 的 Restart Manager 关。
+
 ## 已定
 
 原先写成「未定」的，按上面落地：
@@ -165,4 +176,4 @@
 
 ## 待办
 
-- **远程升级与自动更新**（10-27 记）。现在 Windows 上的运行时回不了 `runtime_upgrade`：它跟桌面装在同一个安装程序里，只能到那台机器上手动跑新版的 `setup.exe` 覆盖安装。打算的做法：smeltd 收到升级请求后从 Release 下载 `smelt-<版本>-windows-x86_64-setup.exe`，按校验和清单核对哈希，拉起一个脱离自己的安装进程（`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`）后退出，好让 Inno Setup 替换正在用的 exe；装完重新拉起 smeltd，桌面那边照现有流程等它重启、重连。代价：终端会话不保留；那台机器上开着的 Smelt 桌面会被关掉。本机自动更新可以复用这套流程。做的时候要在 Windows 机器上实测。
+- **远程升级**（10-27 记）。现在 Windows 上的运行时回不了 `runtime_upgrade`：它跟桌面装在同一个安装程序里，只能到那台机器上手动跑新版的 `setup.exe` 覆盖安装。打算的做法：smeltd 收到升级请求后从 Release 下载 `smelt-<版本>-windows-x86_64-setup.exe`，按校验和清单核对哈希，拉起一个脱离自己的安装进程（`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`）后退出，好让 Inno Setup 替换正在用的 exe；装完重新拉起 smeltd，桌面那边照现有流程等它重启、重连。代价：终端会话不保留；那台机器上开着的 Smelt 桌面会被关掉。下载、校验、静默安装可以复用桌面应用内更新那套（`updater/windows.rs`、`.iss` 的 `/WAITPID`）。做的时候要在 Windows 机器上实测。
