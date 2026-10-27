@@ -23,7 +23,7 @@ use smelt_model::control_api::{
 };
 use smelt_runtime_client::RuntimeClient;
 use smelt_runtime_client::protocol::control::EmptyParams;
-use smelt_sys::process_usage::ProcessSampler;
+use smelt_sys::process_usage::{MemoryBreakdown, ProcessSampler};
 use smelt_ui::IconAction as _;
 use smelt_ui::{Button, ListRow};
 
@@ -47,6 +47,8 @@ type RuntimeResults = Vec<(RuntimeKey, Result<ResourceUsageResult, String>)>;
 pub(crate) struct ResourceMonitor {
     /// 桌面进程自己。
     desktop: Option<ProcessUsage>,
+    /// 桌面进程的内存拆成哪几块。只有 macOS 有。
+    desktop_memory: Option<MemoryBreakdown>,
     /// 这一轮问到的机器，本机在前。
     runtimes: RuntimeResults,
     /// 本机合计内存的样本，老的在前。
@@ -76,6 +78,7 @@ impl ResourceMonitor {
     /// 重新开始看：上次看到的数和曲线都作废。
     fn reset(&mut self) {
         self.desktop = None;
+        self.desktop_memory = None;
         self.runtimes.clear();
         self.history.clear();
         self.chart.clear();
@@ -142,8 +145,10 @@ impl Workspace {
                 }
                 let (returned, desktop, runtimes) = sample_round(targets, sampler, cx).await;
                 sampler = returned;
+                let (desktop, desktop_memory) = desktop.unzip();
                 if this
                     .update(cx, |ws, cx| {
+                        ws.resource_monitor.desktop_memory = desktop_memory.flatten();
                         ws.resource_monitor
                             .apply(desktop, runtimes, Instant::now());
                         cx.notify();
@@ -215,12 +220,15 @@ impl Workspace {
     }
 }
 
+/// 桌面进程这一轮的占用和内存拆分。
+type DesktopSample = (ProcessUsage, Option<MemoryBreakdown>);
+
 /// 一轮：桌面自己在后台量，各台机器各自并发问。采样器带进去再带回来。
 async fn sample_round(
     targets: Vec<(RuntimeKey, RuntimeClient)>,
     mut sampler: ProcessSampler,
     cx: &mut AsyncApp,
-) -> (ProcessSampler, Option<ProcessUsage>, RuntimeResults) {
+) -> (ProcessSampler, Option<DesktopSample>, RuntimeResults) {
     let calls: Vec<_> = targets
         .into_iter()
         .map(|(key, client)| {
@@ -238,13 +246,16 @@ async fn sample_round(
     let (sampler, desktop) = cx
         .background_executor()
         .spawn(async move {
-            let desktop = sampler
-                .sample_process(std::process::id())
-                .map(|usage| ProcessUsage {
+            let desktop = sampler.sample_process(std::process::id()).map(|usage| {
+                let memory = smelt_sys::process_usage::own_memory();
+                // 拆分和总数取同一刻的，展开后几块加起来正好是这一行。
+                let usage = ProcessUsage {
                     cpu_percent: usage.cpu_percent,
-                    memory_bytes: usage.memory_bytes,
+                    memory_bytes: memory.map_or(usage.memory_bytes, |memory| memory.total),
                     process_count: usage.processes,
-                });
+                };
+                (usage, memory)
+            });
             (sampler, desktop)
         })
         .await;
@@ -449,11 +460,41 @@ pub(crate) struct PanelSnapshot {
     sections: Vec<Section>,
 }
 
-/// 不跟着排序走的一行：桌面进程、守护进程。它们就是单个进程，没有明细可展开。
+/// 不跟着排序走的一行：桌面进程、守护进程。它们就是单个进程；桌面进程能展开看内存花在哪。
 struct Row {
     label: String,
     detail: Option<String>,
     usage: ProcessUsage,
+    /// 内存拆成的几块，空的就不能展开。
+    parts: Vec<MemoryPart>,
+}
+
+/// 内存里的一块。
+struct MemoryPart {
+    label: &'static str,
+    detail: &'static str,
+    bytes: u64,
+}
+
+/// 桌面进程的内存，按固定顺序列，数字跳动时行不换位置。
+fn memory_parts(memory: MemoryBreakdown) -> Vec<MemoryPart> {
+    vec![
+        MemoryPart {
+            label: "画面缓冲与纹理",
+            detail: "GPU 绘制用，窗口越大占得越多",
+            bytes: memory.graphics,
+        },
+        MemoryPart {
+            label: "程序数据",
+            detail: "会话内容、文字排版缓存等，堆上正在用的部分",
+            bytes: memory.heap,
+        },
+        MemoryPart {
+            label: "其它",
+            detail: "系统库的数据、线程栈、堆里空着的页",
+            bytes: memory.other(),
+        },
+    ]
 }
 
 /// 一台机器。
@@ -517,6 +558,7 @@ fn sections(ws: &Workspace, cx: &App) -> Vec<Section> {
                     label: "Smelt 界面".to_string(),
                     detail: Some("GPUI 主进程".to_string()),
                     usage: desktop,
+                    parts: monitor.desktop_memory.map(memory_parts).unwrap_or_default(),
                 });
                 section.total = Some(desktop);
             }
@@ -529,6 +571,7 @@ fn sections(ws: &Workspace, cx: &App) -> Vec<Section> {
                         label: "smeltd 后台服务".to_string(),
                         detail: None,
                         usage: result.daemon,
+                        parts: Vec::new(),
                     });
                     let (groups, others) = group_sessions(&result.sessions, |id| {
                         owners.get(&(key.clone(), id.to_string())).cloned()
@@ -723,12 +766,14 @@ fn section_view(
                 ),
         );
     }
-    for row in &section.fixed {
-        table = table.child(fixed_row(row, colors));
+    let open = &expanded.read(cx).0;
+    for (ix, row) in section.fixed.iter().enumerate() {
+        let id = SharedString::from(format!("{}-fixed-{ix}", section.id_prefix));
+        let is_open = open.contains(&id);
+        table = table.child(fixed_row(id, row, is_open, &expanded, colors));
     }
     let mut sessions: Vec<&SessionGroup> = section.sessions.iter().collect();
     sort_by.sort(&mut sessions);
-    let open = &expanded.read(cx).0;
     for (ix, group) in sessions.into_iter().chain(&section.others).enumerate() {
         let id = SharedString::from(match &group.jump {
             Some(jump) => format!("{}-{jump}", section.id_prefix),
@@ -805,16 +850,104 @@ fn row_label(label: String, detail: Option<String>, colors: RowColors) -> Div {
         }))
 }
 
-/// 桌面进程、守护进程：单个进程，只是看。
-fn fixed_row(row: &Row, colors: RowColors) -> impl IntoElement + use<> {
-    h_flex()
+/// 桌面进程、守护进程：单个进程。有内存拆分的点整行展开或收起。
+fn fixed_row(
+    id: SharedString,
+    row: &Row,
+    is_open: bool,
+    expanded: &Entity<ExpandedRows>,
+    colors: RowColors,
+) -> AnyElement {
+    let label = row_label(row.label.clone(), row.detail.clone(), colors);
+    if row.parts.is_empty() {
+        return h_flex()
+            .px_2()
+            .py_1()
+            .gap_3()
+            .items_center()
+            .child(div().w(px(DISCLOSURE_COLUMN)))
+            .child(label)
+            .child(usage_columns(row.usage, colors.fg))
+            .into_any_element();
+    }
+    let head = ListRow::new(ElementId::from(id.clone()))
+        .card()
         .px_2()
         .py_1()
         .gap_3()
+        .flex()
         .items_center()
-        .child(div().w(px(DISCLOSURE_COLUMN)))
-        .child(row_label(row.label.clone(), row.detail.clone(), colors))
-        .child(usage_columns(row.usage, colors.fg))
+        .rounded(ui_theme::row_radius())
+        .on_click(toggle_row(expanded, id))
+        .child(disclosure(is_open, colors))
+        .child(label)
+        .child(usage_columns(row.usage, colors.fg));
+    if !is_open {
+        return head.into_any_element();
+    }
+    let body = v_flex()
+        // 和名字对齐：行内边距之后是箭头列，再隔一个列间距。
+        .pl(px(DISCLOSURE_COLUMN + 12.))
+        .pb_1()
+        .children(row.parts.iter().map(|part| memory_part_row(part, colors)));
+    v_flex().child(head).child(body).into_any_element()
+}
+
+/// 明细里的一块内存：名字、它装的是什么，只有内存一列。
+fn memory_part_row(part: &MemoryPart, colors: RowColors) -> impl IntoElement + use<> {
+    h_flex()
+        .px_2()
+        .py(px(3.))
+        .gap_3()
+        .items_center()
+        .child(row_label(
+            part.label.to_string(),
+            Some(part.detail.to_string()),
+            colors,
+        ))
+        .child(
+            h_flex()
+                .flex_none()
+                .font_features(ui_theme::tabular_figures())
+                .text_sm()
+                .text_color(colors.muted)
+                .child(div().w(px(CPU_COLUMN)))
+                .child(
+                    div()
+                        .w(px(MEMORY_COLUMN))
+                        .text_right()
+                        .child(format_bytes(part.bytes)),
+                ),
+        )
+}
+
+/// 点一下展开、再点收起。
+fn toggle_row(
+    expanded: &Entity<ExpandedRows>,
+    id: SharedString,
+) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static {
+    let expanded = expanded.clone();
+    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+        expanded.update(cx, |expanded, cx| {
+            if !expanded.0.remove(&id) {
+                expanded.0.insert(id.clone());
+            }
+            cx.notify();
+        });
+    }
+}
+
+/// 展开箭头。
+fn disclosure(is_open: bool, colors: RowColors) -> impl IntoElement + use<> {
+    div()
+        .w(px(DISCLOSURE_COLUMN))
+        .flex_none()
+        .text_color(colors.muted)
+        .child(Icon::new(if is_open {
+            IconName::ChevronDown
+        } else {
+            IconName::ChevronRight
+        }))
 }
 
 /// 一行会话。点整行展开或收起它的进程；右边的按钮跳回主窗口的这个会话。
@@ -830,18 +963,6 @@ fn session_row(
     let detail = match group.jump {
         Some(_) => summary,
         None => format!("自动化、子智能体或别的客户端开的 · {summary}"),
-    };
-    let toggle = {
-        let expanded = expanded.clone();
-        let id = id.clone();
-        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-            expanded.update(cx, |expanded, cx| {
-                if !expanded.0.remove(&id) {
-                    expanded.0.insert(id.clone());
-                }
-                cx.notify();
-            });
-        }
     };
     let jump = group.jump.clone().map(|session_id| {
         let workspace = workspace.clone();
@@ -870,18 +991,8 @@ fn session_row(
         .flex()
         .items_center()
         .rounded(ui_theme::row_radius())
-        .on_click(toggle)
-        .child(
-            div()
-                .w(px(DISCLOSURE_COLUMN))
-                .flex_none()
-                .text_color(colors.muted)
-                .child(Icon::new(if is_open {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                })),
-        )
+        .on_click(toggle_row(expanded, id.clone()))
+        .child(disclosure(is_open, colors))
         .child(row_label(group.title.clone(), Some(detail), colors))
         .children(jump)
         .child(usage_columns(group.usage, colors.fg));

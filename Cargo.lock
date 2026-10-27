@@ -11033,6 +11033,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "libc",
+ "mach2",
  "sha2 0.10.9",
  "smelt-paths",
  "sysinfo 0.37.2",
