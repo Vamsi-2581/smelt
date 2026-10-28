@@ -530,7 +530,8 @@ impl Workspace {
                     }
                     Ok(FileOpenResult {
                         content: FileContent::Image { data },
-                    }) => match smelt_model::runtime_path::PathStyle::LOCAL.extension(&of.path)
+                    }) => match smelt_model::runtime_path::PathStyle::LOCAL
+                        .extension(&of.path)
                         .and_then(smelt_ui::image::format_for_extension)
                     {
                         Some(format) => {
@@ -795,7 +796,8 @@ impl Workspace {
 
     /// 文件树右键「删除文件」：先弹二次确认，用户点确定后才真正删盘。
     pub fn start_delete_file(&mut self, path: String, is_dir: bool, cx: &mut Context<Self>) {
-        let label = smelt_model::runtime_path::PathStyle::LOCAL.file_name(&path)
+        let label = smelt_model::runtime_path::PathStyle::LOCAL
+            .file_name(&path)
             .unwrap_or(&path)
             .to_string();
         self.delete_file_target = Some(DeleteFileTarget {
@@ -924,7 +926,9 @@ impl Workspace {
         }
         let root = self.active_project_root(cx);
         let rel = root
-            .and_then(|root| smelt_model::runtime_path::PathStyle::LOCAL.strip_prefix(&of.path, &root))
+            .and_then(|root| {
+                smelt_model::runtime_path::PathStyle::LOCAL.strip_prefix(&of.path, &root)
+            })
             .unwrap_or_else(|| of.path.clone());
         let msg = format!("{rel} 里选中的这段：\n```\n{selected}\n```\n");
         self.send_to_panel_session(&msg, window, cx);

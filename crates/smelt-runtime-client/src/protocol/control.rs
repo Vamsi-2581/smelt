@@ -132,6 +132,7 @@ define_control_methods! {
     WorkspaceProjectOpen => (WORKSPACE_PROJECT_OPEN_METHOD, "workspace.project.open"),
     WorkspaceProjectClose => (WORKSPACE_PROJECT_CLOSE_METHOD, "workspace.project.close"),
     WorkspaceDirectoryGet => (WORKSPACE_DIRECTORY_GET_METHOD, "workspace.directory"),
+    WorkspaceRename => (WORKSPACE_RENAME_METHOD, "workspace.rename"),
     AgentMemoryList => (AGENT_MEMORY_LIST_METHOD, "agent.memory.list"),
     AgentMemoryDelete => (AGENT_MEMORY_DELETE_METHOD, "agent.memory.delete"),
     AgentMemoryApprove => (AGENT_MEMORY_APPROVE_METHOD, "agent.memory.approve"),
@@ -646,7 +647,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 122);
+        assert_eq!(names.len(), 123);
     }
 
     #[test]

@@ -8,6 +8,8 @@
 //! - 这边没见过、目录里也没有的对话是这边新建的，发新建；在目录里见过、现在没了的是
 //!   别处关掉的，本地摘掉，不再建回去。
 //! - 关掉对话是显式命令，发成功之前一直留着，重连后接着发。
+//! - 名字只从目录来（改名走 `workspace.rename`，名字写在哪由运行时定）：发出去的对话不带
+//!   名字，收到的目录里名字变了就报给界面，自己改名的回声也一样。
 //!
 //! 项目不在这里：项目列表就是最近一份目录里的那份，开关项目直接发命令，等推送回来
 //! 再变（见 `Workspace::request_project_open`）。对话要对账，是因为它在这边有活着的
@@ -24,9 +26,11 @@ pub(crate) struct DirectorySync {
     listed: Option<(u64, HashSet<String>)>,
     /// 在目录里见过的对话（含这边新建成功的）。对话 id 不会重用，见过就一直算见过。
     known_conversations: HashSet<String>,
-    /// 每段对话这边上次发出（或读到时）的样子。只在发出成功时变。
+    /// 每段对话这边上次发出（或读到时）的样子，不带名字。只在发出成功时变。
     sent: HashMap<String, WorkspaceConversation>,
     pending_deletes: BTreeSet<String>,
+    /// 上一份目录里各段对话、各格终端的名字。下一份里变了才报。
+    names: HashMap<String, Option<String>>,
 }
 
 /// 收到一份目录之后本地要做的事。
@@ -38,8 +42,10 @@ pub(crate) struct Inbound {
     pub(crate) added: Vec<WorkspaceConversation>,
     /// 别处关掉的对话 id。
     pub(crate) removed: Vec<String>,
-    /// 别处改了名的对话：(对话 id, 新名字)。
+    /// 名字变了的对话：(对话 id, 新名字)。
     pub(crate) retitled: Vec<(String, Option<String>)>,
+    /// 名字变了的终端：(守护里的终端 id, 新名字)。
+    pub(crate) renamed_terminals: Vec<(String, Option<String>)>,
 }
 
 /// 这一轮要发的对话命令。后台按这个顺序发：先删、再建、再改。
@@ -94,23 +100,28 @@ impl DirectorySync {
             .collect::<Vec<_>>();
         let mut added = Vec::new();
         let mut retitled = Vec::new();
+        let mut renamed_terminals = Vec::new();
         for conversation in conversations {
             if self.pending_deletes.contains(&conversation.id) {
                 continue;
             }
-            if !local_conversations.contains(&conversation.id) {
+            let local = local_conversations.contains(&conversation.id);
+            if self.note_name(&conversation.id, &conversation.custom_title) && local {
+                retitled.push((conversation.id.clone(), conversation.custom_title.clone()));
+            }
+            for terminal in &conversation.terminals {
+                if let Some(id) = &terminal.id
+                    && self.note_name(id, &terminal.custom_title)
+                    && local
+                {
+                    renamed_terminals.push((id.clone(), terminal.custom_title.clone()));
+                }
+            }
+            if !local {
                 // 读到的样子就是这边的起点：恢复出来没改过的不必再发一遍。
                 self.sent
-                    .insert(conversation.id.clone(), conversation.clone());
+                    .insert(conversation.id.clone(), without_names(&conversation));
                 added.push(conversation);
-                continue;
-            }
-            let sent_title = self
-                .sent
-                .get(&conversation.id)
-                .map(|sent| &sent.custom_title);
-            if sent_title.is_some_and(|title| *title != conversation.custom_title) {
-                retitled.push((conversation.id, conversation.custom_title));
             }
         }
         self.known_conversations.extend(ids.iter().cloned());
@@ -123,6 +134,20 @@ impl DirectorySync {
             added,
             removed,
             retitled,
+            renamed_terminals,
+        }
+    }
+
+    /// 记下一个名字，和上一份目录里的不一样时返回 `true`。
+    fn note_name(&mut self, id: &str, name: &Option<String>) -> bool {
+        match self.names.get(id) {
+            Some(previous) if previous == name => false,
+            _ => {
+                let first_sight = !self.names.contains_key(id);
+                self.names.insert(id.to_string(), name.clone());
+                // 第一次见到、本来也没名字的，不算变了。
+                !(first_sight && name.is_none())
+            }
         }
     }
 
@@ -168,8 +193,25 @@ impl DirectorySync {
     }
 }
 
+/// 这段对话不带名字的样子：发给运行时、和上次发出的比，都不看名字（名字只从目录来）。
+pub(crate) fn without_names(conversation: &WorkspaceConversation) -> WorkspaceConversation {
+    let mut conversation = conversation.clone();
+    conversation.custom_title = None;
+    for terminal in &mut conversation.terminals {
+        terminal.custom_title = None;
+    }
+    if let Some(acp) = &mut conversation.acp {
+        acp.session_title = None;
+    }
+    conversation
+}
+
 /// 按这台客户端记的顺序排：记过的按记的位置，没记过的（别处新建的）按原来的先后排在后面。
-pub(crate) fn order_by_saved<T>(items: Vec<T>, saved: &[String], key: impl Fn(&T) -> &str) -> Vec<T> {
+pub(crate) fn order_by_saved<T>(
+    items: Vec<T>,
+    saved: &[String],
+    key: impl Fn(&T) -> &str,
+) -> Vec<T> {
     let rank = saved
         .iter()
         .enumerate()
@@ -218,7 +260,9 @@ mod tests {
         assert!(inbound.first);
         assert_eq!(inbound.added, [conversation("a", Some("A"))]);
 
-        let commands = sync.commands(&[conversation("a", Some("A"))]).unwrap();
+        let commands = sync
+            .commands(&[without_names(&conversation("a", Some("A")))])
+            .unwrap();
         assert!(commands.is_empty());
     }
 
@@ -272,27 +316,71 @@ mod tests {
         let mut theirs = conversation("a", None);
         theirs.last_updated_at = 99;
         sync.receive(9, vec![theirs], &ids(&["a"]));
-        assert!(sync.commands(&[conversation("a", None)]).unwrap().is_empty());
+        assert!(
+            sync.commands(&[conversation("a", None)])
+                .unwrap()
+                .is_empty()
+        );
 
         let mut mine = conversation("a", None);
         mine.last_updated_at = 5;
         assert_eq!(sync.commands(&[mine.clone()]).unwrap().updates, [mine]);
     }
 
-    /// 别处改的名字接过来；这边改过的名字不会被自己发出去的回声当成别处改的。
+    /// 名字只从目录来：变了报一次（自己改名的回声也报，界面就靠它更新），没变不报；
+    /// 终端分屏的名字一样。
     #[test]
-    fn titles_changed_elsewhere_are_adopted() {
+    fn names_from_the_directory_are_reported_when_they_change() {
         let mut sync = DirectorySync::default();
-        sync.receive(10, vec![conversation("a", Some("old"))], &HashSet::new());
-        let inbound = sync.receive(11, vec![conversation("a", Some("theirs"))], &ids(&["a"]));
-        assert_eq!(inbound.retitled, [("a".to_string(), Some("theirs".to_string()))]);
+        let mut split = conversation("t", None);
+        split.terminals = vec![smelt_model::workspace_directory::WorkspaceTerminal {
+            id: Some("pane".into()),
+            ..Default::default()
+        }];
+        sync.receive(
+            1,
+            vec![conversation("a", Some("old")), split.clone()],
+            &HashSet::new(),
+        );
 
-        sync.record(DirectoryOutcome {
-            settled: vec![conversation("a", Some("mine"))],
-            ..DirectoryOutcome::default()
-        });
-        let echo = sync.receive(12, vec![conversation("a", Some("mine"))], &ids(&["a"]));
-        assert!(echo.retitled.is_empty());
+        let inbound = sync.receive(
+            2,
+            vec![conversation("a", Some("new")), split.clone()],
+            &ids(&["a", "t"]),
+        );
+        assert_eq!(
+            inbound.retitled,
+            [("a".to_string(), Some("new".to_string()))]
+        );
+        assert!(inbound.renamed_terminals.is_empty());
+
+        split.terminals[0].custom_title = Some("测试".into());
+        let inbound = sync.receive(
+            3,
+            vec![conversation("a", Some("new")), split.clone()],
+            &ids(&["a", "t"]),
+        );
+        assert!(inbound.retitled.is_empty(), "没变不报");
+        assert_eq!(
+            inbound.renamed_terminals,
+            [("pane".to_string(), Some("测试".to_string()))]
+        );
+    }
+
+    /// 发出去的对话不带名字：本地名字和目录里的不一样，也不会因此发改动。
+    #[test]
+    fn names_never_cause_an_update() {
+        let mut sync = DirectorySync::default();
+        sync.receive(
+            1,
+            vec![conversation("a", Some("目录里的"))],
+            &HashSet::new(),
+        );
+        assert!(
+            sync.commands(&[without_names(&conversation("a", Some("本地的")))])
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// 关掉的对话发删除，删成之前推送里的旧目录不会把它带回来。
@@ -316,6 +404,9 @@ mod tests {
     fn saved_order_wins_and_unknown_items_keep_their_order_after_it() {
         let items = vec!["a", "b", "c", "d"];
         let saved = roots(&["c", "a"]);
-        assert_eq!(order_by_saved(items, &saved, |item| *item), ["c", "a", "b", "d"]);
+        assert_eq!(
+            order_by_saved(items, &saved, |item| *item),
+            ["c", "a", "b", "d"]
+        );
     }
 }

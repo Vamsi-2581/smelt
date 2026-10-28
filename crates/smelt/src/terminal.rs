@@ -664,7 +664,6 @@ fn os_clipboard_write(text: &str) {
 
 // OSC 9/99/777 通知由 smeltd 在 PTY 输出泵里扫，走事件总线推来，客户端不扫。
 
-
 /// 让运行时杀掉某会话（用户主动关 pane 时调用；GUI 退出不调 → 会话持久活着）。
 /// 等回执再返回，阻塞，不能在主线程调；UI 回调用 [`kill_remote_in_background`]。
 pub(crate) fn kill_remote(runtime: &crate::runtimes::Runtime, id: &str) {
@@ -2139,10 +2138,7 @@ mod damage_gate_tests {
     struct TestSessionGuard(String);
     impl Drop for TestSessionGuard {
         fn drop(&mut self) {
-            kill_remote(
-                &crate::runtimes::Runtime::local(),
-                &self.0,
-            );
+            kill_remote(&crate::runtimes::Runtime::local(), &self.0);
         }
     }
 
@@ -2162,10 +2158,7 @@ mod damage_gate_tests {
 
         // 等 shell 起来（读线程确实在跑），再杀掉会话模拟连接断开。
         thread::sleep(Duration::from_millis(500));
-        kill_remote(
-            &crate::runtimes::Runtime::local(),
-            &id,
-        );
+        kill_remote(&crate::runtimes::Runtime::local(), &id);
 
         // 守护 remove 会话并 shutdown client → 读线程 EOF → dead 置位。
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -2459,9 +2452,6 @@ mod open_request_tests {
     }
 }
 
-
-
-
 #[cfg(test)]
 mod handshake_timeout_tests {
     use super::*;
@@ -2669,7 +2659,6 @@ mod handshake_timeout_tests {
         writer.close();
     }
 }
-
 
 #[cfg(test)]
 mod event_proxy_answers_tests {

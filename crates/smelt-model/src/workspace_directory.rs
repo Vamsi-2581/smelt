@@ -95,6 +95,17 @@ pub struct WorkspaceConversationIdParams {
     pub conversation_id: String,
 }
 
+/// `workspace.rename` 的参数。带 `terminal_id` 是给这段对话里的这一格终端改名，不带是给
+/// 整段对话改名。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceRenameParams {
+    pub conversation_id: String,
+    #[serde(default)]
+    pub terminal_id: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceProjectParams {
     pub root: String,

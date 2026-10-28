@@ -935,7 +935,6 @@ impl Workspace {
             |this: &mut Self, _view, ev: &acp_view::AcpViewEvent, window, cx| match ev {
                 acp_view::AcpViewEvent::Changed => {
                     this.touch_acp_session(_view);
-                    this.persist_pending_history_title_for_view(_view, cx);
                     this.persist_history_agent_definition_for_view(_view, cx);
                     this.save_state(cx);
                     this.sync_notification_surfaces(cx);
@@ -2180,8 +2179,6 @@ impl Workspace {
                 AttentionGlobal::remove_session(&id, cx);
             }
         }
-        self.pending_history_title_persist
-            .remove(&self.sessions[ix].ui_id);
         let closed_conversation_sid = match &self.sessions[ix].kind {
             SessionKind::Conversation(view) => Some(view.read(cx).session_id().to_string()),
             SessionKind::Term { .. } => None,
@@ -2190,18 +2187,16 @@ impl Workspace {
             closed_conversation_sid.as_deref() == self.nav.agents().conversation_sid();
         // 关的是正在看的对话：回到上一个看过的对话，没有就落到最后一段。
         let next_conversation_ix = if closed_current_conversation {
-            self.previous_viewed_session(closed_ui_id, |session| {
-                session.is_agent_conversation(cx)
-            })
-            .or_else(|| {
-                self.sessions
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find_map(|(other, session)| {
-                        (other != ix && session.is_agent_conversation(cx)).then_some(other)
-                    })
-            })
+            self.previous_viewed_session(closed_ui_id, |session| session.is_agent_conversation(cx))
+                .or_else(|| {
+                    self.sessions
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .find_map(|(other, session)| {
+                            (other != ix && session.is_agent_conversation(cx)).then_some(other)
+                        })
+                })
         } else {
             None
         };
@@ -2623,81 +2618,35 @@ impl Workspace {
         let custom_title = (!text.is_empty()).then_some(text);
         match target {
             RenameTarget::Session(ix) => {
-                let mut history_identity = None;
-                let mut pending_ui_id = None;
-                let terminal_identity = self.sessions.get(ix).and_then(|s| match &s.kind {
-                    SessionKind::Term { active, .. } => {
-                        let (agent, conversation_id) = pane_conversation_identity(active, cx)?;
-                        Some((agent, s.cwd(cx).unwrap_or_default(), conversation_id))
-                    }
+                let Some(session) = self.sessions.get(ix) else {
+                    return;
+                };
+                let runtime = session.runtime(cx);
+                let conversation_id = session.conversation_id.clone();
+                // 终端会话认得出当前对话时，名字属于那段对话而不是这个标签：用户中途
+                // 退出、换到别的对话，这一行就该跟着换名字。
+                let terminal_identity = match &session.kind {
+                    SessionKind::Term { active, .. } => pane_conversation_identity(active, cx)
+                        .map(|(agent, id)| (agent, session.cwd(cx).unwrap_or_default(), id)),
                     SessionKind::Conversation(_) => None,
-                });
-                if let Some(s) = self.sessions.get_mut(ix) {
-                    // 终端会话认得出当前对话时，名字属于那段对话而不是这个标签：
-                    // 用户中途退出、换到别的对话，这一行就该跟着换名字，所以
-                    // 这里不能再留下会话级 pin 把新对话的名字盖住。
-                    s.custom_title = if terminal_identity.is_some() {
-                        None
-                    } else {
-                        custom_title.clone()
-                    };
-                    if let SessionKind::Conversation(view) = &s.kind {
-                        let view = view.read(cx);
-                        if let Some(resume_id) = view.history_session_id_for_save() {
-                            history_identity = Some((
-                                settings::HistorySourceKind::from(view.agent_kind()),
-                                view.profile_id().map(String::from),
-                                view.cwd().unwrap_or_default(),
-                                resume_id.to_string(),
-                            ));
-                        } else {
-                            pending_ui_id = Some(s.ui_id);
-                        }
-                    }
-                }
-                // 智能体对话的名字属于这段会话本身，改名要同步给 agent，
-                // 让 agent 侧的会话档也叫这个名字；不支持改名的 agent 静默忽略。
-                if let Some(SessionKind::Conversation(view)) =
-                    self.sessions.get(ix).map(|session| &session.kind)
-                {
-                    let view = view.clone();
-                    let title = custom_title.clone();
-                    view.update(cx, |view, _cx| view.rename_session(title));
-                }
-                let runtime = self.sessions.get(ix).map(|session| session.runtime(cx));
-                if let Some((agent, cwd, conversation_id)) = terminal_identity
-                    && let Some(runtime) = runtime.as_ref()
-                {
-                    self.set_history_custom_title(
-                        runtime,
+                };
+                match terminal_identity {
+                    Some((agent, cwd, conversation)) => self.set_history_custom_title(
+                        &runtime,
                         agent,
                         None,
                         cwd,
-                        conversation_id,
+                        conversation,
                         custom_title.clone(),
                         cx,
-                    );
-                } else if let Some((agent, profile_id, cwd, resume_id)) = history_identity
-                    && let Some(runtime) = runtime.as_ref()
-                {
-                    if let Some(session) = self.sessions.get(ix) {
-                        self.pending_history_title_persist.remove(&session.ui_id);
-                    }
-                    self.set_history_custom_title(
+                    ),
+                    None => self.request_rename(
                         runtime,
-                        agent,
-                        profile_id,
-                        cwd,
-                        resume_id,
+                        conversation_id,
+                        None,
                         custom_title.clone(),
                         cx,
-                    );
-                } else if let Some(ui_id) = pending_ui_id {
-                    if custom_title.is_some() {
-                        self.pending_history_title_persist.insert(ui_id);
-                    } else {
-                        self.pending_history_title_persist.remove(&ui_id);
-                    }
+                    ),
                 }
             }
             RenameTarget::Pane(view) => {
@@ -2717,7 +2666,26 @@ impl Workspace {
                             cx,
                         );
                     }
-                    None => view.update(cx, |t, _| t.set_custom_title(custom_title)),
+                    None => {
+                        let terminal_id = view.read(cx).session_id().to_string();
+                        let owner = self.sessions.iter().find(|session| {
+                            session
+                                .term_leaves()
+                                .iter()
+                                .any(|pane| pane.entity_id() == view.entity_id())
+                        });
+                        if let Some(owner) = owner {
+                            let runtime = owner.runtime(cx);
+                            let conversation_id = owner.conversation_id.clone();
+                            self.request_rename(
+                                runtime,
+                                conversation_id,
+                                Some(terminal_id),
+                                custom_title,
+                                cx,
+                            );
+                        }
+                    }
                 }
             }
             // 留空不改：机器总得有个名字。
@@ -2843,64 +2811,8 @@ impl Workspace {
             *list = session_history::HistoryListSnapshot::new(updated);
         }
 
-        for session in &mut self.sessions {
-            let SessionKind::Conversation(view) = &session.kind else {
-                continue;
-            };
-            let view = view.read(cx);
-            if settings::HistorySourceKind::from(view.agent_kind()) == agent
-                && view.profile_id() == profile_id.as_deref()
-                && view
-                    .history_session_id_for_save()
-                    .as_ref()
-                    .map(ToString::to_string)
-                    == Some(resume_id.clone())
-            {
-                session.custom_title = custom_title.clone();
-            }
-        }
         self.save_state(cx);
         cx.notify();
-    }
-
-    pub(crate) fn persist_pending_history_title_for_view(
-        &mut self,
-        changed_view: &Entity<acp_view::AcpView>,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(session) = self
-            .sessions
-            .iter()
-            .find(|session| session.anchor_id() == changed_view.entity_id())
-        else {
-            return;
-        };
-        if !self.pending_history_title_persist.contains(&session.ui_id) {
-            return;
-        }
-        let ui_id = session.ui_id;
-        let custom_title = session.custom_title.clone();
-        let view = changed_view.read(cx);
-        let Some(resume_id) = view.history_session_id_for_save() else {
-            return;
-        };
-        let identity = (
-            settings::HistorySourceKind::from(view.agent_kind()),
-            view.profile_id().map(String::from),
-            view.cwd().unwrap_or_default(),
-            resume_id.to_string(),
-        );
-        let runtime = view.runtime().clone();
-        self.pending_history_title_persist.remove(&ui_id);
-        self.set_history_custom_title(
-            &runtime,
-            identity.0,
-            identity.1,
-            identity.2,
-            identity.3,
-            custom_title,
-            cx,
-        );
     }
 
     pub(crate) fn persist_history_agent_definition_for_view(

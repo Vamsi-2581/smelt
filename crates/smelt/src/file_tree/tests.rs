@@ -105,7 +105,14 @@ fn file_tree_rows_single_root_keeps_walk_order_without_header() {
     let git = HashMap::from([("/repo".into(), (Instant::now(), status))]);
 
     assert_eq!(
-        collect_file_tree_rows(PathStyle::Posix, &["/repo".into()], &expanded, &HashSet::new(), &cache, &git,),
+        collect_file_tree_rows(
+            PathStyle::Posix,
+            &["/repo".into()],
+            &expanded,
+            &HashSet::new(),
+            &cache,
+            &git,
+        ),
         vec![
             FileTreeRow::Entry {
                 depth: 0,

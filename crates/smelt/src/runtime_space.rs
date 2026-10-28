@@ -79,9 +79,7 @@ impl crate::Workspace {
 
     /// 某个运行时的空间。运行时被移除就没有了。
     pub(crate) fn space(&self, key: &crate::runtimes::RuntimeKey) -> Option<&RuntimeSpace> {
-        self.spaces
-            .iter()
-            .find(|space| space.runtime.key() == key)
+        self.spaces.iter().find(|space| space.runtime.key() == key)
     }
 
     pub(crate) fn space_mut(
@@ -115,7 +113,6 @@ impl crate::Workspace {
         self.space(session.runtime(cx).key())
             .is_none_or(|space| space.sessions_restored)
     }
-
 }
 
 /// 一个项目：所在运行时 + 根路径。

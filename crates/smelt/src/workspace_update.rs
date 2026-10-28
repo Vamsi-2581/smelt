@@ -520,7 +520,12 @@ impl Workspace {
             // 只探测状态，不再在此 ensure（冷启动 ensure 由 restore 线程串行做完）。
             let (outdated, info) = cx
                 .background_executor()
-                .spawn(async { (crate::local_daemon::daemon_outdated(), crate::local_daemon::daemon_info()) })
+                .spawn(async {
+                    (
+                        crate::local_daemon::daemon_outdated(),
+                        crate::local_daemon::daemon_info(),
+                    )
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.daemon_info = info;
@@ -702,7 +707,10 @@ impl Workspace {
                 .spawn(async {
                     crate::local_daemon::restart_daemon();
                     crate::local_daemon::ensure_daemon_running();
-                    (crate::local_daemon::daemon_outdated(), crate::local_daemon::daemon_info())
+                    (
+                        crate::local_daemon::daemon_outdated(),
+                        crate::local_daemon::daemon_info(),
+                    )
                 })
                 .await;
 
@@ -713,14 +721,8 @@ impl Workspace {
                 .spawn(async move {
                     let mut out = Vec::with_capacity(jobs.len());
                     for (entity, cwd, sid) in jobs {
-                        let term = terminal::Terminal::spawn(
-                            &runtime,
-                            24,
-                            80,
-                            cwd.as_deref(),
-                            &sid,
-                            None,
-                        );
+                        let term =
+                            terminal::Terminal::spawn(&runtime, 24, 80, cwd.as_deref(), &sid, None);
                         out.push((entity, term));
                     }
                     out

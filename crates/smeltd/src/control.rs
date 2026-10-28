@@ -784,6 +784,20 @@ fn dispatch_control(
                 }),
             )
         }
+        ControlMethod::WorkspaceRename => {
+            let params: smelt_core::workspace_directory::WorkspaceRenameParams =
+                match params_or_error(control_version, &request_id, params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            directory_response(
+                control_version,
+                request_id,
+                super::workspace_directory::default_store().and_then(|store| {
+                    super::workspace_directory::rename(&store, &params, acp_sessions, event_hub)
+                }),
+            )
+        }
         ControlMethod::WorkspaceDirectoryGet => {
             let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
                 Ok(params) => params,

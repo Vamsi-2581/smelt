@@ -1,7 +1,4 @@
-#![cfg_attr(
-    all(windows, not(debug_assertions)),
-    windows_subsystem = "windows"
-)]
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 //! smelt 工作台 —— 基于 gpui-component 的桌面窗口。
 //!
 //! Workspace 管理多个会话（终端或 ACP 对话）：左侧会话列表切换 / 新建 / 关闭，
@@ -34,6 +31,7 @@ mod git_log_view;
 mod git_panel;
 mod ide;
 mod liquid_glass;
+mod local_daemon;
 mod overlay;
 mod plugins;
 mod provider_quota;
@@ -41,7 +39,6 @@ mod resizable_split;
 mod resource_monitor;
 mod runtime_call;
 mod runtime_events;
-mod local_daemon;
 mod runtime_space;
 mod runtimes;
 mod tool_panel;
@@ -71,19 +68,17 @@ mod workspace_view;
 
 pub(crate) use sidebar_order::{indices_share_group, reorder_vec};
 pub(crate) use workspace_nav::{CapabilitiesTab, WorkspaceNav, WorkspaceRoute};
+pub(crate) use workspace_persist::load_workspace_ui;
 #[cfg(test)]
 pub(crate) use workspace_persist::persisted_active_position;
-pub(crate) use workspace_persist::{
-    load_workspace_ui,
-};
 
 mod updater;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -114,7 +109,10 @@ const DEFAULT_TOOL_PANEL_WIDTH: f32 = MIN_TOOL_PANEL_WIDTH;
 
 /// 文件事件里有没有名叫 `name` 的文件。
 fn event_touches_file(event: &notify::Event, name: &std::ffi::OsStr) -> bool {
-    event.paths.iter().any(|path| path.file_name() == Some(name))
+    event
+        .paths
+        .iter()
+        .any(|path| path.file_name() == Some(name))
 }
 
 /// 从 `now` 到下一个本地零点还有多久。有的时区在零点拨夏令时，那天没有 0 点，就取那天
@@ -2396,9 +2394,6 @@ struct Workspace {
     /// 历史会话标题搜索框；只过滤已加载列表，不触发 transcript 重扫。
     history_filter: Option<Entity<gpui_component::input::InputState>>,
     _history_filter_sub: Option<Subscription>,
-    /// 用户在 agent 尚未返回 resume id 前改名的 ACP 会话。只记录本次显式改名，
-    /// 因此不会把旧 workspace.json 里的 custom_title 迁移进历史元数据仓库。
-    pending_history_title_persist: HashSet<u64>,
     /// 上一次把用户命名覆盖层读进 `HistoryTitles` 缓存的时刻。侧栏每帧都要用它，
     /// 但改名本身会写穿缓存，所以这里只是低频兜底（覆盖移动端/历史页的远端改名）。
     /// 缓存变了由 `_history_titles_sub` 重绘，这里不直接 notify。
@@ -2849,7 +2844,6 @@ impl Workspace {
             history_agent_bindings: HashMap::new(),
             history_filter: None,
             _history_filter_sub: None,
-            pending_history_title_persist: HashSet::new(),
             history_titles_at: None,
             history_titles_inflight: false,
             session_detail: None,
@@ -2998,10 +2992,11 @@ impl Workspace {
         #[cfg(windows)]
         ws.recover_update_at_launch(true, cx);
         ws.apply_received_workspace_directories(window, cx);
-        ws._workspace_directories_sub = Some(cx.observe_global_in::<WorkspaceDirectoriesGlobal>(
-            window,
-            |this, window, cx| this.apply_received_workspace_directories(window, cx),
-        ));
+        ws._workspace_directories_sub = Some(
+            cx.observe_global_in::<WorkspaceDirectoriesGlobal>(window, |this, window, cx| {
+                this.apply_received_workspace_directories(window, cx)
+            }),
+        );
         ws.ensure_pi_library_runtime(cx);
         ws._runtime_hub_sub = Some(
             cx.observe_global_in::<crate::runtimes::RuntimeHub>(window, |this, _window, cx| {
@@ -3167,7 +3162,11 @@ impl Workspace {
     /// 将 app 级 daemon 目录投影到当前窗口。全局状态由唯一的 subscribe 循环写入，
     /// 此处不会轮询文件或额外建立 socket。
     /// 认领各运行时推来、还没对过账的工作区目录。
-    fn apply_received_workspace_directories(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn apply_received_workspace_directories(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(global) = cx.try_global::<WorkspaceDirectoriesGlobal>() else {
             return;
         };
@@ -3175,9 +3174,8 @@ impl Workspace {
             .received
             .iter()
             .filter(|(key, directory)| {
-                self.space(key).is_some_and(|space| {
-                    space.directory.revision() != Some(directory.revision)
-                })
+                self.space(key)
+                    .is_some_and(|space| space.directory.revision() != Some(directory.revision))
             })
             .map(|(key, directory)| (key.clone(), directory.clone()))
             .collect::<Vec<_>>();

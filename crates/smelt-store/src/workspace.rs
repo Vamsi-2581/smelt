@@ -152,12 +152,13 @@ fn write_acp_record(
 }
 
 /// 新建一段对话，排在最后。同 id 的对话已经在就什么都不做、返回 `false`：客户端的回执
-/// 丢了会拿同一个 id 重发。
+/// 丢了会拿同一个 id 重发。名字不随新建写进来，只经改名命令写（见 [`rename_conversation`]）。
 pub(crate) fn create_conversation(
     transaction: &Transaction<'_>,
     saved: &WorkspaceSessionRecord,
 ) -> Result<bool, StoreError> {
     let group_id = validated_conversation_id(saved)?;
+    let saved = &with_names(saved, &StoredNames::default());
     if conversation_position(transaction, group_id)?.is_some() {
         return Ok(false);
     }
@@ -180,7 +181,8 @@ pub(crate) fn create_conversation(
 
 /// 整段替换一段已有的对话，位置不变。对话已经不在（别的客户端关掉了）回
 /// [`StoreError::ConversationNotFound`]，不把它写回来。写完和原来一样（恢复身份以库里
-/// 的为准，客户端带来的旧值不算改动）返回 `false`。
+/// 的为准，客户端带来的旧值不算改动）返回 `false`。名字和 agent 报的标题以库里的为准：
+/// 名字只经改名命令写，agent 标题只由守护写，客户端带来的值不算数。
 pub(crate) fn update_conversation(
     transaction: &Transaction<'_>,
     saved: &WorkspaceSessionRecord,
@@ -193,8 +195,9 @@ pub(crate) fn update_conversation(
     })?;
     let (acp_id, terminal_ids) = conversation_session_ids(transaction, saved)?;
     let before = read_conversation(transaction, group_id)?;
-    // 恢复身份以库里的为准，要在删行之前读出来。
+    // 恢复身份、名字、agent 标题都以库里的为准，要在删行之前读出来。
     let preserved_history = preserved_history_session_ids(transaction)?;
+    let saved = &with_names(saved, &stored_names(transaction, group_id)?);
     transaction.execute("DELETE FROM session_group WHERE id = ?1", [group_id])?;
     insert_conversation(
         transaction,
@@ -360,7 +363,240 @@ pub(crate) fn remember_history_session_id(
          WHERE session_id = ?2 AND history_session_id IS NOT ?1",
         params![history_id, session_id],
     )?;
-    Ok(Some(updated > 0))
+    // 有了身份，名字就属于那段 provider 对话：对话上起过的名字搬进 `history_title`（那边
+    // 已经有名字就以那边的为准），对话上的清掉。名字任何时候只在一处。
+    let moved = move_conversation_name_to_history(transaction, &session_id)?;
+    Ok(Some(updated > 0 || moved))
+}
+
+fn move_conversation_name_to_history(
+    transaction: &Transaction<'_>,
+    session_id: &str,
+) -> Result<bool, StoreError> {
+    let Some((group_id, title, agent, profile_id, history_id)) = transaction
+        .query_row(
+            "SELECT g.id, g.custom_title, a.agent, COALESCE(a.profile_id, ''), a.history_session_id
+             FROM acp_detail a
+             JOIN session s ON s.id = a.session_id
+             JOIN session_group g ON g.id = s.group_id
+             WHERE a.session_id = ?1 AND g.custom_title IS NOT NULL
+               AND a.history_session_id IS NOT NULL",
+            [session_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .optional()?
+    else {
+        return Ok(false);
+    };
+    transaction.execute(
+        "INSERT OR IGNORE INTO history_title(agent, profile_id, resume_id, custom_title, updated_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![agent, profile_id, history_id, title, now_ms()],
+    )?;
+    transaction.execute(
+        "UPDATE session_group SET custom_title = NULL WHERE id = ?1",
+        [group_id],
+    )?;
+    Ok(true)
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
+}
+
+/// 库里一段对话的名字和 agent 标题。客户端改对话时用它们替掉客户端带来的值。
+#[derive(Default)]
+struct StoredNames {
+    conversation: Option<String>,
+    terminals: HashMap<String, Option<String>>,
+    acp_session_title: Option<String>,
+}
+
+fn stored_names(transaction: &Transaction<'_>, group_id: &str) -> Result<StoredNames, StoreError> {
+    let conversation = transaction
+        .query_row(
+            "SELECT custom_title FROM session_group WHERE id = ?1",
+            [group_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    let mut terminals = HashMap::new();
+    {
+        let mut statement = transaction.prepare(
+            "SELECT id, custom_title FROM session WHERE group_id = ?1 AND kind = 'terminal'",
+        )?;
+        let rows = statement.query_map([group_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+        })?;
+        for row in rows {
+            let (id, title) = row?;
+            terminals.insert(id, title);
+        }
+    }
+    let acp_session_title = transaction
+        .query_row(
+            "SELECT a.session_title FROM acp_detail a JOIN session s ON s.id = a.session_id
+             WHERE s.group_id = ?1",
+            [group_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(StoredNames {
+        conversation,
+        terminals,
+        acp_session_title,
+    })
+}
+
+/// 客户端带来的对话，名字和 agent 标题换成库里的。
+fn with_names(saved: &WorkspaceSessionRecord, names: &StoredNames) -> WorkspaceSessionRecord {
+    let mut saved = saved.clone();
+    saved.custom_title = names.conversation.clone();
+    for terminal in &mut saved.terminals {
+        terminal.custom_title = terminal
+            .id
+            .as_ref()
+            .and_then(|id| names.terminals.get(id).cloned().flatten());
+    }
+    if let Some(acp) = &mut saved.acp {
+        acp.session_title = names.acp_session_title.clone();
+    }
+    saved
+}
+
+/// 给一段对话改名，`None` 是清掉。认得出 provider 身份的 ACP 对话，名字属于那段 provider
+/// 对话（历史页、手机上看到的都是它），写 `history_title`；没有身份的写对话自己的。对话不在
+/// 回 [`StoreError::ConversationNotFound`]。
+pub(crate) fn rename_conversation(
+    transaction: &Transaction<'_>,
+    conversation_id: &str,
+    title: Option<&str>,
+) -> Result<bool, StoreError> {
+    let conversation_id = conversation_id.trim();
+    if conversation_position(transaction, conversation_id)?.is_none() {
+        return Err(StoreError::ConversationNotFound {
+            id: conversation_id.to_string(),
+        });
+    }
+    let title = title.map(str::trim).filter(|title| !title.is_empty());
+    let identity = transaction
+        .query_row(
+            "SELECT a.agent, COALESCE(a.profile_id, ''), a.history_session_id
+             FROM acp_detail a JOIN session s ON s.id = a.session_id
+             WHERE s.group_id = ?1 AND a.history_session_id IS NOT NULL",
+            [conversation_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    match identity {
+        Some((agent, profile_id, resume_id)) => {
+            let history = set_history_title(transaction, &agent, &profile_id, &resume_id, title)?;
+            let cleared = transaction.execute(
+                "UPDATE session_group SET custom_title = NULL
+                 WHERE id = ?1 AND custom_title IS NOT NULL",
+                [conversation_id],
+            )?;
+            Ok(history || cleared > 0)
+        }
+        None => Ok(transaction.execute(
+            "UPDATE session_group SET custom_title = ?1 WHERE id = ?2 AND custom_title IS NOT ?1",
+            params![title, conversation_id],
+        )? > 0),
+    }
+}
+
+/// 以 `sid` 为 ACP 会话的那段对话改名（命令行、Pi 工具按会话 id 改）。没有这段对话返回
+/// `false`。
+pub(crate) fn rename_acp_conversation(
+    transaction: &Transaction<'_>,
+    sid: &str,
+    title: Option<&str>,
+) -> Result<bool, StoreError> {
+    let Some(group_id) = transaction
+        .query_row(
+            "SELECT session.group_id FROM acp_detail
+             JOIN session ON session.id = acp_detail.session_id
+             WHERE acp_detail.session_id = ?1",
+            [sid.trim()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    else {
+        return Ok(false);
+    };
+    rename_conversation(transaction, &group_id, title)
+}
+
+/// 给一格终端改名（这格还认不出 provider 身份时；认得出的写 `history_title`）。
+pub(crate) fn rename_terminal(
+    transaction: &Transaction<'_>,
+    terminal_id: &str,
+    title: Option<&str>,
+) -> Result<bool, StoreError> {
+    let title = title.map(str::trim).filter(|title| !title.is_empty());
+    Ok(transaction.execute(
+        "UPDATE session SET custom_title = ?1
+         WHERE id = ?2 AND kind = 'terminal' AND custom_title IS NOT ?1",
+        params![title, terminal_id.trim()],
+    )? > 0)
+}
+
+/// agent 报的标题变了（只由守护写）。没有这段 ACP 会话返回 `false`。
+pub(crate) fn set_acp_session_title(
+    transaction: &Transaction<'_>,
+    sid: &str,
+    title: Option<&str>,
+) -> Result<bool, StoreError> {
+    let title = title.map(str::trim).filter(|title| !title.is_empty());
+    Ok(transaction.execute(
+        "UPDATE acp_detail SET session_title = ?1 WHERE session_id = ?2 AND session_title IS NOT ?1",
+        params![title, sid.trim()],
+    )? > 0)
+}
+
+/// 一段 provider 对话的名字（历史页、侧栏、手机看到的同一份），`None` 是清掉。
+pub(crate) fn set_history_title(
+    transaction: &Transaction<'_>,
+    agent: &str,
+    profile_id: &str,
+    resume_id: &str,
+    title: Option<&str>,
+) -> Result<bool, StoreError> {
+    let title = title.map(str::trim).filter(|title| !title.is_empty());
+    let changed = match title {
+        Some(title) => transaction.execute(
+            "INSERT INTO history_title(agent, profile_id, resume_id, custom_title, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(agent, profile_id, resume_id) DO UPDATE
+               SET custom_title = excluded.custom_title, updated_at_ms = excluded.updated_at_ms
+               WHERE history_title.custom_title IS NOT excluded.custom_title",
+            params![agent, profile_id, resume_id, title, now_ms()],
+        )?,
+        None => transaction.execute(
+            "DELETE FROM history_title WHERE agent = ?1 AND profile_id = ?2 AND resume_id = ?3",
+            params![agent, profile_id, resume_id],
+        )?,
+    };
+    Ok(changed > 0)
 }
 
 /// 守护放弃一份恢复身份。返回库里是否真的变了：没有行、或本来就是空，都是 `false`。
@@ -377,37 +613,6 @@ pub(crate) fn clear_history_session_id(
         [session_id],
     )?;
     Ok(updated > 0)
-}
-
-/// 把以 `sid` 为 ACP 会话的那段对话改名：对话标题和 ACP 会话标题一起改。没有这段对话、
-/// 或两个标题本来就是它，返回 `false`。
-pub(crate) fn rename_acp_conversation(
-    transaction: &Transaction<'_>,
-    sid: &str,
-    title: &str,
-) -> Result<bool, StoreError> {
-    let sid = sid.trim();
-    let Some(group_id) = transaction
-        .query_row(
-            "SELECT session.group_id FROM acp_detail
-             JOIN session ON session.id = acp_detail.session_id
-             WHERE acp_detail.session_id = ?1",
-            [sid],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?
-    else {
-        return Ok(false);
-    };
-    let conversation = transaction.execute(
-        "UPDATE session_group SET custom_title = ?1 WHERE id = ?2 AND custom_title IS NOT ?1",
-        params![title, group_id],
-    )?;
-    let acp = transaction.execute(
-        "UPDATE acp_detail SET session_title = ?1 WHERE session_id = ?2 AND session_title IS NOT ?1",
-        params![title, sid],
-    )?;
-    Ok(conversation + acp > 0)
 }
 
 pub(crate) fn history_session_id(
@@ -486,7 +691,19 @@ pub(crate) fn read_workspace_snapshot(
         .collect::<Result<Vec<_>, _>>()?;
 
     let groups = connection
-        .prepare("SELECT id, custom_title, last_updated_at FROM session_group ORDER BY position")?
+        // 对话的名字：认得出 provider 身份的 ACP 对话用那段对话的名字（`history_title`），
+        // 没有身份的用对话自己的。一个名字只存在其中一处，读的时候合起来。
+        .prepare(
+            "SELECT g.id, COALESCE(h.custom_title, g.custom_title), g.last_updated_at
+             FROM session_group g
+             LEFT JOIN session s ON s.group_id = g.id AND s.kind = 'acp'
+             LEFT JOIN acp_detail a ON a.session_id = s.id
+             LEFT JOIN history_title h
+               ON h.agent = a.agent
+              AND h.profile_id = COALESCE(a.profile_id, '')
+              AND h.resume_id = a.history_session_id
+             ORDER BY g.position",
+        )?
         .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,

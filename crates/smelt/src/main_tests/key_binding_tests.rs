@@ -168,6 +168,9 @@ fn migrated_chords_are_not_bound_at_the_root_context() {
 /// 设置窗口 Cmd+W（Windows / Linux 是 Ctrl+W）关窗；它是普通窗口，Esc 不关它。
 #[test]
 fn settings_window_closes_on_secondary_w_but_not_escape() {
-    assert!(first_is::<CloseSettingsWindow>("secondary-w", &["SettingsWindow"]));
+    assert!(first_is::<CloseSettingsWindow>(
+        "secondary-w",
+        &["SettingsWindow"]
+    ));
     assert!(matched("escape", &["SettingsWindow"]).is_empty());
 }

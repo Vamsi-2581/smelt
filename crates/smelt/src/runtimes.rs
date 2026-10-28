@@ -43,9 +43,9 @@ pub(crate) fn smelt_home(key: &RuntimeKey, cx: &gpui::App) -> Option<String> {
 pub(crate) fn path_style(key: &RuntimeKey, cx: &gpui::App) -> PathStyle {
     match key {
         RuntimeKey::Local => PathStyle::LOCAL,
-        RuntimeKey::Remote(_) => PathStyle::of_os(
-            remote_of(key, cx).and_then(|remote| remote.connection.os.as_deref()),
-        ),
+        RuntimeKey::Remote(_) => {
+            PathStyle::of_os(remote_of(key, cx).and_then(|remote| remote.connection.os.as_deref()))
+        }
     }
 }
 
@@ -1907,7 +1907,10 @@ mod tests {
     #[test]
     fn hanging_up_after_accepting_means_go_look_again() {
         assert_eq!(
-            push_upgrade_to(&runtime_replying(&[r#"{"state":"accepted"}"#]), UPGRADE_TARGET),
+            push_upgrade_to(
+                &runtime_replying(&[r#"{"state":"accepted"}"#]),
+                UPGRADE_TARGET
+            ),
             PushUpgrade::Restarting
         );
     }
@@ -1935,7 +1938,10 @@ mod tests {
             PushUpgrade::Staged("ACP 会话仍有未完成请求".into())
         );
         assert_eq!(
-            push_upgrade_to(&runtime_replying(&[r#"{"state":"current"}"#]), UPGRADE_TARGET),
+            push_upgrade_to(
+                &runtime_replying(&[r#"{"state":"current"}"#]),
+                UPGRADE_TARGET
+            ),
             PushUpgrade::Current
         );
     }
@@ -2053,10 +2059,7 @@ mod tests {
         assert!(
             runtime
                 .client()
-                .call::<SystemDescribe>(
-                    &EmptyParams::default(),
-                    std::time::Duration::from_secs(30)
-                )
+                .call::<SystemDescribe>(&EmptyParams::default(), std::time::Duration::from_secs(30))
                 .is_err(),
             "撤销之后不该还能调"
         );

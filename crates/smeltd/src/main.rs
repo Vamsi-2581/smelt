@@ -1015,9 +1015,12 @@ fn apply_history_rename(
     smelt_core::session_metadata::set_custom_title(kind, profile_id, resume_id, title)
 }
 
+/// 历史页改名（手机、桌面历史页，只知道 provider 身份）。侧栏里对应的对话名字按它现算，
+/// 改了就推目录。
 fn handle_history_rename<C: ClientSocket>(
     mut conn: C,
     v: &serde_json::Value,
+    event_hub: &EventHubHandle,
 ) {
     let result = (|| -> Result<(), String> {
         let agent = v["agent"].as_str().unwrap_or_default();
@@ -1026,7 +1029,9 @@ fn handle_history_rename<C: ClientSocket>(
         let resume_id = v["resume_id"].as_str().unwrap_or_default();
         let profile_id = v["profile_id"].as_str();
         let title = v.get("title").and_then(serde_json::Value::as_str);
-        apply_history_rename(kind, profile_id, resume_id, title)
+        apply_history_rename(kind, profile_id, resume_id, title)?;
+        workspace_directory::publish_current(event_hub);
+        Ok(())
     })();
     let response = match result {
         Ok(()) => serde_json::json!({ "ok": true }),

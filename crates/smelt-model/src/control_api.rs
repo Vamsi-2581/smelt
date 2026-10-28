@@ -940,6 +940,11 @@ pi_calls! {
     /// 客户端首帧就有。
     WorkspaceDirectoryGet => WorkspaceDirectoryGet(EmptyParams)
         -> crate::workspace_directory::WorkspaceDirectory;
+    /// 给一段对话或其中一格终端改名，`title` 为空是清掉。改名的唯一入口：运行时决定名字
+    /// 写在哪（认得出 provider 身份的写那段 provider 对话的名字），在跑的对话同步给 agent，
+    /// 改完推 `workspace.changed`。
+    WorkspaceRename => WorkspaceRename(crate::workspace_directory::WorkspaceRenameParams)
+        -> crate::workspace_directory::WorkspaceRevision;
     /// 会话 id → 它所属的产品智能体定义 id。
     SessionAgentBindings => SessionAgentBindings(EmptyParams) -> SessionAgentBindingsResult;
     /// 取对话里一张没有内联的图（`acp_watch` / `acp_snapshot` 带 `image_refs` 时帧里只有

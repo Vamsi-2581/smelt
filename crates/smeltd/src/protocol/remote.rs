@@ -22,19 +22,14 @@ pub(super) fn handle_conversation_rename<C: ClientSocket>(
             .into_iter()
             .find_map(|conversation| conversation.acp.filter(|acp| acp.sid == id))
             .ok_or_else(|| format!("对话不存在：{id}"))?;
-        if let Some(resume_id) = acp.history_session_id.as_deref().filter(|id| !id.is_empty())
-            && let Some(kind) = smelt_core::agent_kind::HistorySourceKind::from_id(&acp.agent)
-        {
-            smelt_core::session_metadata::set_custom_title(
-                kind,
-                acp.profile_id.as_deref(),
-                resume_id,
-                Some(title),
-            )?;
-        }
-        crate::workspace_directory::rename_acp_conversation(&store, id, title, event_hub)
-            .map_err(|error| error.message)?;
-        acp_host::try_rename_running_acp_session(acp_sessions, id, title);
+        crate::workspace_directory::rename_acp_conversation(
+            &store,
+            id,
+            Some(title),
+            acp_sessions,
+            event_hub,
+        )
+        .map_err(|error| error.message)?;
         Ok(smelt_core::session_control::AgentConversationSummary {
             session_id: acp.sid,
             title: title.to_string(),

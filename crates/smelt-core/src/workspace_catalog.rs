@@ -144,16 +144,67 @@ pub fn forget_session_on(
     })
 }
 
-/// 把以 `sid` 为 ACP 会话的那段对话改名：对话标题和 ACP 会话标题一起改。GUI 没开时，
-/// 下次冷启动靠这份标题，而不是远程目录里的种子标题。没有这段对话、或标题本来就是它，
-/// 不改动。
+/// 把以 `sid` 为 ACP 会话的那段对话改名（命令行、Pi 工具按会话 id 改），`None` 是清掉。
+/// 名字写在哪见 [`rename_conversation_on`]。没有这段对话不改动。
 pub fn rename_acp_conversation_on(
     store: &smelt_store::Store,
     sid: &str,
-    title: &str,
+    title: Option<&str>,
 ) -> Result<DirectoryChange, DirectoryError> {
     change_on(store, |store| {
         Ok((store.rename_workspace_acp_conversation(sid, title)?.changed, None))
+    })
+}
+
+/// 给一段对话改名，`None` 是清掉。认得出 provider 身份的 ACP 对话，名字属于那段 provider
+/// 对话（`history_title`，历史页、手机看到的同一份）；没有身份的写对话自己的。
+pub fn rename_conversation_on(
+    store: &smelt_store::Store,
+    conversation_id: &str,
+    title: Option<&str>,
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on(store, |store| {
+        Ok((store.rename_workspace_conversation(conversation_id, title)?.changed, None))
+    })
+}
+
+/// 给一格还认不出 provider 身份的终端改名。
+pub fn rename_terminal_on(
+    store: &smelt_store::Store,
+    terminal_id: &str,
+    title: Option<&str>,
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on(store, |store| {
+        Ok((store.rename_workspace_terminal(terminal_id, title)?.changed, None))
+    })
+}
+
+/// agent 报的标题变了。只由守护写，客户端改对话时带来的不算数。
+pub fn set_acp_session_title_on(
+    store: &smelt_store::Store,
+    sid: &str,
+    title: Option<&str>,
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on(store, |store| {
+        Ok((store.set_workspace_acp_session_title(sid, title)?.changed, None))
+    })
+}
+
+/// 一段 provider 对话的名字（历史页改名、认得出身份的终端分屏改名），`None` 是清掉。
+pub fn set_history_title_on(
+    store: &smelt_store::Store,
+    agent: &str,
+    profile_id: Option<&str>,
+    resume_id: &str,
+    title: Option<&str>,
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on(store, |store| {
+        Ok((
+            store
+                .set_workspace_history_title(agent, profile_id, resume_id, title)?
+                .changed,
+            None,
+        ))
     })
 }
 
@@ -336,11 +387,14 @@ mod tests {
         }
     }
 
-    /// 线上的对话类型和库里的记录来回转换不丢字段。
+    /// 线上的对话类型和库里的记录来回转换不丢字段。名字和 agent 标题不随新建写进来（只经
+    /// 改名命令和守护写），所以夹具里不带。
     #[test]
     fn a_created_conversation_reads_back_unchanged() {
         let (store, dir) = temp_store();
-        let conversation = acp_conversation();
+        let mut conversation = acp_conversation();
+        conversation.custom_title = None;
+        conversation.acp.as_mut().unwrap().session_title = None;
         let change = create_conversation_on(&store, &conversation).unwrap();
         assert!(change.changed);
         assert_eq!(change.directory.revision, 1);
@@ -353,26 +407,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// 守护改名同时改对话标题和 ACP 会话标题；同名再改一次不推进版本。
+    /// 按会话 id 改名改的是那段对话的名字，agent 报的标题不动；同名再改一次不推进版本。
     #[test]
-    fn renaming_an_acp_conversation_changes_both_titles_once() {
+    fn renaming_an_acp_conversation_changes_only_its_name_once() {
         let (store, dir) = temp_store();
         create_conversation_on(&store, &acp_conversation()).unwrap();
 
-        let renamed = rename_acp_conversation_on(&store, "acp-1", "新标题").unwrap();
+        let renamed = rename_acp_conversation_on(&store, "acp-1", Some("新标题")).unwrap();
         assert!(renamed.changed);
         assert_eq!(renamed.directory.revision, 2);
         let conversation = &renamed.directory.conversations[0];
         assert_eq!(conversation.custom_title.as_deref(), Some("新标题"));
-        assert_eq!(
-            conversation.acp.as_ref().unwrap().session_title.as_deref(),
-            Some("新标题")
-        );
+        assert_eq!(conversation.acp.as_ref().unwrap().session_title, None);
 
-        let again = rename_acp_conversation_on(&store, "acp-1", "新标题").unwrap();
+        let again = rename_acp_conversation_on(&store, "acp-1", Some("新标题")).unwrap();
         assert!(!again.changed);
         assert_eq!(again.directory.revision, 2);
-        let missing = rename_acp_conversation_on(&store, "acp-missing", "x").unwrap();
+        let missing = rename_acp_conversation_on(&store, "acp-missing", Some("x")).unwrap();
         assert!(!missing.changed);
         let _ = std::fs::remove_dir_all(dir);
     }

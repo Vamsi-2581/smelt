@@ -273,14 +273,68 @@ impl Store {
         imp::close_workspace_project(&self.backend, root)
     }
 
-    /// 把以 `sid` 为 ACP 会话的那段对话改名：对话标题和 ACP 会话标题一起改。没有这段对话、
-    /// 或标题本来就是它，不改动。
+    /// 把以 `sid` 为 ACP 会话的那段对话改名，`None` 是清掉。没有这段对话、或名字本来就是它，
+    /// 不改动。名字写在哪见 [`Store::rename_workspace_conversation`]。
     pub fn rename_workspace_acp_conversation(
         &self,
         sid: &str,
-        title: &str,
+        title: Option<&str>,
     ) -> Result<WorkspaceDirectoryCommit, StoreError> {
         imp::rename_workspace_acp_conversation(&self.backend, sid, title)
+    }
+
+    /// 给一段对话改名，`None` 是清掉。认得出 provider 身份的 ACP 对话写那段 provider 对话的
+    /// 名字（`history_title`），没有身份的写对话自己的。对话不在回 `ConversationNotFound`。
+    pub fn rename_workspace_conversation(
+        &self,
+        conversation_id: &str,
+        title: Option<&str>,
+    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
+        imp::write_workspace(&self.backend, |transaction| {
+            crate::workspace::rename_conversation(transaction, conversation_id, title)
+        })
+    }
+
+    /// 给一格终端改名，`None` 是清掉。
+    pub fn rename_workspace_terminal(
+        &self,
+        terminal_id: &str,
+        title: Option<&str>,
+    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
+        imp::write_workspace(&self.backend, |transaction| {
+            crate::workspace::rename_terminal(transaction, terminal_id, title)
+        })
+    }
+
+    /// agent 报的标题变了。只由守护写。
+    pub fn set_workspace_acp_session_title(
+        &self,
+        sid: &str,
+        title: Option<&str>,
+    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
+        imp::write_workspace(&self.backend, |transaction| {
+            crate::workspace::set_acp_session_title(transaction, sid, title)
+        })
+    }
+
+    /// 一段 provider 对话的名字（历史页、侧栏、手机看到的同一份），`None` 是清掉。工作区目录
+    /// 里对话的名字按它现算，所以和目录改动一样推进版本号。
+    pub fn set_workspace_history_title(
+        &self,
+        agent: &str,
+        profile_id: Option<&str>,
+        resume_id: &str,
+        title: Option<&str>,
+    ) -> Result<WorkspaceDirectoryCommit, StoreError> {
+        imp::write_workspace(&self.backend, |transaction| {
+            crate::workspace::set_history_title(
+                transaction,
+                agent,
+                profile_id.unwrap_or_default(),
+                resume_id,
+                title,
+            )
+        })
     }
 
     /// 某条历史会话由哪个智能体定义创建。`profile_id` 为空表示没有 profile。
@@ -962,15 +1016,20 @@ mod imp {
     pub(super) fn rename_workspace_acp_conversation(
         backend: &Backend,
         sid: &str,
-        title: &str,
+        title: Option<&str>,
     ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
-        write_directory(backend, |transaction| {
-            Ok((
-                crate::workspace::rename_acp_conversation(transaction, sid, title)?,
-                (),
-            ))
+        write_workspace(backend, |transaction| {
+            crate::workspace::rename_acp_conversation(transaction, sid, title)
         })
-        .map(|(commit, ())| commit)
+    }
+
+    /// 一次只改名字的目录改动：真改了才推进版本号。
+    pub(super) fn write_workspace(
+        backend: &Backend,
+        change: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<bool, StoreError>,
+    ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
+        write_directory(backend, |transaction| Ok((change(transaction)?, ())))
+            .map(|(commit, ())| commit)
     }
 
     pub(super) fn history_agent_binding(
@@ -3324,7 +3383,13 @@ mod imp {
     pub(super) fn rename_workspace_acp_conversation(
         _backend: &Backend,
         _sid: &str,
-        _title: &str,
+        _title: Option<&str>,
+    ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
+        unsupported()
+    }
+    pub(super) fn write_workspace(
+        _backend: &Backend,
+        _change: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<bool, StoreError>,
     ) -> Result<super::WorkspaceDirectoryCommit, StoreError> {
         unsupported()
     }
@@ -5831,6 +5896,7 @@ CREATE TABLE published_session (
         store.open_workspace_project("/repo").unwrap();
         for conversation in &conversations {
             store.create_workspace_conversation(conversation).unwrap();
+            apply_names(&store, conversation);
         }
 
         let connection = rusqlite::Connection::open(&path).unwrap();
@@ -6083,52 +6149,79 @@ CREATE TABLE published_session (
         );
     }
 
-    /// 守护改名同时改对话标题和 ACP 会话标题，真改了才推进版本；没有这段 ACP 对话不改动。
+    /// 名字只存一处：还认不出 provider 身份时写在对话上；守护确认身份时搬进那段 provider
+    /// 对话的名字（`history_title`），对话上的清掉；之后改名写那边，读目录时合起来。真改了才
+    /// 推进版本。
     #[test]
-    fn renaming_an_acp_conversation_bumps_only_on_change() {
+    fn a_conversation_name_lives_in_one_place() {
         let dir = temp_dir("directory-rename");
         let store = Store::open_or_create(dir.join(DATABASE_FILE_NAME)).unwrap();
         store
             .create_workspace_conversation(&acp_conversation("c1", Some("acp-1"), None))
             .unwrap();
-        store
-            .create_workspace_conversation(&terminal_conversation("c2", "term-1", "/repo"))
+        let revision = |store: &Store| store.workspace_catalog_revision().unwrap();
+        let title_of = |store: &Store| {
+            store.workspace_directory().unwrap().1.sessions[0]
+                .custom_title
+                .clone()
+        };
+        let history_titles = |store: &Store| {
+            store
+                .get_history_title_snapshot()
+                .unwrap()
+                .map(|snapshot| snapshot.sessions.len())
+                .unwrap_or_default()
+        };
+
+        let before = revision(&store);
+        assert!(store.rename_workspace_acp_conversation("acp-1", Some("草稿")).unwrap().changed);
+        assert_eq!(title_of(&store).as_deref(), Some("草稿"));
+        assert_eq!(history_titles(&store), 0, "没有身份时名字只在对话上");
+        assert!(!store.rename_workspace_acp_conversation("acp-1", Some("草稿")).unwrap().changed);
+        assert_eq!(revision(&store), before + 1);
+
+        store.remember_history_session_id("acp-1", "h1").unwrap();
+        assert_eq!(title_of(&store).as_deref(), Some("草稿"), "身份确认后名字照样在");
+        assert_eq!(history_titles(&store), 1, "搬进了 provider 对话的名字");
+        let connection = rusqlite::Connection::open(dir.join(DATABASE_FILE_NAME)).unwrap();
+        let group_title: Option<String> = connection
+            .query_row("SELECT custom_title FROM session_group WHERE id = 'c1'", [], |row| {
+                row.get(0)
+            })
             .unwrap();
-        let commit = |revision, changed| WorkspaceDirectoryCommit { revision, changed };
+        assert_eq!(group_title, None, "对话上的那份清掉了");
 
-        assert_eq!(
+        // 历史页改名（只知道 provider 身份）也改到了侧栏这段对话。
+        assert!(
             store
-                .rename_workspace_acp_conversation("acp-1", "新标题")
-                .unwrap(),
-            commit(3, true)
+                .set_workspace_history_title("claude", None, "h1", Some("登录修复"))
+                .unwrap()
+                .changed
         );
-        let (_, snapshot) = store.workspace_directory().unwrap();
-        assert_eq!(snapshot.sessions[0].custom_title.as_deref(), Some("新标题"));
-        assert_eq!(
-            snapshot.sessions[0].acp.as_ref().unwrap().session_title.as_deref(),
-            Some("新标题")
-        );
-        assert_eq!(snapshot.sessions[1].custom_title, None);
+        assert_eq!(title_of(&store).as_deref(), Some("登录修复"));
 
-        assert_eq!(
+        // 客户端带着旧名字、旧 agent 标题改对话，不算数。
+        let mut stale = acp_conversation("c1", Some("acp-1"), Some("h1"));
+        stale.custom_title = Some("客户端的旧名字".into());
+        stale.acp.as_mut().unwrap().session_title = Some("客户端的旧标题".into());
+        store.update_workspace_conversation(&stale).unwrap();
+        assert_eq!(title_of(&store).as_deref(), Some("登录修复"));
+        assert!(
             store
-                .rename_workspace_acp_conversation("acp-1", "新标题")
-                .unwrap(),
-            commit(3, false)
+                .set_workspace_acp_session_title("acp-1", Some("agent 报的"))
+                .unwrap()
+                .changed
         );
-        assert_eq!(
-            store
-                .rename_workspace_acp_conversation("acp-missing", "x")
-                .unwrap(),
-            commit(3, false)
-        );
-        // 终端的会话 id 不是 ACP 会话。
-        assert_eq!(
-            store
-                .rename_workspace_acp_conversation("term-1", "x")
-                .unwrap(),
-            commit(3, false)
-        );
+        let acp = store.workspace_directory().unwrap().1.sessions[0].acp.clone().unwrap();
+        assert_eq!(acp.session_title.as_deref(), Some("agent 报的"));
+
+        // 清掉名字。
+        assert!(store.rename_workspace_conversation("c1", None).unwrap().changed);
+        assert_eq!(title_of(&store), None);
+        assert!(matches!(
+            store.rename_workspace_conversation("missing", Some("x")),
+            Err(StoreError::ConversationNotFound { .. })
+        ));
     }
 
     #[test]
@@ -6412,6 +6505,28 @@ CREATE TABLE published_session (
         }
     }
 
+    /// 名字不随新建、更新写进来：照这段对话里的名字和 agent 标题，走改名命令和守护那条
+    /// 写一遍。
+    fn apply_names(store: &Store, conversation: &WorkspaceSessionRecord) {
+        store
+            .rename_workspace_conversation(&conversation.id, conversation.custom_title.as_deref())
+            .unwrap();
+        for terminal in &conversation.terminals {
+            if let Some(id) = &terminal.id {
+                store
+                    .rename_workspace_terminal(id, terminal.custom_title.as_deref())
+                    .unwrap();
+            }
+        }
+        if let Some(acp) = &conversation.acp
+            && let Some(sid) = &acp.sid
+        {
+            store
+                .set_workspace_acp_session_title(sid, acp.session_title.as_deref())
+                .unwrap();
+        }
+    }
+
     fn directory_ids(store: &Store) -> Vec<String> {
         store
             .workspace_directory()
@@ -6521,7 +6636,14 @@ CREATE TABLE published_session (
             }
         );
         let (_, snapshot) = store.workspace_directory().unwrap();
-        assert_eq!(snapshot.sessions[0], renamed);
+        // 终端改到了；名字不随更新改，只经改名命令写。
+        assert_eq!(
+            snapshot.sessions[0],
+            WorkspaceSessionRecord {
+                custom_title: None,
+                ..renamed
+            }
+        );
         assert_eq!(directory_ids(&store), ["c1", "c2"]);
     }
 
@@ -6935,6 +7057,7 @@ CREATE TABLE worktree_inherit_skip_pattern (
             acp: None,
         };
         store.create_workspace_conversation(&terminals).unwrap();
+        apply_names(&store, &terminals);
         store
             .create_workspace_conversation(&acp_conversation("conv-acp", Some("acp-1"), None))
             .unwrap();

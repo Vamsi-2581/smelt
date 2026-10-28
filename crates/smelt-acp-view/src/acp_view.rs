@@ -2995,28 +2995,6 @@ impl AcpView {
         }
     }
 
-    /// 用户在侧栏改名后同步给 agent。本地标题立即生效，不等 agent 回执；
-    /// agent 不支持改名时也只是没有回流，侧栏名字照样是新的。
-    pub fn rename_session(&mut self, title: Option<String>) {
-        let title = title
-            .map(|title| title.trim().to_string())
-            .filter(|title| !title.is_empty());
-        self.session_title = title.clone();
-        let (Some(handle), Some(title)) = (&self.handle, title) else {
-            return;
-        };
-        let _ = handle
-            .action_tx
-            .try_send(AcpUserAction::SetSessionTitle { title });
-    }
-
-    /// 存档快照：把当前生效的标题固化下来，重启后侧栏名字保持不变。
-    pub fn session_title_for_save(&self) -> Option<String> {
-        self.auto_title()
-            .map(|title| title.trim().to_string())
-            .filter(|title| !title.is_empty())
-    }
-
     /// daemon 不存在时用 workspace 的最后镜像创建会话；热 attach 后首份快照会以
     /// daemon 当前 binding 覆盖它。
     pub fn restore_conversation_binding(

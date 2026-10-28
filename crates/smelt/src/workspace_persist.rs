@@ -15,13 +15,18 @@ use smelt_model::workspace_directory::{
 use smelt_runtime_client::protocol::control::{ControlClientError, ControlErrorCode};
 
 use crate::runtimes::Runtime;
-use crate::workspace_directory::{DirectoryCommands, DirectoryOutcome, order_by_saved};
+use crate::workspace_directory::{
+    DirectoryCommands, DirectoryOutcome, order_by_saved, without_names,
+};
 use crate::{
     AcpSaved, PaneState, RuntimeKey, SessionKind, SessionRouteArchive, SessionState,
     SidebarGrouping, Workspace, WorkspaceRoute,
 };
 
-pub(crate) fn merge_restore_pending<T: Clone>(mut sessions: Vec<T>, pending: &[(usize, T)]) -> Vec<T> {
+pub(crate) fn merge_restore_pending<T: Clone>(
+    mut sessions: Vec<T>,
+    pending: &[(usize, T)],
+) -> Vec<T> {
     let mut pending = pending.to_vec();
     pending.sort_by_key(|(index, _)| *index);
     for (index, session) in pending {
@@ -376,7 +381,6 @@ pub(crate) fn load_sidebar_orders() -> HashMap<RuntimeKey, SidebarOrderRecord> {
     }
 }
 
-
 /// 一个运行时这一轮要写的东西。主线程构建（纯内存），后台线程提交。
 struct SnapshotJob {
     runtime: Runtime,
@@ -554,7 +558,10 @@ fn send_directory_commands(runtime: &Runtime, commands: &DirectoryCommands) -> D
             Err(ControlClientError::Protocol(error))
                 if error.code == ControlErrorCode::InvalidParams =>
             {
-                eprintln!("[workspace] 运行时拒收对话 {}：{}", conversation.id, error.message);
+                eprintln!(
+                    "[workspace] 运行时拒收对话 {}：{}",
+                    conversation.id, error.message
+                );
                 outcome.settled.push(conversation.clone());
             }
             Err(error) => failed("更新对话", error),
@@ -583,7 +590,8 @@ fn snapshot_acp_view(
         pending_delivery_id: view.pending_delivery_id_for_save(),
         pending_agent_preset: view.pending_agent_preset_for_save(),
         automation_id,
-        session_title: view.session_title_for_save(),
+        // agent 报的标题只由守护写进目录，这边不发。
+        session_title: None,
     }
 }
 
@@ -639,11 +647,20 @@ impl Workspace {
             .filter(|session| session.runtime(cx).key() == key)
             .map(|session| session.conversation_id.clone())
             .collect::<HashSet<_>>();
-        let saved_order = self.saved_sidebar_orders.get(key).cloned().unwrap_or_default();
+        let saved_order = self
+            .saved_sidebar_orders
+            .get(key)
+            .cloned()
+            .unwrap_or_default();
         let Some(space) = self.space_mut(key) else {
             return;
         };
-        local_conversations.extend(space.restore_pending.iter().map(|(_, state)| state.id.clone()));
+        local_conversations.extend(
+            space
+                .restore_pending
+                .iter()
+                .map(|(_, state)| state.id.clone()),
+        );
         // 项目列表就是这份目录里的，只按这台桌面的顺序排：第一份按库里记的，之后按侧栏
         // 现在的（拖过的顺序在这里），新开的排在最后。
         let order = if space.directory.loaded() {
@@ -652,9 +669,11 @@ impl Workspace {
             saved_order.projects.clone()
         };
         space.projects = order_by_saved(directory.projects, &order, String::as_str);
-        let inbound = space
-            .directory
-            .receive(directory.revision, directory.conversations, &local_conversations);
+        let inbound = space.directory.receive(
+            directory.revision,
+            directory.conversations,
+            &local_conversations,
+        );
         let runtime = space.runtime.clone();
 
         space
@@ -668,18 +687,28 @@ impl Workspace {
                 self.remove_session(ix, false, cx);
             }
         }
+        // 名字只从目录来（改名由运行时写、在跑的对话也由它同步给 agent），这里只更新显示。
         for (id, title) in inbound.retitled {
-            let Some(session) = self.sessions.iter_mut().find(|session| {
-                session.conversation_id == id && session.runtime(cx).key() == key
-            }) else {
+            let Some(session) = self
+                .sessions
+                .iter_mut()
+                .find(|session| session.conversation_id == id && session.runtime(cx).key() == key)
+            else {
                 continue;
             };
-            session.custom_title = title.clone();
-            if let SessionKind::Conversation(view) = &session.kind {
-                let view = view.clone();
-                view.update(cx, |view, _| view.rename_session(title));
-            }
+            session.custom_title = title;
             self.session_list_revision = self.session_list_revision.wrapping_add(1);
+        }
+        for (terminal_id, title) in inbound.renamed_terminals {
+            let pane = self
+                .sessions
+                .iter()
+                .filter(|session| session.runtime(cx).key() == key)
+                .flat_map(|session| session.term_leaves())
+                .find(|pane| pane.read(cx).session_id() == terminal_id);
+            if let Some(pane) = pane {
+                pane.update(cx, |pane, _| pane.set_custom_title(title));
+            }
         }
 
         let mut added = inbound
@@ -720,7 +749,10 @@ impl Workspace {
         let key = runtime.key().clone();
         let is_local = key == RuntimeKey::Local;
         let (active, saved_active_session_id) = if is_local {
-            let saved_id = self.saved_active_session_id.clone().filter(|id| !id.is_empty());
+            let saved_id = self
+                .saved_active_session_id
+                .clone()
+                .filter(|id| !id.is_empty());
             let active = saved_id
                 .as_deref()
                 .and_then(|id| pending.iter().position(|state| state.id == id))
@@ -836,13 +868,48 @@ impl Workspace {
                 (Vec::new(), Some(acp_directory(saved)?))
             }
         };
-        Some(WorkspaceConversation {
+        // 名字不随对话发出去：只经 `workspace.rename` 写，见 `request_rename`。
+        Some(without_names(&WorkspaceConversation {
             id: session.conversation_id.clone(),
-            custom_title: session.custom_title.clone(),
+            custom_title: None,
             last_updated_at,
             terminals,
             acp,
+        }))
+    }
+
+    /// 改名：交给运行时，名字写在哪由它定，改完随目录推送回来再显示。`terminal_id` 是给
+    /// 对话里的这一格终端改名。
+    pub(crate) fn request_rename(
+        &mut self,
+        runtime: Runtime,
+        conversation_id: String,
+        terminal_id: Option<String>,
+        title: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        use smelt_model::control_api::WorkspaceRename;
+        use smelt_model::workspace_directory::WorkspaceRenameParams;
+        let params = WorkspaceRenameParams {
+            conversation_id,
+            terminal_id,
+            title,
+        };
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    runtime
+                        .client()
+                        .call::<WorkspaceRename>(&params, crate::runtime_call::RUNTIME_CALL_TIMEOUT)
+                })
+                .await;
+            if let Err(error) = result {
+                let message = format!("改名失败：{}", crate::runtime_call::error_text(error));
+                let _ = this.update(cx, |this, _| this.report_background_error(message));
+            }
         })
+        .detach();
     }
 
     /// 在运行时上打开一个项目。本地不先加：运行时改完推回目录，侧栏随推送出现。
@@ -867,7 +934,12 @@ impl Workspace {
     }
 
     /// 项目操作和这一轮快照一起进这个运行时的写入队列，排在已经入队的改动后面。
-    fn request_project_op(&mut self, key: &RuntimeKey, op: ProjectOp, cx: &mut Context<Self>) -> bool {
+    fn request_project_op(
+        &mut self,
+        key: &RuntimeKey,
+        op: ProjectOp,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(mut job) = self.build_ws_snapshot(key, cx) else {
             return false;
         };
@@ -878,7 +950,9 @@ impl Workspace {
         let workspace = cx.weak_entity();
         cx.defer(move |cx| {
             if let Some(workspace) = workspace.upgrade() {
-                workspace.update(cx, |this, cx| this.enqueue_ws_snapshot(&key, job, epoch, cx));
+                workspace.update(cx, |this, cx| {
+                    this.enqueue_ws_snapshot(&key, job, epoch, cx)
+                });
             }
         });
         true
@@ -999,7 +1073,6 @@ impl Workspace {
             })
             .collect()
     }
-
 
     /// 各对话的界面状态：开着的、还没恢复上来的，以及目录还没读到的运行时上记着的那些
     /// （不能因为它离线就把界面状态冲掉）。
@@ -1162,7 +1235,9 @@ mod agent_conversation_persist_tests {
         conversation_from_record, conversation_record, project_key, project_roots_of,
         session_state_from_conversation,
     };
-    use smelt_model::workspace_directory::{WorkspaceAcp, WorkspaceConversation, WorkspaceTerminal};
+    use smelt_model::workspace_directory::{
+        WorkspaceAcp, WorkspaceConversation, WorkspaceTerminal,
+    };
 
     /// 智能体 space 上的 ACP 对话经运行时目录走一趟，恢复用到的字段都还在。
     #[test]
@@ -1188,7 +1263,11 @@ mod agent_conversation_persist_tests {
         assert_eq!(saved.cwd.as_deref(), Some(cwd));
         assert_eq!(saved.sid.as_deref(), Some("acp-global-1"));
         assert_eq!(
-            saved.history_session_id.as_ref().map(|id| id.to_string()).as_deref(),
+            saved
+                .history_session_id
+                .as_ref()
+                .map(|id| id.to_string())
+                .as_deref(),
             Some("pi-history-1")
         );
         assert_eq!(acp_directory(saved), Some(acp.clone()));

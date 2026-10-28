@@ -9,7 +9,7 @@ use smelt_core::automation_store::AutomationStore;
 use smelt_core::session_control::is_background_acp_session_id;
 use smelt_core::workspace_catalog::{self, DirectoryChange, DirectoryError};
 use smelt_core::workspace_directory::{
-    WorkspaceConversation, WorkspaceDirectory, WorkspaceRevision,
+    WorkspaceConversation, WorkspaceDirectory, WorkspaceRenameParams, WorkspaceRevision,
 };
 use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode};
 use smelt_store::Store;
@@ -181,12 +181,63 @@ pub(crate) fn forget_session(
 pub(crate) fn rename_acp_conversation(
     store: &Store,
     sid: &str,
-    title: &str,
+    title: Option<&str>,
+    acp_sessions: &AcpSessions,
     event_hub: &EventHubHandle,
 ) -> Result<WorkspaceRevision, ControlError> {
     let change =
         workspace_catalog::rename_acp_conversation_on(store, sid, title).map_err(control_error)?;
+    if let Some(title) = title {
+        super::acp_host::try_rename_running_acp_session(acp_sessions, sid, title);
+    }
     Ok(publish(&change, event_hub))
+}
+
+/// 改名的唯一入口（`workspace.rename`）：名字写在哪由运行时定（见
+/// [`workspace_catalog::rename_conversation_on`]），在跑的 ACP 对话同步给 agent 一次，
+/// 改了就推目录。
+pub(crate) fn rename(
+    store: &Store,
+    params: &WorkspaceRenameParams,
+    acp_sessions: &AcpSessions,
+    event_hub: &EventHubHandle,
+) -> Result<WorkspaceRevision, ControlError> {
+    let title = params
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty());
+    let change = match params.terminal_id.as_deref() {
+        Some(terminal_id) => workspace_catalog::rename_terminal_on(store, terminal_id, title),
+        None => workspace_catalog::rename_conversation_on(store, &params.conversation_id, title),
+    }
+    .map_err(control_error)?;
+    if params.terminal_id.is_none()
+        && let Some(title) = title
+        && let Some(sid) = change
+            .directory
+            .conversations
+            .iter()
+            .find(|conversation| conversation.id == params.conversation_id)
+            .and_then(|conversation| conversation.acp.as_ref())
+            .map(|acp| acp.sid.clone())
+    {
+        super::acp_host::try_rename_running_acp_session(acp_sessions, &sid, title);
+    }
+    Ok(publish(&change, event_hub))
+}
+
+/// agent 报的标题变了：写进目录（冷启动时靠它显示），改了就推。只由守护调用。
+pub(crate) fn remember_acp_session_title(sid: &str, title: Option<&str>, event_hub: &EventHubHandle) {
+    let result = default_store().and_then(|store| {
+        workspace_catalog::set_acp_session_title_on(&store, sid, title).map_err(control_error)
+    });
+    match result {
+        Ok(change) => {
+            publish(&change, event_hub);
+        }
+        Err(error) => dlog(&format!("记下对话 {sid} 的标题失败：{}", error.message)),
+    }
 }
 
 /// 存储层直接改了目录（守护确认或放弃一段对话的恢复身份）之后，把当前目录推出去。

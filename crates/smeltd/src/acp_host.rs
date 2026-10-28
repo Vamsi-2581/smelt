@@ -636,11 +636,12 @@ pub(crate) fn update_acp_daemon_state(sess: &AcpSession, subscribers: &EventHubH
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    let title_changed;
     let snapshot = {
         let mut st = sess.state.lock();
         let phase_changed = commit_session_phase(&mut st, PhaseSource::AcpProjection, phase);
         let question_changed = st.pending_question != pending_question;
-        let title_changed = st.title != title;
+        title_changed = st.title != title;
         if !phase_changed && !question_changed && !title_changed {
             None
         } else {
@@ -648,7 +649,7 @@ pub(crate) fn update_acp_daemon_state(sess: &AcpSession, subscribers: &EventHubH
                 st.pending_question = pending_question;
             }
             if title_changed {
-                st.title = title;
+                st.title = title.clone();
             }
             st.updated_at = now;
             bump_state_revision(&mut st);
@@ -656,6 +657,14 @@ pub(crate) fn update_acp_daemon_state(sess: &AcpSession, subscribers: &EventHubH
         }
     };
     if let Some(snapshot) = snapshot {
+        // agent 报的标题是对话的一部分：变了才记进工作区目录，GUI 没开时冷启动也看得到。
+        if title_changed {
+            crate::workspace_directory::remember_acp_session_title(
+                &snapshot.id,
+                title.as_deref(),
+                subscribers,
+            );
+        }
         broadcast_state(subscribers, &snapshot);
     }
     note_automation_watch(sess);
