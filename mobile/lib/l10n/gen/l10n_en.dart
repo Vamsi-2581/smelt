@@ -718,6 +718,12 @@ class L10nEn extends L10n {
   String get conversationStatusEnded => 'Session ended';
 
   @override
+  String get conversationStatusCompacting => 'Compacting context…';
+
+  @override
+  String get conversationNoticeDismiss => 'Dismiss notice';
+
+  @override
   String conversationHint(String agent) {
     return 'Message $agent';
   }

@@ -1267,6 +1267,18 @@ abstract class L10n {
   /// **'Session ended'**
   String get conversationStatusEnded;
 
+  /// No description provided for @conversationStatusCompacting.
+  ///
+  /// In en, this message translates to:
+  /// **'Compacting context…'**
+  String get conversationStatusCompacting;
+
+  /// No description provided for @conversationNoticeDismiss.
+  ///
+  /// In en, this message translates to:
+  /// **'Dismiss notice'**
+  String get conversationNoticeDismiss;
+
   /// No description provided for @conversationHint.
   ///
   /// In en, this message translates to:

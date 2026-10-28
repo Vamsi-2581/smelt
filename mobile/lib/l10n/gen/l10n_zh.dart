@@ -681,6 +681,12 @@ class L10nZh extends L10n {
   String get conversationStatusEnded => '会话已结束';
 
   @override
+  String get conversationStatusCompacting => '正在压缩上下文…';
+
+  @override
+  String get conversationNoticeDismiss => '关闭提示';
+
+  @override
   String conversationHint(String agent) {
     return '给 $agent 发消息';
   }

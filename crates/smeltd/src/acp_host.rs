@@ -1497,7 +1497,7 @@ fn acp_event_name(event: &smelt_core::acp_conn::ConversationEvent) -> &'static s
     use smelt_core::acp_conn::ConversationEvent as E;
     match event {
         E::Ready { .. } => "Ready",
-        E::Status(_) => "Status",
+        E::StartupProgress(_) => "StartupProgress",
         E::HistoryReplayStarted => "HistoryReplayStarted",
         E::HistoryReplayFinished => "HistoryReplayFinished",
         E::RestoreFailed(_) => "RestoreFailed",

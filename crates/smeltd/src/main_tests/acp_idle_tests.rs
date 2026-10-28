@@ -447,7 +447,10 @@ fn a_rejected_restore_does_not_hold_the_user_action() {
         })
     };
     std::thread::sleep(Duration::from_millis(200));
-    session.reduced.lock().status_line = Some("更新会话配置失败：不行".into());
+    smelt_core::acp_session::apply_event(
+        &mut session.reduced.lock(),
+        smelt_core::acp_conn::ConversationEvent::ConfigRejected("更新会话配置失败：不行".into()),
+    );
     let started = std::time::Instant::now();
     restoring.join().unwrap();
     assert!(

@@ -254,7 +254,8 @@ pub fn spawn_pi_rpc(
                 let stderr_drain: Arc<Mutex<Option<smol::Task<()>>>> = Arc::default();
                 let ready = Arc::new(AtomicBool::new(false));
                 let runtime = crate::managed_runtime::sync_managed_pi_agent(&|message| {
-                    let _ = event_tx.try_send(ConversationEvent::Status(message.to_string()));
+                    let _ =
+                        event_tx.try_send(ConversationEvent::StartupProgress(message.to_string()));
                 });
                 let runtime = match runtime {
                     Ok(runtime) => runtime,
@@ -271,7 +272,8 @@ pub fn spawn_pi_rpc(
                 )
                 .then(|| {
                     crate::managed_runtime::sync_managed_bun(&|message| {
-                        let _ = event_tx.try_send(ConversationEvent::Status(message.to_string()));
+                        let _ = event_tx
+                            .try_send(ConversationEvent::StartupProgress(message.to_string()));
                     })
                     .inspect_err(|error| {
                         crate::app_log::error(
@@ -2266,9 +2268,9 @@ async fn handle_config_command<W: AsyncWrite + Unpin>(
 ) -> Result<(), String> {
     let ConfigValue::Select(value) = value else {
         finish_in_flight(in_flight_rpc);
-        let _ = event_tx.try_send(ConversationEvent::Status(config_update_failure_status(
-            format!("Pi 配置 `{config_id}` 不接受布尔值"),
-        )));
+        let _ = event_tx.try_send(ConversationEvent::ConfigRejected(
+            config_update_failure_status(format!("Pi 配置 `{config_id}` 不接受布尔值")),
+        ));
         return Ok(());
     };
     match config_id.as_str() {
@@ -2291,9 +2293,9 @@ async fn handle_config_command<W: AsyncWrite + Unpin>(
         "codemode" if matches!(value.as_str(), "off" | "on") => {
             if !codemode_command_available(state) {
                 finish_in_flight(in_flight_rpc);
-                let _ = event_tx.try_send(ConversationEvent::Status(config_update_failure_status(
-                    "当前 Pi 没有脚本工具",
-                )));
+                let _ = event_tx.try_send(ConversationEvent::ConfigRejected(
+                    config_update_failure_status("当前 Pi 没有脚本工具"),
+                ));
                 return Ok(());
             }
             // Pi 没有 set_active_tools。这条 prompt 只走扩展命令，回执是 handled，
@@ -2315,9 +2317,9 @@ async fn handle_config_command<W: AsyncWrite + Unpin>(
         "model" => {
             if !value.contains('/') {
                 finish_in_flight(in_flight_rpc);
-                let _ = event_tx.try_send(ConversationEvent::Status(config_update_failure_status(
-                    "Pi 模型值格式无效",
-                )));
+                let _ = event_tx.try_send(ConversationEvent::ConfigRejected(
+                    config_update_failure_status("Pi 模型值格式无效"),
+                ));
                 return Ok(());
             }
             // 菜单按磁盘上的 models.json 列模型，这个会话的 Pi 可能还不认识（会话启动后才加的
@@ -2337,9 +2339,11 @@ async fn handle_config_command<W: AsyncWrite + Unpin>(
         }
         _ => {
             finish_in_flight(in_flight_rpc);
-            let _ = event_tx.try_send(ConversationEvent::Status(config_update_failure_status(
-                format!("Pi 不支持会话配置 `{config_id}` = `{value}`"),
-            )));
+            let _ = event_tx.try_send(ConversationEvent::ConfigRejected(
+                config_update_failure_status(format!(
+                    "Pi 不支持会话配置 `{config_id}` = `{value}`"
+                )),
+            ));
         }
     }
     Ok(())
@@ -2627,16 +2631,16 @@ async fn handle_response<W: AsyncWrite + Unpin>(
                         .and_then(serde_json::Value::as_str)
                         == Some("handled");
                     if !handled || state.codemode_enabled != enabled {
-                        let _ = event_tx.try_send(ConversationEvent::Status(
+                        let _ = event_tx.try_send(ConversationEvent::ConfigRejected(
                             config_update_failure_status("脚本工具没有在下一轮生效"),
                         ));
                     }
                 }
             },
             Err(error) => {
-                let _ = event_tx.try_send(ConversationEvent::Status(config_update_failure_status(
-                    error,
-                )));
+                let _ = event_tx.try_send(ConversationEvent::ConfigRejected(
+                    config_update_failure_status(error),
+                ));
             }
         }
         publish_configuration(state, event_tx);
@@ -3350,7 +3354,6 @@ fn handle_event(
             state.compaction_idle_pending = false;
             let _ = event_tx.try_send(ConversationEvent::Compaction {
                 running: true,
-                detail: "正在压缩上下文…".to_string(),
                 used: None,
                 size: None,
             });
@@ -3366,30 +3369,20 @@ fn handle_event(
                 .and_then(serde_json::Value::as_str)
                 .map(str::trim)
                 .filter(|text| !text.is_empty());
-            let (detail, used) = if aborted {
-                ("上下文压缩已取消".to_string(), None)
-            } else if let Some(error) = error {
-                (format!("上下文压缩失败：{error}"), None)
-            } else if let Some(result) = result {
-                let before = result
-                    .get("tokensBefore")
-                    .and_then(serde_json::Value::as_u64);
-                let after = result
-                    .get("estimatedTokensAfter")
-                    .and_then(serde_json::Value::as_u64);
-                let detail = match (before, after) {
-                    (Some(before), Some(after)) => {
-                        format!("已压缩上下文：{before} → {after} tokens")
-                    }
-                    _ => "上下文压缩完成".to_string(),
-                };
-                (detail, after)
+            if let Some(error) = error.filter(|_| !aborted) {
+                let _ = event_tx.try_send(ConversationEvent::Notice(format!(
+                    "上下文压缩失败：{error}"
+                )));
+            }
+            let used = if aborted || error.is_some() {
+                None
             } else {
-                ("上下文压缩完成".to_string(), None)
+                result
+                    .and_then(|result| result.get("estimatedTokensAfter"))
+                    .and_then(serde_json::Value::as_u64)
             };
             let _ = event_tx.try_send(ConversationEvent::Compaction {
                 running: false,
-                detail,
                 used,
                 size: state.context_window(),
             });
@@ -4366,14 +4359,8 @@ fn handle_extension_ui(
                 ));
             }
         }
-        "setStatus" => {
-            if let Some(message) = request
-                .get("statusText")
-                .and_then(serde_json::Value::as_str)
-            {
-                let _ = event_tx.try_send(ConversationEvent::Status(message.to_string()));
-            }
-        }
+        // setStatus 是按 key 常驻、由扩展自己清掉的页脚状态，Smelt 没有页脚。
+        // 写进状态行会一直挂着（清除时 statusText 是空），所以不接。
         "setWidget" => publish_extension_widget(request, event_tx),
         "setTitle" => {
             if let Some(title) = request.get("title").and_then(serde_json::Value::as_str) {
@@ -5178,7 +5165,7 @@ mod tests {
         assert!(rpc_lines(writer).is_empty());
         assert!(!state.active_turn);
         assert_eq!(in_flight.load(Ordering::SeqCst), 0);
-        let ConversationEvent::Status(status) = event_rx.try_recv().unwrap() else {
+        let ConversationEvent::ConfigRejected(status) = event_rx.try_recv().unwrap() else {
             panic!("缺命令时应给出不支持状态");
         };
         assert!(status.starts_with("更新会话配置失败"));
@@ -5213,7 +5200,7 @@ mod tests {
 
         assert!(!state.codemode_enabled);
         assert_eq!(in_flight.load(Ordering::SeqCst), 0);
-        let ConversationEvent::Status(status) = event_rx.try_recv().unwrap() else {
+        let ConversationEvent::ConfigRejected(status) = event_rx.try_recv().unwrap() else {
             panic!("没有扩展回报时不能把勾选改成开");
         };
         assert!(status.contains("没有在下一轮生效"));
@@ -7227,6 +7214,39 @@ mod tests {
     }
 
     #[test]
+    fn compaction_failure_is_a_notice_without_usage() {
+        let (event_tx, event_rx) = smol::channel::unbounded();
+        let (outbound_tx, _) = smol::channel::unbounded();
+        let mut state = PiState::new();
+        state.active_turn = true;
+        state.prompt_accepted = true;
+        let launch = test_launch(SMELT_PI_AGENT_COMMAND);
+        handle_event(
+            serde_json::json!({
+                "type": "compaction_end",
+                "aborted": false,
+                "errorMessage": "context overflow"
+            }),
+            &event_tx,
+            &outbound_tx,
+            &mut state,
+            &launch,
+        );
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::Notice(text)) if text == "上下文压缩失败：context overflow"
+        ));
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ConversationEvent::Compaction {
+                running: false,
+                used: None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn compaction_end_during_an_accepted_turn_does_not_admit() {
         let (event_tx, event_rx) = smol::channel::unbounded();
         let (outbound_tx, _) = smol::channel::unbounded();
@@ -8717,7 +8737,7 @@ mod tests {
     }
 
     #[test]
-    fn set_model_failure_uses_the_session_config_failure_prefix() {
+    fn set_model_failure_is_a_config_rejection() {
         let (event_tx, event_rx) = smol::channel::unbounded();
         let mut state = PiState::new();
         state.model = Some(PiModel {
@@ -8747,7 +8767,7 @@ mod tests {
         ))
         .unwrap();
 
-        let ConversationEvent::Status(status) = event_rx.try_recv().unwrap() else {
+        let ConversationEvent::ConfigRejected(status) = event_rx.try_recv().unwrap() else {
             panic!("失败必须写成会话配置失败，GUI 才能清掉「下轮生效」");
         };
         assert!(status.starts_with("更新会话配置失败"), "{status}");

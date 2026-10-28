@@ -11,8 +11,8 @@ use super::{
     compact_token_count, compact_tool_headline, compact_tool_run_label,
     composer_config_section_label, composer_menu_sections, composer_model_label,
     composer_model_scroll, composer_native_queue_shortcut_hint, composer_next_turn_notice,
-    composer_should_nest_models, composer_usage_breakdown, config_selection_is_pending,
-    config_update_failure_is_new, consecutive_compact_tool_run, consume_composer_restore,
+    composer_should_nest_models, composer_usage_breakdown, config_rejection_is_new,
+    config_selection_is_pending, consecutive_compact_tool_run, consume_composer_restore,
     conversation_input_for_submit, current_turn_has_agent_output, did_recover_from_ended,
     diff_cache_matches_output, diff_stats_for_output, dispatch_elapsed_ms, dispatch_progress,
     entries_to_fade_in, external_clipboard_image_paths, filter_trajectory_events,
@@ -396,24 +396,28 @@ fn pending_model_stays_until_snapshot_uses_the_picker_value() {
 }
 
 #[test]
-fn config_update_failure_status_is_a_rising_edge() {
-    assert!(config_update_failure_is_new(
+fn config_rejection_is_recognized_by_kind_and_id() {
+    use smelt_model::acp_session::{AcpNoticeKind, AcpNoticeView};
+    let notice = |id, kind| AcpNoticeView {
+        id,
+        kind,
+        text: "更新会话配置失败：timeout".into(),
+    };
+    let rejected = notice(10, AcpNoticeKind::ConfigRejected);
+    assert!(config_rejection_is_new(None, Some(&rejected)));
+    assert!(!config_rejection_is_new(Some(&rejected), Some(&rejected)));
+    assert!(
+        config_rejection_is_new(
+            Some(&rejected),
+            Some(&notice(11, AcpNoticeKind::ConfigRejected))
+        ),
+        "同一句失败连来两次，第二次也要撤掉勾选"
+    );
+    assert!(!config_rejection_is_new(
         None,
-        Some("更新会话配置失败：agent rejected")
+        Some(&notice(12, AcpNoticeKind::Info))
     ));
-    assert!(config_update_failure_is_new(
-        Some("正在恢复"),
-        Some("更新会话配置失败：timeout")
-    ));
-    assert!(!config_update_failure_is_new(
-        Some("更新会话配置失败：timeout"),
-        Some("更新会话配置失败：timeout")
-    ));
-    assert!(!config_update_failure_is_new(
-        Some("正在恢复"),
-        Some("正在恢复")
-    ));
-    assert!(!config_update_failure_is_new(None, Some("正在启动 Grok")));
+    assert!(!config_rejection_is_new(Some(&rejected), None));
 }
 
 #[test]
@@ -1157,12 +1161,14 @@ fn dismissed_notice_stays_hidden_until_a_new_one_arrives() {
     use smelt_model::acp_session::AcpNoticeView;
     let first = AcpNoticeView {
         id: 10,
+        kind: Default::default(),
         text: "压缩上下文失败：busy".into(),
     };
     assert_eq!(notice_to_show(Some(&first), None), Some(&first));
     assert_eq!(notice_to_show(Some(&first), Some(10)), None);
     let second = AcpNoticeView {
         id: 11,
+        kind: Default::default(),
         text: "Pi Extension：boom".into(),
     };
     assert_eq!(notice_to_show(Some(&second), Some(10)), Some(&second));

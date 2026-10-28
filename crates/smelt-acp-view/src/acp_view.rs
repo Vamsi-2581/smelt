@@ -678,9 +678,15 @@ fn reconcile_pending_config_values(
         .retain(|(id, value)| confirmed_config_value(id, configs, model) != Some(value.as_str()));
 }
 
-fn config_update_failure_is_new(prev_status: Option<&str>, next_status: Option<&str>) -> bool {
-    const PREFIX: &str = "更新会话配置失败";
-    next_status.is_some_and(|status| status.starts_with(PREFIX)) && prev_status != next_status
+/// 快照带来了一条新的「配置没生效」提示。按提示 id 认新旧，同一句失败连来两次也算两次。
+fn config_rejection_is_new(
+    previous: Option<&smelt_model::acp_session::AcpNoticeView>,
+    next: Option<&smelt_model::acp_session::AcpNoticeView>,
+) -> bool {
+    next.is_some_and(|notice| {
+        notice.kind == smelt_model::acp_session::AcpNoticeKind::ConfigRejected
+            && previous.is_none_or(|previous| previous.id != notice.id)
+    })
 }
 
 fn config_selection_is_pending(pending: &[(String, String)], config_id: &str) -> bool {
@@ -4268,13 +4274,9 @@ impl AcpView {
             {
                 prepare_surface_inputs = true;
             }
-            let previous_status_line = self.status_line.clone();
             self.status_line = snap.status_line;
             self.history_error = snap.history_error;
-            if config_update_failure_is_new(
-                previous_status_line.as_deref(),
-                self.status_line.as_deref(),
-            ) {
+            if config_rejection_is_new(self.notice.as_ref(), snap.notice.as_ref()) {
                 self.pending_config_values.clear();
             }
             if let Some(title) =

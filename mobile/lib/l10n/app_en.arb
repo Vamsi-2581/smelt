@@ -501,6 +501,8 @@
     }
   },
   "conversationStatusEnded": "Session ended",
+  "conversationStatusCompacting": "Compacting context…",
+  "conversationNoticeDismiss": "Dismiss notice",
   "conversationHint": "Message {agent}",
   "@conversationHint": {
     "placeholders": {
