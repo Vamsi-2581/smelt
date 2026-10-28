@@ -164,10 +164,7 @@ use smelt_core::automation_store::{
 use smelt_core::osc::{
     OscEvent, OscScan, TerminalGeometryOsc, program_status_reply, terminal_geometry_osc,
 };
-use smelt_core::session_control::{
-    RemoteAcpSession, RemoteSessionCatalog, RemoteSessionKind, RemoteSessionLifecycle,
-    RemoteSessionSnapshot, RemoteTerminalSession, find_agent_option_for,
-};
+use smelt_core::session_control::find_agent_option_for;
 use terminal_output::{KeyframeNeed, OutputAttachment, enqueue_session_streams};
 use terminal_progress::ProgressTracker;
 use terminal_registry::{TerminalRegistry, TerminalSlot};
@@ -910,115 +907,17 @@ fn started_at() -> u64 {
 #[derive(Clone, Default)]
 struct DaemonProjectionSeed {
     sessions: Vec<SessionState>,
-    remote_sessions: Option<RemoteSessionSnapshot>,
     workspace: Option<smelt_core::workspace_directory::WorkspaceDirectory>,
     automations: Option<AutomationFile>,
 }
 
-type RemoteCatalogLoader = fn() -> Result<RemoteSessionCatalog, String>;
-
-/// A daemon owns this catalog for its entire lifetime. A broken historical file is fail-closed:
-/// normal terminal/ACP service continues, but remote commands cannot overwrite an unknown catalog.
-struct RemoteCatalogState {
-    catalog: Option<RemoteSessionCatalog>,
-    load_error: Option<String>,
-    loader: RemoteCatalogLoader,
-    /// Daemon-local catalog ownership. Active persistence and this generation bind under the
-    /// same mutex; delayed cleanup must compare it before an id-scoped catalog deletion.
-    runtime_instances: HashMap<(RemoteSessionKind, String), u64>,
-}
-
-impl RemoteCatalogState {
-    fn load_default() -> Self {
-        Self::with_loader(RemoteSessionCatalog::load_default)
-    }
-
-    fn with_loader(loader: RemoteCatalogLoader) -> Self {
-        let mut state = Self {
-            catalog: None,
-            load_error: None,
-            loader,
-            runtime_instances: HashMap::new(),
-        };
-        state.ensure_loaded();
-        state
-    }
-
-    #[cfg(test)]
-    fn in_memory() -> Self {
-        Self {
-            catalog: Some(RemoteSessionCatalog::in_memory()),
-            load_error: None,
-            loader: RemoteSessionCatalog::load_default,
-            runtime_instances: HashMap::new(),
-        }
-    }
-
-    /// 目录还没加载出来就再试一次。
-    ///
-    /// 打开失败往往只是**一瞬间**的事：磁盘临时不可写、sidecar 和主库对不上、
-    /// 另一个进程正在替换文件。把首次失败当成终局，代价是整个 daemon 生命周期
-    /// 里远程目录都不可用——手机端永远只有一句英文错误，
-    /// 而唯一的出路是重启进程。故障消失之后，下一次访问就该自己走出来。
-    ///
-    /// 不做节流：只有目录处于不可用状态时才会走到这里，而这条路上的调用（远程
-    /// 生命周期命令、订阅建立）本来就不是高频路径。
-    fn ensure_loaded(&mut self) {
-        if self.catalog.is_some() {
-            return;
-        }
-        match (self.loader)() {
-            Ok(catalog) => {
-                if self.load_error.take().is_some() {
-                    eprintln!("[remote] 远程会话目录已恢复，重新接受远程生命周期命令");
-                }
-                self.catalog = Some(catalog);
-            }
-            Err(error) => {
-                // 故障持续时每次访问都会重试，日志只在错况变化时记一条，不刷屏。
-                if self.load_error.as_deref() != Some(error.as_str()) {
-                    eprintln!("[remote] 远程会话目录不可用，拒绝远程生命周期命令：{error}");
-                }
-                self.load_error = Some(error);
-            }
-        }
-    }
-
-    fn catalog(&mut self) -> Result<&RemoteSessionCatalog, String> {
-        self.ensure_loaded();
-        self.catalog.as_ref().ok_or_else(|| {
-            self.load_error
-                .clone()
-                .unwrap_or_else(|| "remote session catalog unavailable".to_string())
-        })
-    }
-
-    fn catalog_mut(&mut self) -> Result<&mut RemoteSessionCatalog, String> {
-        self.ensure_loaded();
-        let error = self.load_error.clone();
-        self.catalog.as_mut().ok_or_else(|| {
-            error.unwrap_or_else(|| "remote session catalog unavailable".to_string())
-        })
-    }
-}
-
-type RemoteSessions = Arc<Mutex<RemoteCatalogState>>;
 pub(crate) use workspace_directory::WorkspaceDirectoryReader;
-
-fn new_remote_sessions() -> RemoteSessions {
-    Arc::new(Mutex::new(RemoteCatalogState::load_default()))
-}
 
 #[cfg(test)]
 fn new_test_automation_store() -> AutomationStore {
     Arc::new(Mutex::new(
         smelt_core::automation_store::AutomationOwner::in_memory(),
     ))
-}
-
-#[cfg(test)]
-fn new_test_remote_sessions() -> RemoteSessions {
-    Arc::new(Mutex::new(RemoteCatalogState::in_memory()))
 }
 
 #[cfg(test)]
@@ -1104,187 +1003,21 @@ fn forget_session(event_hub: &EventHubHandle, id: &str, instance: u64) {
 
 /// Remote ownership is a small catalog, so each change publishes a complete replacement. This
 /// gives lagging clients a convergent state without treating catalog events as a durable log.
-fn broadcast_remote_sessions(event_hub: &EventHubHandle, snapshot: &RemoteSessionSnapshot) {
-    if let Err(error) = event_hub.publish_remote_sessions(snapshot) {
-        eprintln!("[event-hub] remote sessions publish failed: {error}");
-    }
-}
-
-fn remote_session_snapshot(
-    remote_sessions: &RemoteSessions,
-) -> Result<RemoteSessionSnapshot, String> {
-    let mut catalog = remote_sessions.lock().unwrap();
-    Ok(catalog.catalog()?.snapshot())
-}
-
-fn mutate_remote_catalog<T>(
-    remote_sessions: &RemoteSessions,
-    mutation: impl FnOnce(&mut RemoteSessionCatalog) -> Result<T, String>,
-) -> Result<(T, RemoteSessionSnapshot), String> {
-    let mut state = remote_sessions.lock().unwrap();
-    let value = {
-        let catalog = state.catalog_mut()?;
-        mutation(catalog)?
-    };
-    let snapshot = state.catalog()?.snapshot();
-    Ok((value, snapshot))
-}
-
-fn set_remote_lifecycle(
-    remote_sessions: &RemoteSessions,
-    event_hub: &EventHubHandle,
-    kind: RemoteSessionKind,
-    id: &str,
-    lifecycle: RemoteSessionLifecycle,
-) -> Result<bool, String> {
-    let (record, snapshot) = mutate_remote_catalog(remote_sessions, |catalog| {
-        catalog.set_lifecycle_for_kind(kind, id, lifecycle)
-    })?;
-    let changed = record.is_some();
-    if changed {
-        broadcast_remote_sessions(event_hub, &snapshot);
-    }
-    Ok(changed)
-}
-
-#[cfg(test)]
-fn bind_remote_session_instance(
-    remote_sessions: &RemoteSessions,
-    kind: RemoteSessionKind,
-    id: &str,
-    instance: u64,
-) {
-    remote_sessions
-        .lock()
-        .unwrap()
-        .runtime_instances
-        .insert((kind, id.to_string()), instance);
-}
-
-fn activate_remote_session_instance(
-    remote_sessions: &RemoteSessions,
-    kind: RemoteSessionKind,
-    id: &str,
-    instance: u64,
-) -> Result<RemoteSessionSnapshot, String> {
-    let mut state = remote_sessions.lock().unwrap();
-    let record =
-        state
-            .catalog_mut()?
-            .set_lifecycle_for_kind(kind, id, RemoteSessionLifecycle::Active)?;
-    if record.is_none() {
-        return Err("remote session disappeared".to_string());
-    }
-    state
-        .runtime_instances
-        .insert((kind, id.to_string()), instance);
-    Ok(state.catalog()?.snapshot())
-}
-
-fn remove_remote_session_for_instance(
-    remote_sessions: &RemoteSessions,
-    event_hub: &EventHubHandle,
-    kind: RemoteSessionKind,
-    id: &str,
-    instance: u64,
-) -> Result<bool, String> {
-    let key = (kind, id.to_string());
-    let mut state = remote_sessions.lock().unwrap();
-    if state.runtime_instances.get(&key).copied() != Some(instance) {
-        return Ok(false);
-    }
-    // All production callers hold the slot lifecycle while retiring this instance. Once the
-    // generation matches, no replacement can bind the same id before this function returns.
-    // Release the in-memory binding even when durable deletion fails; otherwise a later
-    // no-runtime retry is rejected forever by `remove_remote_session_if_unbound`.
-    let remove_result = state
-        .catalog_mut()
-        .and_then(|catalog| catalog.remove_for_kind(kind, id));
-    state.runtime_instances.remove(&key);
-    let record = remove_result?;
-    let snapshot = state.catalog()?.snapshot();
-    drop(state);
-    let changed = record.is_some();
-    if changed {
-        broadcast_remote_sessions(event_hub, &snapshot);
-    }
-    Ok(changed)
-}
-
-fn remove_remote_session_if_unbound(
-    remote_sessions: &RemoteSessions,
-    event_hub: &EventHubHandle,
-    kind: RemoteSessionKind,
-    id: &str,
-) -> Result<bool, String> {
-    let key = (kind, id.to_string());
-    let mut state = remote_sessions.lock().unwrap();
-    if state.runtime_instances.contains_key(&key) {
-        return Ok(false);
-    }
-    let record = state.catalog_mut()?.remove_for_kind(kind, id)?;
-    let snapshot = state.catalog()?.snapshot();
-    drop(state);
-    let changed = record.is_some();
-    if changed {
-        broadcast_remote_sessions(event_hub, &snapshot);
-    }
-    Ok(changed)
-}
-
 fn apply_history_rename(
     kind: smelt_core::agent_kind::HistorySourceKind,
     profile_id: Option<&str>,
     resume_id: &str,
     title: Option<&str>,
-    cwd: Option<&str>,
-    remote_sessions: &RemoteSessions,
-    event_hub: &EventHubHandle,
 ) -> Result<(), String> {
     if resume_id.trim().is_empty() {
         return Err("missing resume_id".to_string());
     }
-    smelt_core::session_metadata::set_custom_title(kind, profile_id, resume_id, title)?;
-    // 远程会话目录只认 ACP 会话；纯终端来源（Antigravity）改的名只落在标题
-    // 覆盖层，不需要、也无法去同步一条并不存在的 ACP 记录。
-    let option = kind
-        .acp()
-        .and_then(|acp| find_agent_option_for(acp, profile_id));
-    let catalog_title = title
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            let option = option.as_ref()?;
-            let cwd = cwd.filter(|value| !value.trim().is_empty())?;
-            smelt_core::session_control::list_history_for(
-                kind,
-                profile_id,
-                cwd,
-                option.history_dir.as_deref(),
-            )
-            .into_iter()
-            .find(|session| session.resume_id == resume_id)
-            .map(|session| session.display_title().to_string())
-        });
-    if let (Some(option), Some(catalog_title)) = (option, catalog_title)
-        && !catalog_title.is_empty()
-    {
-        let (changed, snapshot) = mutate_remote_catalog(remote_sessions, |catalog| {
-            catalog.rename_acp_by_resume_id(&option.id, resume_id, &catalog_title)
-        })?;
-        if changed {
-            broadcast_remote_sessions(event_hub, &snapshot);
-        }
-    }
-    Ok(())
+    smelt_core::session_metadata::set_custom_title(kind, profile_id, resume_id, title)
 }
 
 fn handle_history_rename<C: ClientSocket>(
     mut conn: C,
     v: &serde_json::Value,
-    remote_sessions: &RemoteSessions,
-    event_hub: &EventHubHandle,
 ) {
     let result = (|| -> Result<(), String> {
         let agent = v["agent"].as_str().unwrap_or_default();
@@ -1293,16 +1026,7 @@ fn handle_history_rename<C: ClientSocket>(
         let resume_id = v["resume_id"].as_str().unwrap_or_default();
         let profile_id = v["profile_id"].as_str();
         let title = v.get("title").and_then(serde_json::Value::as_str);
-        let cwd = v["cwd"].as_str();
-        apply_history_rename(
-            kind,
-            profile_id,
-            resume_id,
-            title,
-            cwd,
-            remote_sessions,
-            event_hub,
-        )
+        apply_history_rename(kind, profile_id, resume_id, title)
     })();
     let response = match result {
         Ok(()) => serde_json::json!({ "ok": true }),
@@ -1431,89 +1155,6 @@ fn handle_event_publish<C: ClientSocket>(
         Err(error) => serde_json::json!({ "ok": false, "error": error }),
     };
     let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
-}
-
-/// 落盘记录不能证明进程还在。对外服务之前，按
-/// `catalog ∩ runtime` 对账：活着的提成 Active，没有进程的删掉。
-fn reconcile_remote_catalog_runtime(
-    remote_sessions: &RemoteSessions,
-    sessions: &Sessions,
-    acp_sessions: &AcpSessions,
-    event_hub: &EventHubHandle,
-) {
-    let mut terminal_slots = sessions.snapshot_slots();
-    terminal_slots.sort_by(|left, right| left.0.cmp(&right.0));
-    let mut terminal_lifecycles = Vec::with_capacity(terminal_slots.len());
-    let mut live_terminal_instances = HashMap::new();
-    for (id, slot) in &terminal_slots {
-        let lifecycle = slot.lifecycle.lock().unwrap();
-        if sessions.is_current(id, slot)
-            && let Some(session) = sessions.live_in_slot(slot)
-        {
-            live_terminal_instances.insert(id.clone(), session.instance);
-        }
-        terminal_lifecycles.push(lifecycle);
-    }
-
-    let mut acp_slots = acp_sessions.snapshot();
-    acp_slots.sort_by(|left, right| left.0.cmp(&right.0));
-    let mut acp_lifecycles = Vec::with_capacity(acp_slots.len());
-    let mut live_acp_instances = HashMap::new();
-    for (id, slot) in &acp_slots {
-        let lifecycle = slot.lifecycle.lock();
-        if acp_sessions.is_current(id, slot) {
-            live_acp_instances.insert(id.clone(), slot.value.instance);
-        }
-        acp_lifecycles.push(lifecycle);
-    }
-    let live_terminal_ids = live_terminal_instances
-        .keys()
-        .cloned()
-        .collect::<HashSet<_>>();
-    let live_acp_ids = live_acp_instances.keys().cloned().collect::<HashSet<_>>();
-    let result = (|| -> Result<(bool, RemoteSessionSnapshot), String> {
-        let mut state = remote_sessions.lock().unwrap();
-        let changed = state
-            .catalog_mut()?
-            .retain_live_runtimes(&live_acp_ids, &live_terminal_ids)?;
-        let snapshot = state.catalog()?.snapshot();
-        state.runtime_instances.clear();
-        for record in &snapshot.sessions {
-            let instance = match record.kind {
-                RemoteSessionKind::Terminal => live_terminal_instances.get(&record.id),
-                RemoteSessionKind::Acp => live_acp_instances.get(&record.id),
-            };
-            if let Some(instance) = instance {
-                state
-                    .runtime_instances
-                    .insert((record.kind, record.id.clone()), *instance);
-            }
-        }
-        Ok((changed, snapshot))
-    })();
-    // 不要把 registry 生命周期锁带进广播；目录提交完成后，正常的 kill/cleanup
-    // 可以继续取得 slot 锁并观察到同一份 runtime 绑定。
-    drop(terminal_lifecycles);
-    drop(acp_lifecycles);
-    match result {
-        Ok((true, snapshot)) => broadcast_remote_sessions(event_hub, &snapshot),
-        Ok((false, _)) => {}
-        Err(error) => eprintln!("[remote] 启动时远程目录对账失败：{error}"),
-    }
-}
-
-/// `None` means the catalog itself is unavailable. Callers may still service an ordinary local
-/// runtime, but must not create a new remote-owned one in that state.
-fn is_known_remote_session(
-    remote_sessions: &RemoteSessions,
-    kind: RemoteSessionKind,
-    id: &str,
-) -> Option<bool> {
-    let state = remote_sessions.lock().unwrap();
-    state
-        .catalog
-        .as_ref()
-        .map(|catalog| catalog.kind_for(id) == Some(kind))
 }
 
 /// 常驻 Term 的事件监听。OSC 标题留在终端网格自己的标题栏，这里直接丢掉。
@@ -2651,9 +2292,6 @@ fn main() {
             return;
         }
     };
-    // 远程目录是 daemon 独占的持久化状态，新进程重新打开
-    // 即可。读取异常时 fail-closed，绝不把损坏文档当成空目录发布给 GUI。
-    let remote_sessions = new_remote_sessions();
     let workspace_directory = WorkspaceDirectoryReader::from_store();
     // 升级的接班进程：前任回执后才退出，退出前监听还在它手里。等它退了再绑。
     #[cfg(windows)]
@@ -2703,11 +2341,9 @@ fn main() {
 
     let automations = new_automation_store();
 
-    reconcile_remote_catalog_runtime(&remote_sessions, &sessions, &acp_sessions, &event_hub);
     event_hub.synchronize_projection(collect_subscription_snapshot(
         &sessions,
         &acp_sessions,
-        &remote_sessions,
         automations.lock().unwrap().snapshot(),
     ));
 
@@ -2715,7 +2351,6 @@ fn main() {
         Arc::clone(&automations),
         Arc::clone(&sessions),
         Arc::clone(&acp_sessions),
-        Arc::clone(&remote_sessions),
         Arc::clone(&event_hub),
     );
     webhook::spawn(Arc::clone(&automations), Arc::clone(&event_hub));
@@ -2724,7 +2359,6 @@ fn main() {
         listener,
         sessions,
         acp_sessions,
-        remote_sessions,
         workspace_directory,
         automations,
         event_hub,
@@ -2968,7 +2602,6 @@ fn run_serve_loop(
     listener: UnixListener,
     sessions: Sessions,
     acp_sessions: AcpSessions,
-    remote_sessions: RemoteSessions,
     workspace_directory: WorkspaceDirectoryReader,
     automations: AutomationStore,
     event_hub: EventHubHandle,
@@ -2993,7 +2626,6 @@ fn run_serve_loop(
     let server = ServerShared {
         sessions,
         acp_sessions,
-        remote_sessions,
         workspace_directory,
         automations,
         exe_mtime,
@@ -3524,7 +3156,6 @@ fn start_pty_pump(
     id: String,
     sessions: Sessions,
     event_hub: EventHubHandle,
-    remote_sessions: Option<RemoteSessions>,
     slot: Arc<TerminalSlot<Session>>,
 ) {
     thread::spawn(move || {
@@ -3598,20 +3229,9 @@ fn start_pty_pump(
         }
         event_hub.forget_terminal_progress(&id, sess.instance);
         // 主动 kill 可能已经摘掉并替换了同 ID slot。这里只能清理自己仍拥有的实例，
-        // 否则旧 PTY EOF 会删掉刚创建的新会话和它的远程目录。
+        // 否则旧 PTY EOF 会删掉刚创建的新会话。
         let _lifecycle = slot.lifecycle.lock().unwrap();
         let removed_current = if sessions.is_current(&id, &slot) {
-            if let Some(remote_sessions) = remote_sessions
-                && let Err(error) = remove_remote_session_for_instance(
-                    &remote_sessions,
-                    &event_hub,
-                    RemoteSessionKind::Terminal,
-                    &id,
-                    sess.instance,
-                )
-            {
-                eprintln!("[remote] 终端会话 {id} 退出后清理目录失败：{error}");
-            }
             sessions.remove_if_same(&id, &slot).is_some()
         } else {
             false

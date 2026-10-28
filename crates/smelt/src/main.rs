@@ -74,7 +74,7 @@ pub(crate) use workspace_nav::{CapabilitiesTab, WorkspaceNav, WorkspaceRoute};
 #[cfg(test)]
 pub(crate) use workspace_persist::persisted_active_position;
 pub(crate) use workspace_persist::{
-    load_workspace_ui, pending_restore_session_ids, unproject_acp_when_remote_catalog_drops,
+    load_workspace_ui,
 };
 
 mod updater;
@@ -83,7 +83,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -190,73 +190,6 @@ struct MainWindowClosedSubscription {
 }
 
 impl Global for MainWindowClosedSubscription {}
-
-/// smeltd 远程会话目录在 GUI 内的只读投影。唯一的 daemon `event_subscribe` 循环写入它；
-/// 各个 Workspace 只观察并渲染，不能重新读写历史 JSON 文件或自行建第二条订阅连接。
-#[derive(Clone, Default)]
-struct RemoteSessionCatalogGlobal {
-    snapshot: Arc<Mutex<Option<smelt_model::session_control::RemoteSessionSnapshot>>>,
-    generation: u64,
-}
-
-impl Global for RemoteSessionCatalogGlobal {}
-
-fn accepts_remote_catalog_incremental(
-    current: Option<&smelt_model::session_control::RemoteSessionSnapshot>,
-    incoming: &smelt_model::session_control::RemoteSessionSnapshot,
-) -> bool {
-    // `revision = 0` 表示尚未建立投影水位：不能因首帧也是 0 就把后续完整替换
-    // 永久丢掉。
-    incoming.revision == 0 || current.is_none_or(|current| incoming.revision > current.revision)
-}
-
-fn recognized_remote_acp_sessions(
-    records: Vec<smelt_model::session_control::RemoteAcpSession>,
-) -> Vec<(
-    smelt_model::session_control::RemoteAcpSession,
-    settings::ConversationAgentKind,
-)> {
-    records
-        .into_iter()
-        .filter_map(|record| {
-            settings::ConversationAgentKind::from_id(&record.agent).map(|agent| (record, agent))
-        })
-        .collect()
-}
-
-impl RemoteSessionCatalogGlobal {
-    fn reset_from_subscription(
-        snapshot: Option<smelt_model::session_control::RemoteSessionSnapshot>,
-        cx: &mut App,
-    ) {
-        let state = cx.global::<Self>().snapshot.clone();
-        *state.lock().unwrap() = snapshot;
-        cx.update_global::<Self, _>(|global, _| {
-            global.generation = global.generation.wrapping_add(1);
-        });
-    }
-
-    fn apply_incremental(
-        snapshot: smelt_model::session_control::RemoteSessionSnapshot,
-        cx: &mut App,
-    ) {
-        let state = cx.global::<Self>().snapshot.clone();
-        let changed = {
-            let mut state = state.lock().unwrap();
-            if !accepts_remote_catalog_incremental(state.as_ref(), &snapshot) {
-                false
-            } else {
-                *state = Some(snapshot);
-                true
-            }
-        };
-        if changed {
-            cx.update_global::<Self, _>(|global, _| {
-                global.generation = global.generation.wrapping_add(1);
-            });
-        }
-    }
-}
 
 /// 各运行时推来的工作区目录，等 Workspace 认领。唯一的 daemon 订阅循环写入：首帧整份
 /// 替换，之后的推送只收版本更新的。Workspace 观察它，认领后交给各自的运行时空间对账。
@@ -1119,10 +1052,6 @@ struct Session {
     agent_definition_id: Option<String>,
     /// 由智能体触发器创建的 Run。有值时这不是用户手动开的对话。
     automation_id: Option<String>,
-    /// 由移动端创建、最初挂在 smeltd 远程目录上的会话。终端 PTY 仍以远程目录为准
-    /// （进程没了就该拆投影）。ACP 对话一旦出现在侧栏，就由工作区快照记住，
-    /// 不能再把远程目录当成唯一账本——daemon 冷启动会清掉没有 live runtime 的条目。
-    remote_owned: bool,
     /// ACP 会话内容变化（AcpViewEvent::Changed）→ save_state 的订阅；Term 会话
     /// 没有（终端内容不经这条通道持久化，走 daemon session id 就够）。
     _acp_persist_sub: Option<gpui::Subscription>,
@@ -1148,7 +1077,6 @@ impl Session {
             custom_title: None,
             agent_definition_id: None,
             automation_id: None,
-            remote_owned: false,
             _acp_persist_sub: None,
             ui_state: SessionUiState::default(),
         }
@@ -2193,8 +2121,6 @@ struct Workspace {
     project_ui: HashMap<String, ProjectUiState>,
     /// `project_ui` 里正在热场的那个项目根。
     active_project_ui_key: Option<String>,
-    /// 已见过的远程目录标题。目录标题变了才覆盖侧栏，避免把本地改名冲掉。
-    catalog_titles: HashMap<String, String>,
     /// 文件树里已展开的文件夹绝对路径。
     /// 目录列表缓存（绝对路径 → 已排序过滤的直接子项 (名, 是否目录)）。后台读盘填充，
     /// render 只读；此前 file_tree 在 render 里同步 fs::read_dir，大目录会像 git
@@ -2610,10 +2536,8 @@ struct Workspace {
     session_manager_tombstones: HashSet<String>,
     /// 上一帧工作区窗口是否在前台。上升沿用来清正在看的会话未读。
     workspace_window_active: bool,
-    /// 远程目录来自 app 级唯一 daemon 订阅；随 Workspace 释放，避免创建第二条 socket
-    /// 订阅或后台轮询线程。
-    _remote_sessions_sub: Option<Subscription>,
-    /// 各运行时的工作区目录同样来自那条订阅，见 [`WorkspaceDirectoriesGlobal`]。
+    /// 各运行时的工作区目录来自 app 级唯一 daemon 订阅，见 [`WorkspaceDirectoriesGlobal`]；
+    /// 随 Workspace 释放，避免创建第二条 socket 订阅或后台轮询线程。
     _workspace_directories_sub: Option<Subscription>,
     /// 远程运行时增删时同步侧栏的空间。
     _runtime_hub_sub: Option<Subscription>,
@@ -2644,12 +2568,6 @@ struct Workspace {
     _daemon_binary_watcher: Option<notify::RecommendedWatcher>,
     /// 守护落后，但有会话在跑没重启：等会话都停下来再查一次。
     daemon_restart_waiting_idle: bool,
-    /// 正在后台 reattach 中、尚未插入侧栏的移动端终端会话 id。不去重会对同一 id
-    /// 并发 open 两次，smeltd 第二次会顶掉前一个连接。
-    remote_terminal_reattach_pending: HashSet<String>,
-    /// 最近一次 subscribe 快照里仍 Active 的远程终端 id。延迟 reattach 完成时用它校验，
-    /// 目录已经撤回就丢弃结果，不要插回幽灵会话。
-    remote_projected_terminal_ids: HashSet<String>,
     /// 会话列表被用户增删/重排的版本号。后台恢复只在版本未变化时按旧存档索引插入。
     session_list_revision: u64,
     /// 活动会话被用户切换的版本号。后台恢复只在版本未变化时恢复存档中的活动项。
@@ -2745,13 +2663,6 @@ impl std::ops::DerefMut for Workspace {
     }
 }
 
-fn conversation_session_id(session: &Session, cx: &App) -> Option<String> {
-    match &session.kind {
-        SessionKind::Conversation(view) => Some(view.read(cx).session_id().to_string()),
-        SessionKind::Term { .. } => None,
-    }
-}
-
 impl Workspace {
     /// Files 既可能展开到舞台，也可能停靠在 Tool Panel；两种状态都视为文件视图可见。
     fn files_view_visible(&self) -> bool {
@@ -2843,7 +2754,6 @@ impl Workspace {
             active_session_ui: initial_session_ui,
             project_ui: HashMap::new(),
             active_project_ui_key: None,
-            catalog_titles: HashMap::new(),
             dir_cache: HashMap::new(),
             dir_inflight: HashSet::new(),
             dir_generation: HashMap::new(),
@@ -3033,7 +2943,6 @@ impl Workspace {
             saved_active_session_id,
             saved_conversation_ui: workspace_persist::load_conversation_ui(),
             saved_sidebar_orders: workspace_persist::load_sidebar_orders(),
-            _remote_sessions_sub: None,
             _workspace_directories_sub: None,
             _runtime_hub_sub: None,
             _agent_host_sub: None,
@@ -3049,8 +2958,6 @@ impl Workspace {
             _local_runtime_sub: None,
             _daemon_binary_watcher: None,
             daemon_restart_waiting_idle: false,
-            remote_terminal_reattach_pending: HashSet::new(),
-            remote_projected_terminal_ids: HashSet::new(),
             session_list_revision: 0,
             active_session_revision: 0,
             focus_handle: cx.focus_handle(),
@@ -3110,12 +3017,6 @@ impl Workspace {
             }
         });
         ws._window_activation_sub = Some(activation);
-        ws.reconcile_remote_catalog_projection(window, cx);
-        ws._remote_sessions_sub = Some(
-            cx.observe_global_in::<RemoteSessionCatalogGlobal>(window, |this, window, cx| {
-                this.reconcile_remote_catalog_projection(window, cx)
-            }),
-        );
         ws._agent_host_sub =
             Some(cx.observe_global_in::<settings::AgentHostState>(window, |_, _, cx| cx.notify()));
         ws._agent_hosts_sub =
@@ -3282,412 +3183,6 @@ impl Workspace {
             .collect::<Vec<_>>();
         for (key, directory) in fresh {
             self.apply_workspace_directory(&key, directory, window, cx);
-        }
-    }
-
-    fn reconcile_remote_catalog_projection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // 工作区目录还没到时不知道哪些会话会被恢复，这时投影远程目录会把同一场会话
-        // 再投一份。目录到了以后会补做一次。
-        if self
-            .space(&RuntimeKey::Local)
-            .is_none_or(|space| !space.directory.loaded())
-        {
-            return;
-        }
-        let Some(global) = cx.try_global::<RemoteSessionCatalogGlobal>() else {
-            return;
-        };
-        // 尚未收到 daemon 快照时，不能把启动空档误判成权威空目录，进而拆掉刚恢复的投影。
-        if global.generation == 0 {
-            return;
-        }
-        // `None` 表示 daemon 无法读取持久目录，不是空目录。保留现有投影，等一次可用
-        // 快照再对账，避免损坏文档或短暂 I/O 故障把 GUI 中的远程会话错误移除。
-        let Some(snapshot) = global
-            .snapshot
-            .lock()
-            .ok()
-            .and_then(|snapshot| snapshot.clone())
-        else {
-            return;
-        };
-        let acp_records = snapshot
-            .sessions
-            .iter()
-            .filter_map(smelt_model::session_control::RemoteSessionRecord::as_acp)
-            .collect::<Vec<_>>();
-        let term_records = snapshot
-            .sessions
-            .iter()
-            .filter(|record| record.is_visible())
-            .filter_map(smelt_model::session_control::RemoteSessionRecord::as_terminal)
-            .collect::<Vec<_>>();
-        self.reconcile_remote_sessions(acp_records, window, cx);
-        self.reconcile_remote_terminal_sessions(term_records, window, cx);
-    }
-
-    /// 远程目录里的对话标题变了，就写进已经投影出来的侧栏行。
-    ///
-    /// 第一次见到某场对话只记下目录标题，不覆盖本地名。之后目录标题变了才是
-    /// 控制面改名，这时才替换。
-    fn apply_remote_conversation_titles(
-        &mut self,
-        records: &[smelt_model::session_control::RemoteAcpSession],
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let mut changed = false;
-        for record in records {
-            let title = record.title.trim();
-            if title.is_empty() {
-                continue;
-            }
-            let title = title.to_string();
-            match self.catalog_titles.get(&record.id).map(String::as_str) {
-                Some(seen) if seen == title => continue,
-                Some(_) => {}
-                None => {
-                    let differs = self.sessions.iter().any(|session| {
-                        conversation_session_id(session, cx).as_deref() == Some(record.id.as_str())
-                            && session.custom_title.as_deref() != Some(title.as_str())
-                            && session.custom_title.is_some()
-                    });
-                    self.catalog_titles.insert(record.id.clone(), title.clone());
-                    if !differs {
-                        continue;
-                    }
-                }
-            }
-            let Some(ix) = self.sessions.iter().position(|session| {
-                conversation_session_id(session, cx).as_deref() == Some(record.id.as_str())
-            }) else {
-                self.catalog_titles.insert(record.id.clone(), title);
-                continue;
-            };
-            if self.sessions[ix].custom_title.as_deref() != Some(title.as_str()) {
-                self.sessions[ix].custom_title = Some(title.clone());
-                if let SessionKind::Conversation(view) = &self.sessions[ix].kind {
-                    let view = view.clone();
-                    view.update(cx, |view, _| view.rename_session(Some(title.clone())));
-                }
-                changed = true;
-            }
-            self.catalog_titles.insert(record.id.clone(), title);
-        }
-        changed
-    }
-
-    fn reconcile_remote_sessions(
-        &mut self,
-        records: Vec<smelt_model::session_control::RemoteAcpSession>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let records = recognized_remote_acp_sessions(records);
-        let stale = self
-            .sessions
-            .iter()
-            .enumerate()
-            .filter_map(|(ix, session)| {
-                if !session.remote_owned {
-                    return None;
-                }
-                let SessionKind::Conversation(view) = &session.kind else {
-                    return None;
-                };
-                let session_id = view.read(cx).session_id();
-                let auto_projected_background = session.automation_id.is_none()
-                    && smelt_model::session_control::is_background_acp_session_id(session_id);
-                unproject_acp_when_remote_catalog_drops(
-                    session.remote_owned,
-                    auto_projected_background,
-                )
-                .then_some(ix)
-            })
-            .collect::<Vec<_>>();
-        for ix in stale.into_iter().rev() {
-            self.unproject_remote_session(ix, cx);
-        }
-
-        let existing = self
-            .sessions
-            .iter()
-            .filter_map(|session| match &session.kind {
-                SessionKind::Conversation(view) => Some(view.read(cx).session_id().to_string()),
-                SessionKind::Term { .. } => None,
-            })
-            .collect::<HashSet<_>>();
-        // 正在恢复的存档会话已经拿了这些 id，只是还没插进 `sessions`。不计进来就会
-        // 把同一场对话再投影一份，两个视图抢同一个 smeltd 会话。
-        let pending = self.all_pending_restore_session_ids();
-        let mut changed = false;
-        let titled = records
-            .iter()
-            .map(|(record, _)| record.clone())
-            .collect::<Vec<_>>();
-        for (record, agent) in records {
-            if existing.contains(&record.id) || pending.contains(&record.id) {
-                continue;
-            }
-            if !record.is_visible()
-                || smelt_model::session_control::is_background_acp_session_id(&record.id)
-            {
-                continue;
-            }
-            if record.lifecycle != smelt_model::session_control::RemoteSessionLifecycle::Active {
-                continue;
-            }
-            self.project_remote_acp_session(record, agent, window, cx);
-            changed = true;
-        }
-        if self.apply_remote_conversation_titles(&titled, cx) {
-            changed = true;
-        }
-        if changed {
-            self.session_list_revision = self.session_list_revision.wrapping_add(1);
-            self.save_state(cx);
-            cx.notify();
-        }
-    }
-
-    fn project_remote_acp_session(
-        &mut self,
-        record: smelt_model::session_control::RemoteAcpSession,
-        agent: settings::ConversationAgentKind,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let profile_id = record
-            .agent_option_id
-            .strip_prefix("profile:")
-            .map(String::from);
-        let stored_title = record.resume_id.as_deref().and_then(|resume_id| {
-            HistoryTitles::get(
-                settings::HistorySourceKind::from(agent).id(),
-                profile_id.as_deref(),
-                resume_id,
-                cx,
-            )
-        });
-        // 手机上用产品智能体开的对话必须带着归属落地，否则接管后它会掉进项目
-        // 会话列表，而不是侧栏「对话」栏。
-        let agent_definition_id = record.agent_definition_id().map(str::to_string);
-        let resume_id = record
-            .resume_id
-            .map(agent_client_protocol::schema::v1::SessionId::new);
-        let cwd = Some(record.cwd.clone());
-        let runtime = crate::runtimes::Runtime::local();
-        if !smelt_model::session_control::is_agent_conversation(
-            None,
-            agent_definition_id.as_deref(),
-            cwd.as_deref(),
-        ) {
-            self.remember_session_project(&RuntimeKey::Local, cwd.as_deref(), cx);
-        }
-        let view = cx.new(|cx| {
-            acp_view::AcpView::placeholder(
-                cx,
-                acp_view::AcpViewOrigin {
-                    runtime,
-                    launch_prep: None,
-                    agent,
-                    launch: record.launch,
-                    refresh_launch_from_settings: false,
-                    profile_id,
-                    cwd,
-                    reason: "正在连接移动端创建的会话…".to_string(),
-                    entries: Vec::new(),
-                    resume_session_id: resume_id,
-                    saved_sid: Some(record.id),
-                },
-            )
-        });
-        let _acp_persist_sub = Some(self.subscribe_acp_persist(&view, window, cx));
-        self.sessions.push(Session {
-            ui_id: next_session_ui_id(),
-            conversation_id: new_conversation_id(),
-            kind: SessionKind::Conversation(view),
-            last_updated_at: unix_now_secs(),
-            custom_title: stored_title
-                .or_else(|| (!record.title.trim().is_empty()).then_some(record.title)),
-            agent_definition_id,
-            automation_id: None,
-            remote_owned: false,
-            _acp_persist_sub,
-            ui_state: SessionUiState::default(),
-        });
-    }
-
-    pub(crate) fn remote_acp_record(
-        &self,
-        session_id: &str,
-        cx: &App,
-    ) -> Option<smelt_model::session_control::RemoteAcpSession> {
-        let global = cx.try_global::<RemoteSessionCatalogGlobal>()?;
-        let snapshot = global
-            .snapshot
-            .lock()
-            .ok()
-            .and_then(|snapshot| snapshot.clone())?;
-        snapshot
-            .sessions
-            .iter()
-            .filter_map(smelt_model::session_control::RemoteSessionRecord::as_acp)
-            .find(|record| record.is_present() && record.id == session_id)
-    }
-
-    /// 跟 `reconcile_remote_sessions` 是同一套思路，对应移动端新建/删除的终端会话：
-    /// 手机让 smeltd 建 PTY 并更新 daemon 自己的远程目录；这里消费同一条 subscribe
-    /// 投影，把它 reattach 成 PC 侧栏里能看/能操作的一个真实 `Session`。
-    fn reconcile_remote_terminal_sessions(
-        &mut self,
-        records: Vec<smelt_model::session_control::RemoteTerminalSession>,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let ids = records
-            .iter()
-            .map(|record| record.id.clone())
-            .collect::<HashSet<_>>();
-        self.remote_projected_terminal_ids = ids.clone();
-        let stale = self
-            .sessions
-            .iter()
-            .enumerate()
-            .filter_map(|(ix, session)| {
-                if !session.remote_owned {
-                    return None;
-                }
-                let SessionKind::Term { active, .. } = &session.kind else {
-                    return None;
-                };
-                (!ids.contains(active.read(cx).session_id())).then_some(ix)
-            })
-            .collect::<Vec<_>>();
-        for ix in stale.into_iter().rev() {
-            self.unproject_remote_session(ix, cx);
-        }
-        // 目录撤回后清掉在途标记，避免同 id 再出现时被当成重复而跳过。
-        // 已经 detach 出去的 reattach 线程不会因此取消；完成回调必须再查投影集。
-        self.remote_terminal_reattach_pending
-            .retain(|id| ids.contains(id));
-
-        let existing = self
-            .sessions
-            .iter()
-            .filter_map(|session| match &session.kind {
-                SessionKind::Term { active, .. } => Some(active.read(cx).session_id().to_string()),
-                SessionKind::Conversation(_) => None,
-            })
-            .collect::<HashSet<_>>();
-        // 和 ACP 那边同理：存档里还在排队恢复的终端也已经报了这些 id。
-        let pending_restore = self.all_pending_restore_session_ids();
-        for record in records {
-            if existing.contains(&record.id) || pending_restore.contains(&record.id) {
-                continue;
-            }
-            if record.lifecycle != smelt_model::session_control::RemoteSessionLifecycle::Active {
-                continue;
-            }
-            // 目录更新可能在一次 reattach 还没完成前再次到达；不去重会对同一 id
-            // 并发 open 两次——smeltd 对同 id 第二次 open 会顶掉前一个连接，造成两条
-            // 侧栏项目（一条僵死一条存活）。
-            if !self
-                .remote_terminal_reattach_pending
-                .insert(record.id.clone())
-            {
-                continue;
-            }
-            let runtime = crate::runtimes::Runtime::local();
-            self.remember_session_project(
-                &RuntimeKey::Local,
-                Some(record.cwd.as_str()),
-                cx,
-            );
-            let (tx, rx) = smol::channel::bounded(1);
-            let runtime_bg = runtime.clone();
-            let cwd_bg = record.cwd.clone();
-            let sid_bg = record.id.clone();
-            std::thread::Builder::new()
-                .name("smelt-remote-term-reattach".into())
-                .spawn(move || {
-                    let r = terminal::Terminal::reattach(
-                        &runtime_bg,
-                        24,
-                        80,
-                        Some(&cwd_bg),
-                        &sid_bg,
-                    );
-                    let _ = tx.send_blocking(r);
-                })
-                .expect("spawn smelt-remote-term-reattach 线程");
-            let title = (!record.title.trim().is_empty()).then_some(record.title.clone());
-            let cwd = record.cwd.clone();
-            let sid = record.id.clone();
-            let window_handle = self.window_handle;
-            let runtime_ui = runtime;
-            cx.spawn(async move |this, cx| {
-                let result = match rx.recv().await {
-                    Ok(r) => r,
-                    Err(_) => {
-                        let _ = this.update(cx, |this, _cx| {
-                            this.remote_terminal_reattach_pending.remove(&sid);
-                        });
-                        return;
-                    }
-                };
-                let terminal = match result {
-                    Ok(t) => t,
-                    Err(e) => {
-                        eprintln!("[workspace] 移动端终端会话 reattach 失败（{sid}）：{e:#}");
-                        let _ = this.update(cx, |this, _cx| {
-                            this.remote_terminal_reattach_pending.remove(&sid);
-                        });
-                        return;
-                    }
-                };
-                let _ = cx.update_window(window_handle, |_, window, cx| {
-                    this.update(cx, |this, cx| {
-                        this.remote_terminal_reattach_pending.remove(&sid);
-                        let local_ids = this
-                            .sessions
-                            .iter()
-                            .filter_map(|session| match &session.kind {
-                                SessionKind::Term { active, .. } => {
-                                    Some(active.read(cx).session_id().to_string())
-                                }
-                                SessionKind::Conversation(_) => None,
-                            })
-                            .collect::<HashSet<_>>();
-                        if !smelt_model::session_control::accept_remote_terminal_projection(
-                            &sid,
-                            &this.remote_projected_terminal_ids,
-                            &local_ids,
-                        ) {
-                            return;
-                        }
-                        let view = cx.new(|cx| {
-                            TerminalView::from_terminal(
-                                cx,
-                                runtime_ui,
-                                terminal,
-                                Some(cwd),
-                                sid,
-                                None,
-                                None,
-                            )
-                        });
-                        let mut session = Session::single(view, window, cx);
-                        session.remote_owned = true;
-                        session.custom_title = title;
-                        this.sessions.push(session);
-                        this.session_list_revision = this.session_list_revision.wrapping_add(1);
-                        this.save_state(cx);
-                        this.schedule_visible_refresh(cx);
-                        cx.notify();
-                    })
-                });
-            })
-            .detach();
         }
     }
 
@@ -4675,7 +4170,6 @@ fn main() {
         // 是同一个搭桥模式。
         let daemon_states = DaemonStates::default();
         cx.set_global(daemon_states);
-        cx.set_global(RemoteSessionCatalogGlobal::default());
         cx.set_global(WorkspaceDirectoriesGlobal::default());
         cx.set_global(HistoryTitles::default());
         // provider 账户状态（额度 + Pi 模型目录版本）：刷新循环写，侧栏和对话
@@ -4850,29 +4344,16 @@ fn main() {
                 }
                 cx.update(|cx| {
                     match &event {
-                        // 刚连上一个运行时：把桌面的菜单和还没发出去的目录命令重新交给它（见下）。
+                        // 刚连上一个运行时：把还没发出去的目录命令重新交给它（见下）。
                         terminal::DaemonStateEvent::Snapshot { .. } if !is_local => {
                             if let Some(ws) = current_workspace(&current_ws_for_events) {
                                 let _ = ws.update(cx, |ws, cx| ws.save_state(cx));
                             }
                         }
-                        terminal::DaemonStateEvent::RemoteSessions(_)
-                        | terminal::DaemonStateEvent::Automations(_)
-                            if !is_local => {}
-                        terminal::DaemonStateEvent::Snapshot {
-                            remote_sessions,
-                            automations,
-                            ..
-                        } => {
-                            // A fresh event snapshot starts a new daemon epoch, so it is allowed
-                            // to reset a lower revision after a daemon restart.
-                            RemoteSessionCatalogGlobal::reset_from_subscription(
-                                remote_sessions.clone(),
-                                cx,
-                            );
-                            // subscribe 的首帧意味着刚连上一个 daemon epoch。把桌面端
-                            // 自己持有的最新菜单重新放进同一保存队列，覆盖 daemon 重启时
-                            // 从旧 dedicated 文件恢复的副本；source revision 会过滤迟到重发。
+                        terminal::DaemonStateEvent::Automations(_) if !is_local => {}
+                        terminal::DaemonStateEvent::Snapshot { automations, .. } => {
+                            // subscribe 的首帧意味着刚连上一个 daemon epoch：还没发出去的目录
+                            // 命令重新放进保存队列。
                             if let Some(ws) = current_workspace(&current_ws_for_events) {
                                 let _ = ws.update(cx, |ws, cx| ws.save_state(cx));
                             }
@@ -4884,9 +4365,6 @@ fn main() {
                                     cx,
                                 );
                             }
-                        }
-                        terminal::DaemonStateEvent::RemoteSessions(snapshot) => {
-                            RemoteSessionCatalogGlobal::apply_incremental(snapshot.clone(), cx);
                         }
                         terminal::DaemonStateEvent::Automations(automations) => {
                             apply_automation_projection(
@@ -4944,7 +4422,6 @@ fn main() {
                             DaemonStates::remove(&runtime, &id, cx);
                             AttentionGlobal::remove_session(&id, cx);
                         }
-                        terminal::DaemonStateEvent::RemoteSessions(_) => {}
                         terminal::DaemonStateEvent::Workspace(_) => {}
                         terminal::DaemonStateEvent::Automations(_) => {}
                         terminal::DaemonStateEvent::ConversationWakeRequested { .. } => {}

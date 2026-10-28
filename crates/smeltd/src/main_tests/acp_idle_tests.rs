@@ -609,31 +609,6 @@ fn waking_without_a_launch_spec_stays_suspended() {
 }
 
 #[test]
-fn a_mobile_remote_session_still_suspends_when_idle() {
-    let acp_sessions = new_test_acp_sessions();
-    let remote_sessions = new_test_remote_sessions();
-    let (session, _cmd_rx) = direct_session(quiet_state());
-    let (slot, _) = acp_sessions.reserve_with("acp-mobile", || session);
-    mutate_remote_catalog(&remote_sessions, |catalog| {
-        catalog.upsert_acp(smelt_core::session_control::RemoteAcpSession {
-            id: "acp-mobile".into(),
-            cwd: "/work".into(),
-            title: "手机上建的".into(),
-            agent_option_id: "pi".into(),
-            agent: "pi".into(),
-            launch: smelt_core::agent_kind::ConversationAgentKind::Pi.default_launch(),
-            resume_id: None,
-            created_at: 1,
-            lifecycle: Default::default(),
-            hidden: false,
-        })
-    })
-    .unwrap();
-    acp_idle::suspend_idle_acp_sessions(&acp_sessions, Duration::ZERO);
-    assert!(slot.value.idle.is_suspended());
-}
-
-#[test]
 fn a_poisoned_session_lock_does_not_panic_the_suspend_check() {
     let (session, _cmd_rx) = direct_session(quiet_state());
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

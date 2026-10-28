@@ -499,7 +499,7 @@
       <tr>
         <td>侧栏目录</td>
         <td>已有</td>
-        <td>运行时自己的工作区目录（<code>workspace.changed</code>，对话的 ACP 会话 id、标题、cwd、agent）。daemon 自己建的对话另在远程目录里</td>
+        <td>运行时自己的工作区目录（<code>workspace.changed</code>，对话的 ACP 会话 id、标题、cwd、agent）。daemon 自己建的对话起好后也写进这里</td>
       </tr>
       <tr>
         <td>拉起没在跑的对话</td>
@@ -664,9 +664,9 @@ flowchart TB
   </table>
   <ul>
     <li>注册表里有、但 runtime 已经退出又不是挂起的（agent 崩了，等用户点重启），不进目录。拉起它要用户决定。</li>
-    <li>标题按侧栏上的名字：先取菜单里的（含用户改过的），再取远程目录里的，再取对话自己的标题。</li>
+    <li>标题按侧栏上的名字：先取工作区目录里的（含用户改过的），再取对话自己的标题。</li>
     <li>菜单按运行时分开发，daemon 拿到的只是这台运行时上的对话，不会列出别的机器上的。</li>
-    <li>远程目录（daemon 自己建的对话，手机建的、<code>session_spawn</code> 建的）只记在跑的；冷启动时没有 runtime 的记录会被删掉。桌面把这些对话收进侧栏之后，它们就和别的侧栏对话一样出现在菜单里。</li>
+    <li>daemon 自己建的对话（手机建的、<code>session_spawn</code> 建的）起好后写进工作区目录，之后和桌面建的对话一样。</li>
   </ul>
 
   <h3>拉起：一个函数</h3>
@@ -861,7 +861,7 @@ fn ensure_conversation_runtime(id) -&gt; Result&lt;Slot, String&gt;</code></pre>
       </tr>
       <tr>
         <td><code>session_spawn</code> 建对话、写配置、改标题任一步失败</td>
-        <td>补偿：<code>kill_acp_session</code> 撤掉建了一半的对话（退出 runtime、删远程目录记录），任务那封信标成失败</td>
+        <td>补偿：<code>kill_acp_session</code> 撤掉建了一半的对话（退出 runtime），任务那封信标成失败</td>
         <td>退信：「新对话〈标题〉没建成：原因」</td>
       </tr>
       <tr>
@@ -1050,7 +1050,7 @@ fn ensure_conversation_runtime(id) -&gt; Result&lt;Slot, String&gt;</code></pre>
     <li><strong>id</strong>：新对话 id 是 <code>acp-</code> 加 SHA-256（来源、<code>toolCallId</code>、<code>"spawn"</code>）的前 32 位十六进制，任务消息 id 照 §6.2 算。同一次调用重放，拿到同一个对话，不会建第二个。</li>
     <li><strong>后台步骤</strong>，每一步等 agent 确认再走下一步：
       <ol>
-        <li>照发起方的启动规格（智能体、环境、工作目录）<code>create_daemon_acp_session</code>，记进远程目录，桌面把它收进侧栏；</li>
+        <li>照发起方的启动规格（智能体、环境、工作目录）<code>ensure_acp_session</code>，起好写进工作区目录，桌面随推送接上；</li>
         <li><code>copy_session_config</code>：模型、推理强度、权限模式和发起方一样；</li>
         <li><code>SetSessionTitle</code>；</li>
         <li>把任务作为一封信交给发件队列，之后和 <code>session_send</code> 一样。</li>

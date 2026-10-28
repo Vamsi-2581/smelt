@@ -250,7 +250,6 @@ session.state_changed
 session.removed
 attention.created
 attention.cleared
-remote_sessions.changed
 workspace.changed
 automations.changed
 plugin.started

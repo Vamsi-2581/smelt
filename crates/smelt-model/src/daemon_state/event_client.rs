@@ -8,10 +8,10 @@ use std::fmt;
 
 use smelt_event_protocol::{
     CORE_PROJECTION_VERSION, CORE_SESSION_PROJECTION_VERSION, CORE_SESSION_STATE_SCHEMA_VERSION,
-    CORE_SNAPSHOT_AUTOMATIONS, CORE_SNAPSHOT_REMOTE_SESSIONS, CORE_SNAPSHOT_SESSIONS,
+    CORE_SNAPSHOT_AUTOMATIONS, CORE_SNAPSHOT_SESSIONS,
     CORE_SNAPSHOT_WORKSPACE, CORE_TOPIC_APPEARANCE_CHANGE_REQUESTED,
     CORE_TOPIC_AUTOMATIONS_CHANGED, CORE_TOPIC_CONVERSATION_WAKE_REQUESTED,
-    CORE_TOPIC_PROJECT_CHANGED, CORE_TOPIC_REMOTE_SESSIONS_CHANGED, CORE_TOPIC_SESSION_REMOVED,
+    CORE_TOPIC_PROJECT_CHANGED, CORE_TOPIC_SESSION_REMOVED,
     CORE_TOPIC_SESSION_STATE_CHANGED, CORE_TOPIC_TERMINAL_NOTIFICATION,
     CORE_TOPIC_TERMINAL_PROGRESS, CORE_TOPIC_WORKSPACE_CHANGED,
     ConversationWakeRequested, CoreProjectionEvent, CoreSessionPhase, EVENT_BUS_PROTOCOL_VERSION,
@@ -23,7 +23,6 @@ use smelt_runtime_client::protocol::daemon::DaemonOperation;
 
 use super::{DaemonPhase, DaemonSessionState, DaemonStateEvent};
 use crate::automation::AutomationFile;
-use crate::session_control::RemoteSessionSnapshot;
 use crate::workspace_directory::WorkspaceDirectory;
 
 #[derive(Clone, Copy)]
@@ -130,7 +129,6 @@ struct ReplacementRevisions {
     revision: Option<u64>,
 }
 
-type RemoteSessionRevisions = ReplacementRevisions;
 type WorkspaceRevisions = ReplacementRevisions;
 type AutomationFileRevisions = ReplacementRevisions;
 
@@ -158,7 +156,6 @@ impl ReplacementRevisions {
 /// 拉起来，所以兑现不了的请求类 topic 不能订。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SubscriptionShape {
-    pub remote_sessions: bool,
     /// 运行时的工作区目录（开着的项目和对话）。
     pub workspace: bool,
     pub automations: bool,
@@ -179,7 +176,6 @@ pub struct SubscriptionShape {
 impl SubscriptionShape {
     /// 桌面端：全收，并承担唤醒对话、改外观这些只有它能兑现的请求。
     pub const DESKTOP: Self = Self {
-        remote_sessions: true,
         workspace: true,
         automations: true,
         conversation_wake: true,
@@ -194,7 +190,6 @@ impl SubscriptionShape {
     /// 请求——手机兑现不了，订了会让运行时以为有人能拉起冷对话；项目文件变化和终端
     /// OSC 也用不上。
     pub const CATALOG: Self = Self {
-        remote_sessions: true,
         workspace: true,
         automations: true,
         conversation_wake: false,
@@ -210,7 +205,6 @@ impl SubscriptionShape {
         [
             (true, CORE_TOPIC_SESSION_STATE_CHANGED),
             (true, CORE_TOPIC_SESSION_REMOVED),
-            (self.remote_sessions, CORE_TOPIC_REMOTE_SESSIONS_CHANGED),
             (self.workspace, CORE_TOPIC_WORKSPACE_CHANGED),
             (self.automations, CORE_TOPIC_AUTOMATIONS_CHANGED),
             (
@@ -242,8 +236,6 @@ impl SubscriptionShape {
 struct PendingSnapshots {
     active: bool,
     sessions: Option<Vec<DaemonSessionState>>,
-    remote_sessions_seen: bool,
-    remote_sessions: Option<RemoteSessionSnapshot>,
     workspace_seen: bool,
     workspace: Option<WorkspaceDirectory>,
     automations_seen: bool,
@@ -260,7 +252,6 @@ impl PendingSnapshots {
 
     fn complete(&self, shape: SubscriptionShape) -> bool {
         self.sessions.is_some()
-            && (!shape.remote_sessions || self.remote_sessions_seen)
             && (!shape.workspace || self.workspace_seen)
             && (!shape.automations || self.automations_seen)
     }
@@ -296,7 +287,6 @@ pub struct DaemonStateEventClient {
     shape: SubscriptionShape,
     pending: PendingSnapshots,
     revisions: DaemonStateRevisions,
-    remote_revisions: RemoteSessionRevisions,
     workspace_revisions: WorkspaceRevisions,
     automation_revisions: AutomationFileRevisions,
 }
@@ -334,7 +324,6 @@ impl DaemonStateEventClient {
             shape,
             pending,
             revisions: DaemonStateRevisions::default(),
-            remote_revisions: RemoteSessionRevisions::default(),
             workspace_revisions: WorkspaceRevisions::default(),
             automation_revisions: AutomationFileRevisions::default(),
         }
@@ -448,10 +437,6 @@ impl DaemonStateEventClient {
                         .collect(),
                 );
             }
-            CORE_SNAPSHOT_REMOTE_SESSIONS if self.shape.remote_sessions => {
-                self.pending.remote_sessions = decode_projection_snapshot(payload, kind, revision)?;
-                self.pending.remote_sessions_seen = true;
-            }
             CORE_SNAPSHOT_WORKSPACE if self.shape.workspace => {
                 self.pending.workspace = decode_projection_snapshot(payload, kind, revision)?;
                 self.pending.workspace_seen = true;
@@ -478,15 +463,12 @@ impl DaemonStateEventClient {
             .sessions
             .expect("complete snapshot batch contains sessions");
         self.revisions.reset_from_snapshot(&sessions);
-        self.remote_revisions
-            .reset_from_snapshot(pending.remote_sessions.as_ref().map(|value| value.revision));
         self.workspace_revisions
             .reset_from_snapshot(pending.workspace.as_ref().map(|value| value.revision));
         self.automation_revisions
             .reset_from_snapshot(pending.automations.as_ref().map(|value| value.revision));
         Ok(Some(DaemonStateEvent::Snapshot {
             sessions,
-            remote_sessions: pending.remote_sessions,
             workspace: pending.workspace,
             automations: pending.automations,
         }))
@@ -513,13 +495,6 @@ impl DaemonStateEventClient {
                     .then_some(DaemonStateEvent::Removed {
                         id: removed.session_id,
                     }))
-            }
-            CORE_TOPIC_REMOTE_SESSIONS_CHANGED if self.shape.remote_sessions => {
-                let snapshot: RemoteSessionSnapshot = decode_projection_event(payload, topic)?;
-                Ok(self
-                    .remote_revisions
-                    .accept_update(snapshot.revision)
-                    .then_some(DaemonStateEvent::RemoteSessions(snapshot)))
             }
             CORE_TOPIC_WORKSPACE_CHANGED if self.shape.workspace => {
                 let directory: WorkspaceDirectory = decode_projection_event(payload, topic)?;
@@ -609,17 +584,6 @@ impl DaemonStateEventClient {
                     .accept_update(snapshot.revision)
                     .then_some(DaemonStateEvent::Automations(snapshot)))
             }
-            CORE_SNAPSHOT_REMOTE_SESSIONS if self.shape.remote_sessions => {
-                let Some(snapshot): Option<RemoteSessionSnapshot> =
-                    decode_projection_snapshot(payload, kind, revision)?
-                else {
-                    return Ok(None);
-                };
-                Ok(self
-                    .remote_revisions
-                    .accept_update(snapshot.revision)
-                    .then_some(DaemonStateEvent::RemoteSessions(snapshot)))
-            }
             CORE_SNAPSHOT_WORKSPACE if self.shape.workspace => {
                 let Some(directory): Option<WorkspaceDirectory> =
                     decode_projection_snapshot(payload, kind, revision)?
@@ -640,7 +604,6 @@ fn replacement_projection_topic(topic: &str) -> bool {
     matches!(
         topic,
         CORE_TOPIC_AUTOMATIONS_CHANGED
-            | CORE_TOPIC_REMOTE_SESSIONS_CHANGED
             | CORE_TOPIC_WORKSPACE_CHANGED
     )
 }
@@ -840,7 +803,6 @@ mod tests {
                 .is_none()
         );
         for kind in [
-            CORE_SNAPSHOT_REMOTE_SESSIONS,
             CORE_SNAPSHOT_WORKSPACE,
             CORE_SNAPSHOT_AUTOMATIONS,
         ] {
@@ -920,7 +882,7 @@ mod tests {
         let topics = line["request"]["subscription"]["topics"]
             .as_array()
             .unwrap();
-        assert_eq!(topics.len(), 11);
+        assert_eq!(topics.len(), 10);
         assert!(
             topics
                 .iter()
@@ -985,7 +947,6 @@ mod tests {
             [
                 CORE_TOPIC_SESSION_STATE_CHANGED,
                 CORE_TOPIC_SESSION_REMOVED,
-                CORE_TOPIC_REMOTE_SESSIONS_CHANGED,
                 CORE_TOPIC_WORKSPACE_CHANGED,
                 CORE_TOPIC_AUTOMATIONS_CHANGED,
             ]
@@ -1031,8 +992,8 @@ mod tests {
     }
 
     #[test]
-    fn remote_revision_tracker_rejects_duplicate_and_older_replacements() {
-        let mut tracker = RemoteSessionRevisions::default();
+    fn replacement_revision_tracker_rejects_duplicate_and_older_replacements() {
+        let mut tracker = WorkspaceRevisions::default();
         tracker.reset_from_snapshot(Some(10));
 
         assert!(!tracker.accept_update(10));
@@ -1043,7 +1004,7 @@ mod tests {
         assert!(tracker.accept_update(1));
         assert!(!tracker.accept_update(0));
 
-        let mut legacy = RemoteSessionRevisions::default();
+        let mut legacy = WorkspaceRevisions::default();
         assert!(legacy.accept_update(0));
         assert!(legacy.accept_update(0));
     }
@@ -1300,17 +1261,16 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        for kind in [
-            CORE_SNAPSHOT_REMOTE_SESSIONS,
-            CORE_SNAPSHOT_WORKSPACE,
-        ] {
-            assert!(
-                client
-                    .decode_message(projection_snapshot(kind, 0, serde_json::Value::Null))
-                    .unwrap()
-                    .is_none()
-            );
-        }
+        assert!(
+            client
+                .decode_message(projection_snapshot(
+                    CORE_SNAPSHOT_WORKSPACE,
+                    0,
+                    serde_json::Value::Null
+                ))
+                .unwrap()
+                .is_none()
+        );
         let event = client
             .decode_message(projection_snapshot(
                 CORE_SNAPSHOT_AUTOMATIONS,
@@ -1397,18 +1357,17 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        for kind in [
-            CORE_SNAPSHOT_REMOTE_SESSIONS,
-            CORE_SNAPSHOT_AUTOMATIONS,
-        ] {
-            assert!(
-                client
-                    .decode_message(projection_snapshot(kind, 0, serde_json::Value::Null))
-                    .unwrap()
-                    .is_none(),
-                "桌面端的快照批要等到工作区目录才算齐"
-            );
-        }
+        assert!(
+            client
+                .decode_message(projection_snapshot(
+                    CORE_SNAPSHOT_AUTOMATIONS,
+                    0,
+                    serde_json::Value::Null
+                ))
+                .unwrap()
+                .is_none(),
+            "桌面端的快照批要等到工作区目录才算齐"
+        );
         match client
             .decode_message(projection_snapshot(
                 CORE_SNAPSHOT_WORKSPACE,

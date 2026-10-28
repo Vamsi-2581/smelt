@@ -19,7 +19,6 @@ mod history_rename_tests;
 #[cfg(unix)]
 mod input_integration_tests;
 mod input_payload_tests;
-mod remote_catalog_recovery_tests;
 #[cfg(unix)]
 mod remote_reattach_tests;
 #[cfg(unix)]
@@ -141,7 +140,6 @@ fn make_pipe_session(rows: u16, cols: u16, phase: Phase) -> (Arc<Session>, std::
 fn core_read_capabilities() -> std::collections::BTreeSet<smelt_event_protocol::Capability> {
     [
         smelt_event_protocol::CORE_CAPABILITY_SESSION_READ,
-        smelt_event_protocol::CORE_CAPABILITY_REMOTE_SESSIONS_READ,
         smelt_event_protocol::CORE_CAPABILITY_WORKSPACE_READ,
         smelt_event_protocol::CORE_CAPABILITY_AUTOMATION_READ,
     ]

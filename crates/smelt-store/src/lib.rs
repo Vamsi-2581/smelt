@@ -43,8 +43,8 @@ pub use snapshots::{
     HistoryTitleSnapshot, LaunchEntryRecord, LaunchSnapshot, MemoryMetaSnapshot,
     MemorySettingsRecord, MemoryTrust, MemoryUsageRecord, PairedDevice, PublishedSessionRecord,
     PublishedSessionSnapshot, QuotaCacheQuota, QuotaCacheSnapshot,
-    QuotaCacheStatusRecord, QuotaCacheWindowRecord, RemoteAcpSessionRecord, RemoteConfigSnapshot,
-    RemoteSessionCatalogSnapshot, RemoteTerminalSessionRecord, TerminalThemeSnapshot,
+    QuotaCacheStatusRecord, QuotaCacheWindowRecord, RemoteConfigSnapshot,
+    TerminalThemeSnapshot,
     WorkspaceAcpRecord, WorkspaceDirectoryCommit, WorkspaceSessionRecord, WorkspaceSnapshot,
     WorkspaceTerminalRecord,
 };
@@ -58,7 +58,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 27;
+pub const STORE_SCHEMA_VERSION: u32 = 28;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -556,19 +556,6 @@ impl Store {
 
     pub fn touch_paired_device(&self, endpoint_id: &str, now_ms: i64) -> Result<(), StoreError> {
         imp::touch_paired_device(&self.backend, endpoint_id, now_ms)
-    }
-
-    pub fn get_remote_session_snapshot(
-        &self,
-    ) -> Result<Option<RemoteSessionCatalogSnapshot>, StoreError> {
-        imp::get_remote_session_snapshot(&self.backend)
-    }
-
-    pub fn put_remote_session_snapshot(
-        &self,
-        snapshot: &RemoteSessionCatalogSnapshot,
-    ) -> Result<(), StoreError> {
-        imp::put_remote_session_snapshot(&self.backend, snapshot)
     }
 
     pub fn get_published_session_snapshot(
@@ -1417,25 +1404,6 @@ mod imp {
         })
     }
 
-    pub(super) fn get_remote_session_snapshot(
-        backend: &Backend,
-    ) -> Result<Option<super::RemoteSessionCatalogSnapshot>, StoreError> {
-        let connection = lock_connection(backend)?;
-        crate::catalog::read_remote_session_snapshot(&connection)
-    }
-
-    pub(super) fn put_remote_session_snapshot(
-        backend: &Backend,
-        snapshot: &super::RemoteSessionCatalogSnapshot,
-    ) -> Result<(), StoreError> {
-        let mut connection = lock_connection(backend)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        crate::catalog::write_remote_session_snapshot(&transaction, snapshot)?;
-        transaction.commit()?;
-        secure_sidecar_permissions(&backend.path);
-        Ok(())
-    }
-
     pub(super) fn get_published_session_snapshot(
         backend: &Backend,
     ) -> Result<Option<super::PublishedSessionSnapshot>, StoreError> {
@@ -1827,6 +1795,16 @@ mod imp {
                 }
             }
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            transaction.commit()?;
+            return Ok(());
+        }
+        if current == 27 {
+            apply_v28_drop_remote_session_catalog(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            // 没有冻结的 v27 形状：删完远程目录两张表后与当前形状逐字一致，就说明原来正是 v27。
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
             transaction.commit()?;
             return Ok(());
         }
@@ -2314,6 +2292,16 @@ mod imp {
             .any(|column| column == "project_root")
         {
             transaction.execute_batch(crate::schema::MIGRATE_V26_TO_V27)?;
+        }
+        apply_v28_drop_remote_session_catalog(transaction)
+    }
+
+    /// v28 删掉远程会话目录两张表：远程新建的对话进工作区目录。已经没有这两张表的库跳过。
+    fn apply_v28_drop_remote_session_catalog(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        if !table_columns(transaction, "remote_acp_session")?.is_empty() {
+            transaction.execute_batch(crate::schema::MIGRATE_V27_TO_V28)?;
         }
         Ok(())
     }
@@ -3583,17 +3571,6 @@ mod imp {
         _backend: &Backend,
         _endpoint_id: &str,
         _now_ms: i64,
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
-    pub(super) fn get_remote_session_snapshot(
-        _backend: &Backend,
-    ) -> Result<Option<super::RemoteSessionCatalogSnapshot>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn put_remote_session_snapshot(
-        _backend: &Backend,
-        _snapshot: &super::RemoteSessionCatalogSnapshot,
     ) -> Result<(), StoreError> {
         unsupported()
     }
@@ -4885,6 +4862,7 @@ CREATE TABLE published_session (
         connection
             .execute_batch(crate::schema::CREATE_SCHEMA)
             .unwrap();
+        connection.execute_batch(V27_REMOTE_SESSION_TABLES).unwrap();
         connection.execute_batch(V26_PROJECT_ROOT_AND_MENU).unwrap();
         connection.execute_batch(V25_WORKSPACE_CATALOG_WRITER).unwrap();
         connection.execute_batch(V24_PUBLISHED_SESSION).unwrap();
@@ -6241,34 +6219,6 @@ CREATE TABLE published_session (
         assert_eq!(after_delete.agents.len(), 1);
         assert_eq!(after_delete.agents[0].id, "agent-1");
 
-        let remote = RemoteSessionCatalogSnapshot {
-            acp: vec![RemoteAcpSessionRecord {
-                id: "acp-1".into(),
-                cwd: "/work".into(),
-                title: "远程 Claude".into(),
-                agent_option_id: "claude".into(),
-                agent: "claude".into(),
-                launch_command: "claude --acp".into(),
-                launch_env_json: b"{}".to_vec(),
-                resume_id: Some("resume-1".into()),
-                created_at: 42,
-                lifecycle: "active".into(),
-                hidden: false,
-            }],
-            terminal: vec![RemoteTerminalSessionRecord {
-                id: "term-1".into(),
-                cwd: "/work".into(),
-                title: "远程终端".into(),
-                created_at: 43,
-                lifecycle: "creating".into(),
-            }],
-        };
-        store.put_remote_session_snapshot(&remote).unwrap();
-        assert_eq!(
-            store.get_remote_session_snapshot().unwrap().as_ref(),
-            Some(&remote)
-        );
-
         let published = PublishedSessionSnapshot {
             version: 1,
             sessions: vec![PublishedSessionRecord {
@@ -6304,8 +6254,6 @@ CREATE TABLE published_session (
             ("agent_acp_config_memory", 1),
             ("agent_definition", 1),
             ("agent_profile", 1),
-            ("remote_acp_session", 1),
-            ("remote_terminal_session", 1),
             ("published_session", 1),
         ] {
             let count: i64 = connection
@@ -6655,6 +6603,30 @@ ALTER TABLE workspace_catalog ADD COLUMN writer TEXT;
 ALTER TABLE workspace_catalog ADD COLUMN writer_seq INTEGER;
 ";
 
+    /// v27 及更早还在、v28 删掉的远程会话目录两张表。用当前结构的库退回旧版本做夹具时补上。
+    const V27_REMOTE_SESSION_TABLES: &str = "
+CREATE TABLE remote_acp_session (
+  id TEXT PRIMARY KEY,
+  cwd TEXT NOT NULL,
+  title TEXT NOT NULL,
+  agent_option_id TEXT NOT NULL,
+  agent TEXT NOT NULL,
+  launch_command TEXT NOT NULL,
+  launch_env_json BLOB NOT NULL,
+  resume_id TEXT,
+  created_at INTEGER NOT NULL,
+  lifecycle TEXT NOT NULL,
+  hidden INTEGER NOT NULL CHECK (hidden IN (0, 1))
+);
+CREATE TABLE remote_terminal_session (
+  id TEXT PRIMARY KEY,
+  cwd TEXT NOT NULL,
+  title TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  lifecycle TEXT NOT NULL
+);
+";
+
     /// v26 及更早还在、v27 删掉的：会话组上存的所属项目，和桌面发布的侧栏菜单三张表。
     /// 用当前结构的库退回旧版本做夹具时补上（`project_root` 只能补在最后一列）。
     const V26_PROJECT_ROOT_AND_MENU: &str = "
@@ -6775,7 +6747,8 @@ CREATE TABLE worktree_inherit_skip_pattern (
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(&format!(
-                "{V26_PROJECT_ROOT_AND_MENU}
+                "{V27_REMOTE_SESSION_TABLES}
+                 {V26_PROJECT_ROOT_AND_MENU}
                  INSERT INTO project(root, position) VALUES ('/repo', 0);
                  INSERT INTO session_group(id, position, custom_title, last_updated_at, project_root)
                  VALUES ('g-term', 0, '终端', 7, '/repo'), ('g-acp', 1, NULL, 8, NULL);
@@ -7090,7 +7063,8 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
             let connection = rusqlite::Connection::open(&path).unwrap();
             connection
                 .execute_batch(&format!(
-                    "{V26_PROJECT_ROOT_AND_MENU}
+                    "{V27_REMOTE_SESSION_TABLES}
+                     {V26_PROJECT_ROOT_AND_MENU}
                      {V21_SESSION_TABLES}
                      {layout_node_table}
                      {V25_WORKSPACE_CATALOG_WRITER}

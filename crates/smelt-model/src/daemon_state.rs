@@ -8,7 +8,6 @@ use std::time::Duration;
 pub use smelt_event_protocol::{TerminalProgress, TerminalProgressState};
 
 use crate::automation::AutomationFile;
-use crate::session_control::RemoteSessionSnapshot;
 use crate::workspace_directory::WorkspaceDirectory;
 
 mod event_client;
@@ -257,9 +256,6 @@ pub enum DaemonStateEvent {
     /// 首帧：全量快照。
     Snapshot {
         sessions: Vec<DaemonSessionState>,
-        /// daemon 持有的远程目录复用同一条订阅连接下发，但与 agent runtime phase
-        /// 分开，避免消费者把“所有权”误当成“运行状态”。
-        remote_sessions: Option<RemoteSessionSnapshot>,
         /// 运行时的工作区目录。没订、或运行时还没有这份投影时为 `None`。
         workspace: Option<WorkspaceDirectory>,
         /// daemon 唯一 owner 的自动化定义、状态与 Run 投影。
@@ -270,10 +266,8 @@ pub enum DaemonStateEvent {
     /// 增量删除。不能做成完整 `sessions` 帧——客户端会把带 `sessions` 的行当成
     /// 新 epoch 并整表替换，订阅首帧之后的旧删除快照会把后来新建的会话抹掉。
     Removed { id: String },
-    /// 远程目录的完整替换。`revision` 仅在当前 daemon epoch 内有效；新的 subscribe
+    /// 工作区目录的完整替换。`revision` 仅在当前 daemon epoch 内有效；新的 subscribe
     /// 快照会重置消费者水位。
-    RemoteSessions(RemoteSessionSnapshot),
-    /// 工作区目录的完整替换。水位规则与远程目录相同。
     Workspace(WorkspaceDirectory),
     /// 自动化投影的完整替换。store_id 进一步保护跨 daemon epoch 的迟到响应。
     Automations(AutomationFile),

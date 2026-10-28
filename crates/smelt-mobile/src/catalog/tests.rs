@@ -7,8 +7,8 @@ use std::io::{BufRead, BufReader, Read};
 use serde_json::{Value, json};
 use smelt_event_protocol::{
     CORE_PROJECTION_VERSION, CORE_SESSION_PROJECTION_VERSION, CORE_SNAPSHOT_AUTOMATIONS,
-    CORE_SNAPSHOT_REMOTE_SESSIONS, CORE_SNAPSHOT_SESSIONS, CORE_SNAPSHOT_WORKSPACE,
-    CORE_TOPIC_AUTOMATIONS_CHANGED, CORE_TOPIC_REMOTE_SESSIONS_CHANGED, CORE_TOPIC_SESSION_REMOVED,
+    CORE_SNAPSHOT_SESSIONS, CORE_SNAPSHOT_WORKSPACE, CORE_TOPIC_AUTOMATIONS_CHANGED,
+    CORE_TOPIC_SESSION_REMOVED,
     CORE_TOPIC_SESSION_STATE_CHANGED, CORE_TOPIC_WORKSPACE_CHANGED, CoreProjectionEvent,
     CoreSessionPhase, CorrelationId, EventEnvelope, EventId, EventSource, SessionStateChanged,
     SessionStatesSnapshot, SnapshotKind, SubscribeMessage, Topic,
@@ -16,7 +16,6 @@ use smelt_event_protocol::{
 use smelt_model::agent_definition::AgentDefinition;
 use smelt_model::automation::{Automation, AutomationFile, AutomationRun};
 use smelt_model::daemon_state::{DaemonPhase, DaemonSessionState};
-use smelt_model::session_control::RemoteSessionSnapshot;
 use smelt_model::workspace_directory::{
     WorkspaceAcp, WorkspaceConversation, WorkspaceDirectory, WorkspaceTerminal,
 };
@@ -95,10 +94,6 @@ fn one_project_directory(mut conversations: Vec<Value>) -> Value {
     })
 }
 
-fn remote(value: Value) -> RemoteSessionSnapshot {
-    serde_json::from_value(value).unwrap()
-}
-
 fn automation_file(value: Value) -> AutomationFile {
     serde_json::from_value(value).unwrap()
 }
@@ -124,12 +119,10 @@ fn run_json(id: &str, automation_id: &str, session_id: Option<&str>, created_at:
 fn snapshot(
     sessions: Vec<DaemonSessionState>,
     workspace: Option<WorkspaceDirectory>,
-    remote: Option<RemoteSessionSnapshot>,
     automations: Option<AutomationFile>,
 ) -> DaemonStateEvent {
     DaemonStateEvent::Snapshot {
         sessions,
-        remote_sessions: remote,
         workspace,
         automations,
     }
@@ -147,61 +140,50 @@ fn find<'a>(sessions: &'a [SessionSummary], id: &str) -> &'a SessionSummary {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn projection_merges_directory_remote_sessions_and_automation_runs() {
+fn projection_lists_the_directory_and_live_automation_runs() {
     let mut state = CatalogState::default();
-    let directory = parse_directory(one_project_directory(vec![
+    let mut directory = parse_directory(one_project_directory(vec![
         conversation("dir-acp", "acp", Some(("/repo", 0)), 1),
         conversation("dir-term", "terminal", Some(("/repo", 0)), 0),
+        conversation("outside", "acp", Some(("/work/other", 1)), 2),
     ]));
-    let remote = remote(json!({
-        "revision": 2,
-        "sessions": [
-            {"kind": "acp", "id": "remote-acp", "cwd": "/work/other", "agent": "codex", "created_at": 1},
-            {"kind": "terminal", "id": "remote-term", "cwd": "/repo", "created_at": 1},
-            {"kind": "acp", "id": "remote-hidden", "cwd": "/repo", "created_at": 1, "hidden": true},
-            {"kind": "acp", "id": "remote-creating", "cwd": "/repo", "created_at": 1, "lifecycle": "creating"},
-            {"kind": "acp", "id": "run-session", "cwd": "/auto", "created_at": 1, "hidden": true},
-        ],
-    }));
+    directory.conversations[2].acp.as_mut().unwrap().agent = "codex".into();
+    directory.conversations[2].acp.as_mut().unwrap().session_title = None;
     let automations = automation_file(json!({
         "schema_version": 2,
         "revision": 1,
-        "runs": [run_json("run-1", "a1", Some("run-session"), 100)],
+        "runs": [
+            run_json("run-1", "a1", Some("run-session"), 100),
+            run_json("run-2", "a1", Some("run-gone"), 90),
+        ],
     }));
     state.apply(
-        snapshot(Vec::new(), Some(directory), Some(remote), Some(automations)),
+        snapshot(
+            vec![daemon("run-session", DaemonPhase::AwaitingApproval)],
+            Some(directory),
+            Some(automations),
+        ),
         Instant::now(),
     );
 
     let sessions = state.summaries();
-    let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
     assert_eq!(
-        ids,
-        [
-            "dir-term",
-            "dir-acp",
-            "remote-term",
-            "remote-acp",
-            "run-session"
-        ],
-        "按项目、目录次序排；不在项目里的按 cwd 自成一组排在后面；自动化运行没有项目，沉到最后"
+        ids_of(&sessions),
+        ["dir-term", "dir-acp", "outside", "run-session"],
+        "按项目、目录次序排；不在项目里的按 cwd 自成一组排在后面；自动化运行没有项目，沉到最后；\
+         守护里已经没有的运行不列"
     );
 
-    let remote_acp = find(&sessions, "remote-acp");
-    assert_eq!(remote_acp.title, "codex conversation");
-    assert_eq!(remote_acp.agent, "codex");
-    assert_eq!(remote_acp.project_root.as_deref(), Some("/work/other"));
-    assert_eq!(remote_acp.project_title.as_deref(), Some("other"));
-    assert_eq!(remote_acp.project_order, 1);
-    assert_eq!(find(&sessions, "remote-term").title, "Terminal");
-    assert_eq!(find(&sessions, "remote-term").kind, SessionKind::Terminal);
-    assert_eq!(
-        find(&sessions, "remote-term").project_root.as_deref(),
-        Some("/repo")
-    );
+    let outside = find(&sessions, "outside");
+    assert_eq!(outside.title, "codex conversation");
+    assert_eq!(outside.agent, "codex");
+    assert_eq!(outside.project_root.as_deref(), Some("/work/other"));
+    assert_eq!(outside.project_title.as_deref(), Some("other"));
+    assert_eq!(outside.project_order, 1);
 
     let run = find(&sessions, "run-session");
-    assert_eq!(run.title, "每日晨报", "远程标题为空时用自动化名");
+    assert_eq!(run.title, "每日晨报", "运行的会话叫自动化的名字");
+    assert_eq!(run.cwd.as_deref(), Some("/auto"));
     assert_eq!(run.project_root, None);
     assert_eq!(run.project_order, u32::MAX);
     assert_eq!(run.agent, "pi");
@@ -224,17 +206,19 @@ fn projection_merges_directory_remote_sessions_and_automation_runs() {
     );
 }
 
+/// 运行时一个项目都没开：会话按 cwd 自成一组，但没有能新建会话的项目。
 #[test]
-fn a_runtime_without_a_workspace_directory_still_lists_remote_sessions() {
+fn conversations_outside_every_project_still_list() {
     let mut state = CatalogState::default();
-    let remote = remote(json!({
-        "revision": 1,
-        "sessions": [{"kind": "terminal", "id": "t1", "cwd": "/srv/app", "title": "构建", "created_at": 1}],
-    }));
-    state.apply(
-        snapshot(Vec::new(), None, Some(remote), None),
-        Instant::now(),
-    );
+    let mut directory = parse_directory(one_project_directory(vec![conversation(
+        "t1",
+        "terminal",
+        Some(("/srv/app", 0)),
+        0,
+    )]));
+    directory.projects.clear();
+    directory.conversations[0].custom_title = Some("构建".into());
+    state.apply(snapshot(Vec::new(), Some(directory), None), Instant::now());
     let sessions = state.summaries();
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].title, "构建");
@@ -264,7 +248,6 @@ fn title_prefers_the_custom_name_then_the_session_title_then_the_directory() {
                 daemon("untitled", DaemonPhase::Idle),
             ],
             Some(directory),
-            None,
             None,
         ),
         Instant::now(),
@@ -309,7 +292,6 @@ fn agent_falls_back_from_the_directory_to_provider_then_launch_command() {
                 },
             ],
             Some(directory),
-            None,
             None,
         ),
         Instant::now(),
@@ -392,7 +374,6 @@ fn phase_and_status_follow_the_authoritative_daemon_phase() {
                 0,
             )]))),
             None,
-            None,
         ),
         Instant::now(),
     );
@@ -421,7 +402,6 @@ fn first_snapshot_is_a_baseline_and_later_changes_are_edges() {
                 daemon("busy", DaemonPhase::Thinking),
             ],
             Some(directory.clone()),
-            None,
             None,
         ),
         now,
@@ -473,7 +453,6 @@ fn first_snapshot_is_a_baseline_and_later_changes_are_edges() {
             ],
             Some(directory),
             None,
-            None,
         ),
         now,
     );
@@ -488,7 +467,7 @@ fn first_snapshot_is_a_baseline_and_later_changes_are_edges() {
 }
 
 #[test]
-fn a_removed_session_leaves_the_remote_catalog_but_stays_listed_while_in_the_directory() {
+fn a_removed_session_stays_listed_while_in_the_directory() {
     let mut state = CatalogState::default();
     state.apply(
         snapshot(
@@ -499,9 +478,6 @@ fn a_removed_session_leaves_the_remote_catalog_but_stays_listed_while_in_the_dir
                 Some(("/repo", 0)),
                 0,
             )]))),
-            Some(remote(json!({"sessions": [
-                {"kind": "terminal", "id": "gone", "cwd": "/repo", "created_at": 1}
-            ]}))),
             None,
         ),
         Instant::now(),
@@ -1016,7 +992,7 @@ fn projection_snapshot(kind: &str, data: Value) -> String {
     })
 }
 
-/// 完整的一批快照：会话、远程目录、工作区目录、自动化。
+/// 完整的一批快照：会话、工作区目录、自动化。
 fn snapshot_lines(sessions: Vec<SessionStateChanged>, directory: Value) -> String {
     let sessions = line(SubscribeMessage::Snapshot {
         kind: SnapshotKind(CORE_SNAPSHOT_SESSIONS.to_string()),
@@ -1031,7 +1007,6 @@ fn snapshot_lines(sessions: Vec<SessionStateChanged>, directory: Value) -> Strin
     });
     [
         sessions,
-        projection_snapshot(CORE_SNAPSHOT_REMOTE_SESSIONS, Value::Null),
         projection_snapshot(CORE_SNAPSHOT_WORKSPACE, directory),
         projection_snapshot(CORE_SNAPSHOT_AUTOMATIONS, Value::Null),
     ]
@@ -1138,7 +1113,6 @@ fn subscribes_with_the_catalog_shape_and_pushes_the_live_list() {
         [
             CORE_TOPIC_SESSION_STATE_CHANGED,
             CORE_TOPIC_SESSION_REMOVED,
-            CORE_TOPIC_REMOTE_SESSIONS_CHANGED,
             CORE_TOPIC_WORKSPACE_CHANGED,
             CORE_TOPIC_AUTOMATIONS_CHANGED,
         ],

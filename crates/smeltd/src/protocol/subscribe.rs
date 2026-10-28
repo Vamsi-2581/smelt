@@ -41,15 +41,11 @@ pub(super) fn handle_event_subscribe_op<C: ClientSocket + PeerSource>(
 pub(crate) fn collect_subscription_snapshot(
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
-    remote_sessions: &RemoteSessions,
     automations: AutomationFile,
 ) -> DaemonProjectionSeed {
     DaemonProjectionSeed {
         sessions: published_session_states(sessions, acp_sessions),
-        // A catalog load failure remains fail-closed at the command boundary. Omitting it from a
-        // state snapshot prevents clients from mistaking an unreadable durable catalog for empty.
-        remote_sessions: remote_session_snapshot(remote_sessions).ok(),
-        // 读不出来同样不当成空目录：留着已经推过的那份，等下一次改动再推。
+        // 读不出来不当成空目录：留着已经推过的那份，等下一次改动再推。
         workspace: smelt_core::workspace_catalog::directory().ok(),
         automations: Some(automations),
     }

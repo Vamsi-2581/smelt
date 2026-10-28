@@ -24,7 +24,7 @@ use smelt_runtime_client::protocol::control::{
 };
 
 use super::session_catalog::published_session_states;
-use super::{AcpSessions, EventHubHandle, RemoteSessions, Sessions, WorkspaceDirectoryReader};
+use super::{AcpSessions, EventHubHandle, Sessions, WorkspaceDirectoryReader};
 
 fn error_value(
     control_version: u16,
@@ -83,7 +83,6 @@ fn dispatch_control(
     principal: &crate::devices::Principal,
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
-    remote_sessions: &RemoteSessions,
     workspace_directory: &WorkspaceDirectoryReader,
     automations: &AutomationStore,
     event_hub: &EventHubHandle,
@@ -467,7 +466,6 @@ fn dispatch_control(
                 sessions,
                 acp_sessions,
                 event_hub,
-                remote_sessions,
             ) {
                 Ok(created) => success_value(control_version, &request_id, created),
                 Err(error) => error_value(
@@ -498,7 +496,6 @@ fn dispatch_control(
                 params,
                 sessions,
                 acp_sessions,
-                remote_sessions,
                 workspace_directory,
                 event_hub,
             ) {
@@ -516,7 +513,6 @@ fn dispatch_control(
                 &params.session_id,
                 sessions,
                 acp_sessions,
-                remote_sessions,
                 workspace_directory,
                 automations,
                 event_hub,
@@ -768,7 +764,6 @@ fn dispatch_control(
                         &params.conversation_id,
                         sessions,
                         acp_sessions,
-                        remote_sessions,
                         automations,
                         event_hub,
                     )
@@ -788,6 +783,20 @@ fn dispatch_control(
                     super::workspace_directory::open_project(&store, &params.root, event_hub)
                 }),
             )
+        }
+        ControlMethod::WorkspaceDirectoryGet => {
+            let _: EmptyParams = match params_or_error(control_version, &request_id, params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match workspace_directory.read() {
+                Ok(directory) => success_value(control_version, &request_id, directory),
+                Err(message) => error_value(
+                    control_version,
+                    request_id,
+                    ControlError::new(ControlErrorCode::TemporarilyUnavailable, message),
+                ),
+            }
         }
         ControlMethod::WorkspaceProjectClose => {
             let params: smelt_core::workspace_directory::WorkspaceProjectParams =
@@ -1297,28 +1306,21 @@ fn run_automation_once(
     Ok(applied.result)
 }
 
-/// 用产品智能体定义开一场对话：会话进运行时的远程目录，桌面会投影到「对话」栏。
+/// 用产品智能体定义开一场对话：起好写进工作区目录，桌面放进「对话」栏。
 fn create_agent_conversation(
     agent_definition_id: &str,
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
     event_hub: &EventHubHandle,
-    remote_sessions: &RemoteSessions,
 ) -> Result<smelt_core::session_control::CreatedAgentConversation, String> {
-    let session = smelt_core::session_control::agent_conversation_session(agent_definition_id)?;
-    let created = smelt_core::session_control::CreatedAgentConversation {
-        session_id: session.id.clone(),
+    let conversation =
+        smelt_core::session_control::agent_conversation_session(agent_definition_id)?;
+    super::acp_host::open_daemon_conversation(&conversation, sessions, acp_sessions, event_hub)?;
+    Ok(smelt_core::session_control::CreatedAgentConversation {
+        session_id: conversation.sid,
         agent_definition_id: agent_definition_id.trim().to_string(),
-        cwd: session.cwd.clone(),
-    };
-    super::session_control::create_remote_acp_session(
-        session,
-        sessions,
-        acp_sessions,
-        event_hub,
-        remote_sessions,
-    )?;
-    Ok(created)
+        cwd: conversation.cwd,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1328,7 +1330,6 @@ pub(crate) fn handle_control<C: ClientSocket>(
     principal: &crate::devices::Principal,
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
-    remote_sessions: &RemoteSessions,
     workspace_directory: &WorkspaceDirectoryReader,
     automations: &AutomationStore,
     event_hub: &EventHubHandle,
@@ -1340,7 +1341,6 @@ pub(crate) fn handle_control<C: ClientSocket>(
             principal,
             sessions,
             acp_sessions,
-            remote_sessions,
             workspace_directory,
             automations,
             event_hub,
@@ -1386,7 +1386,6 @@ mod tests {
             &crate::devices::Principal::Local,
             &sessions,
             &acp_sessions,
-            &super::super::new_test_remote_sessions(),
             &super::super::new_test_workspace_directory(),
             &automations,
             &event_hub,
@@ -1435,7 +1434,6 @@ mod tests {
             &crate::devices::Principal::Local,
             &sessions,
             &acp_sessions,
-            &super::super::new_test_remote_sessions(),
             &super::super::new_test_workspace_directory(),
             &automations,
             &event_hub,
@@ -1460,7 +1458,6 @@ mod tests {
             &crate::devices::Principal::Local,
             &super::super::new_sessions(),
             &super::super::new_test_acp_sessions(),
-            &super::super::new_test_remote_sessions(),
             &super::super::new_test_workspace_directory(),
             &smelt_core::automation_store::new_automation_store(),
             &super::super::new_event_hub(),
@@ -1527,7 +1524,6 @@ mod tests {
             &crate::devices::Principal::Local,
             &sessions,
             &acp_sessions,
-            &super::super::new_test_remote_sessions(),
             &super::super::new_test_workspace_directory(),
             &automations,
             &event_hub,
@@ -1563,7 +1559,6 @@ mod tests {
             &crate::devices::Principal::Local,
             &sessions,
             &acp_sessions,
-            &super::super::new_test_remote_sessions(),
             &super::super::new_test_workspace_directory(),
             &automations,
             &event_hub,

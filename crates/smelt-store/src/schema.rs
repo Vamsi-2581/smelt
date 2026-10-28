@@ -14,7 +14,7 @@
 //! 不要再引入通用的 key/value 或 JSON 文档表。v17 及更早版本的形状以冻结的
 //! `V17_SCHEMA` 为准，旧版本的迁移和形状校验都从它推导。
 
-pub const TABLES: [&str; 40] = [
+pub const TABLES: [&str; 38] = [
     "acp_config_value",
     "acp_detail",
     "acp_launch_env",
@@ -46,9 +46,7 @@ pub const TABLES: [&str; 40] = [
     "quota_cache_provider",
     "quota_cache_status",
     "quota_cache_window",
-    "remote_acp_session",
     "remote_config",
-    "remote_terminal_session",
     "runtime_identity",
     "session",
     "session_group",
@@ -397,26 +395,6 @@ CREATE TABLE agent_profile (
   label TEXT NOT NULL,
   workspace_dir TEXT NOT NULL,
   position INTEGER NOT NULL CHECK (position >= 0)
-);
-CREATE TABLE remote_acp_session (
-  id TEXT PRIMARY KEY,
-  cwd TEXT NOT NULL,
-  title TEXT NOT NULL,
-  agent_option_id TEXT NOT NULL,
-  agent TEXT NOT NULL,
-  launch_command TEXT NOT NULL,
-  launch_env_json BLOB NOT NULL,
-  resume_id TEXT,
-  created_at INTEGER NOT NULL,
-  lifecycle TEXT NOT NULL,
-  hidden INTEGER NOT NULL CHECK (hidden IN (0, 1))
-);
-CREATE TABLE remote_terminal_session (
-  id TEXT PRIMARY KEY,
-  cwd TEXT NOT NULL,
-  title TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  lifecycle TEXT NOT NULL
 );
 CREATE TABLE published_session (
   id TEXT PRIMARY KEY,
@@ -1748,4 +1726,12 @@ DROP TABLE session_group_v26;
 DROP TABLE workspace_menu_session;
 DROP TABLE workspace_menu_project;
 DROP TABLE workspace_menu;
+";
+
+/// v27 → v28：远程会话目录两张表删掉。手机、命令行、智能体新建的对话由运行时直接写进
+/// 工作区目录；自动化运行的会话看自动化运行记录和守护里活着的会话。守护每次启动都会把
+/// 这两张表清空，库里不会有要搬的数据。
+pub const MIGRATE_V27_TO_V28: &str = "
+DROP TABLE remote_acp_session;
+DROP TABLE remote_terminal_session;
 ";

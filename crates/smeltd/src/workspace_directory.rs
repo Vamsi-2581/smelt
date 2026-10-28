@@ -14,7 +14,7 @@ use smelt_core::workspace_directory::{
 use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode};
 use smelt_store::Store;
 
-use super::{AcpSessions, EventHubHandle, RemoteSessions, Sessions, dlog};
+use super::{AcpSessions, EventHubHandle, Sessions, dlog};
 
 /// 读当前的工作区目录。新建会话校验项目、删会话认类型、唤醒挂起的对话、Pi 通讯录都按它
 /// 判断，不另存一份。生产从主库现读；测试换成固定的一份（测试进程里默认主库是关着的）。
@@ -89,7 +89,6 @@ pub(crate) fn delete_conversation(
     id: &str,
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
-    remote_sessions: &RemoteSessions,
     automations: &AutomationStore,
     event_hub: &EventHubHandle,
 ) -> Result<WorkspaceRevision, ControlError> {
@@ -105,14 +104,14 @@ pub(crate) fn delete_conversation(
         });
     };
     for terminal in conversation.terminals.iter().filter_map(|t| t.id.as_deref()) {
-        super::kill_terminal_session(terminal, sessions, remote_sessions, event_hub)
+        super::kill_terminal_session(terminal, sessions, event_hub)
             .map_err(|message| ControlError::new(ControlErrorCode::OperationFailed, message))?;
     }
     if let Some(acp) = &conversation.acp
         && !is_background_acp_session_id(&acp.sid)
         && !automations.lock().unwrap().is_run_session(&acp.sid)
     {
-        super::kill_acp_session(&acp.sid, acp_sessions, remote_sessions, event_hub)
+        super::kill_acp_session(&acp.sid, acp_sessions, event_hub)
             .map_err(|message| ControlError::new(ControlErrorCode::OperationFailed, message))?;
     }
     let change = workspace_catalog::delete_conversation_on(store, id).map_err(control_error)?;
@@ -135,6 +134,36 @@ pub(crate) fn close_project(
 ) -> Result<WorkspaceRevision, ControlError> {
     let change = workspace_catalog::close_project_on(store, root).map_err(control_error)?;
     Ok(publish(&change, event_hub))
+}
+
+/// 运行时自己开的对话（手机、命令行、Pi 派生）起好进程之后写进目录。目录里已经有一段
+/// 对话用着这个 ACP 会话或终端（同一个 `request_id` 的重试）就不再写，返回那一段。
+pub(crate) fn enter_conversation(
+    store: &Store,
+    conversation: WorkspaceConversation,
+    event_hub: &EventHubHandle,
+) -> Result<WorkspaceConversation, ControlError> {
+    let directory = workspace_catalog::directory_on(store).map_err(control_error)?;
+    let session_ids = session_ids(&conversation);
+    if let Some(existing) = directory.conversations.into_iter().find(|existing| {
+        session_ids_of(existing).any(|id| session_ids.contains(&id))
+    }) {
+        return Ok(existing);
+    }
+    create_conversation(store, &conversation, event_hub)?;
+    Ok(conversation)
+}
+
+fn session_ids(conversation: &WorkspaceConversation) -> Vec<String> {
+    session_ids_of(conversation).collect()
+}
+
+fn session_ids_of(conversation: &WorkspaceConversation) -> impl Iterator<Item = String> + '_ {
+    conversation
+        .acp
+        .iter()
+        .map(|acp| acp.sid.clone())
+        .chain(conversation.terminals.iter().filter_map(|terminal| terminal.id.clone()))
 }
 
 /// `session.delete` 删掉的会话从目录里摘掉，改了就推（见 [`workspace_catalog::forget_session_on`]）。

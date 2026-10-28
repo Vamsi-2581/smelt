@@ -129,7 +129,7 @@ impl Workspace {
     }
 
     /// 会话恢复到它们所在的运行时上。活动会话只按本机那份认；本机守护的拉起、升级
-    /// 检查、远程目录投影也只有本机才做。
+    /// 检查也只有本机才做。
     fn schedule_indexed_session_restore(
         &mut self,
         runtime: crate::runtimes::Runtime,
@@ -303,7 +303,6 @@ impl Workspace {
                                 custom_title: ss.custom_title,
                                 agent_definition_id,
                                 automation_id,
-                                remote_owned: false,
                                 _acp_persist_sub,
                                 ui_state: ss
                                     .route
@@ -385,7 +384,6 @@ impl Workspace {
                             custom_title: ss.custom_title,
                             agent_definition_id: None,
                             automation_id: None,
-                            remote_owned: false,
                             _acp_persist_sub: None,
                             ui_state: ss
                                 .route
@@ -530,12 +528,6 @@ impl Workspace {
                         });
                     })
                     .detach();
-                }
-                if is_local {
-                    // 恢复落定后再对一次远程目录：恢复期间我们故意跳过了还在排队的 id，
-                    // 真的没恢复成功的（比如终端 reattach 失败）得在这里被重新投影回来，
-                    // 不能干等下一次目录推送。
-                    this.reconcile_remote_catalog_projection(window, cx);
                 }
                 this.schedule_visible_refresh(cx);
                 cx.notify();
@@ -1232,7 +1224,6 @@ impl Workspace {
             custom_title: None,
             agent_definition_id,
             automation_id: None,
-            remote_owned: false,
             _acp_persist_sub,
             ui_state: SessionUiState::default(),
         });
@@ -1334,7 +1325,6 @@ impl Workspace {
             custom_title: None,
             agent_definition_id,
             automation_id,
-            remote_owned: false,
             _acp_persist_sub,
             ui_state: SessionUiState::default(),
         });
@@ -1479,7 +1469,6 @@ impl Workspace {
             custom_title,
             agent_definition_id,
             automation_id: None,
-            remote_owned: false,
             _acp_persist_sub,
             ui_state: SessionUiState::default(),
         });
@@ -2100,11 +2089,6 @@ impl Workspace {
             })
     }
 
-    /// 目录撤回后的投影拆除：只摘本地视图，不再发一遍 kill。拆卸已经在 daemon 完成。
-    pub(crate) fn unproject_remote_session(&mut self, ix: usize, cx: &mut Context<Self>) {
-        self.remove_session(ix, false, cx);
-    }
-
     /// 记下刚看过的会话，关掉当前会话时回到上一个（见 `remove_session`）。
     pub(crate) fn note_session_viewed(&mut self, ix: usize) {
         if let Some(ui_id) = self.sessions.get(ix).map(|session| session.ui_id) {
@@ -2169,14 +2153,12 @@ impl Workspace {
             SessionKind::Conversation(view) => vec![view.read(cx).session_id().to_string()],
         };
         if kill_runtime {
-            // 用户关掉的：运行时目录里也关掉它，别的设备随之摘掉。只摘本地投影的
-            // （运行时被移除、别处已经关掉）不走这里。
+            // 用户关掉的：运行时目录里也关掉它，别的设备随之摘掉。只摘本地的（运行时被
+            // 移除、别处已经关掉）不走这里。
             let session = &self.sessions[ix];
-            if crate::workspace_persist::in_workspace_directory(session) {
-                let key = session.runtime(cx).key().clone();
-                let id = session.conversation_id.clone();
-                self.close_directory_conversation(&key, &id);
-            }
+            let key = session.runtime(cx).key().clone();
+            let id = session.conversation_id.clone();
+            self.close_directory_conversation(&key, &id);
             // 每个 pane 在自己的运行时上杀：远程会话的 shell 在那台机器上。
             let terminals = self.sessions[ix]
                 .term_leaves()

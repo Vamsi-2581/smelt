@@ -11,7 +11,7 @@ use smelt_model::session_control::*;
 use smelt_runtime_client::RuntimeClient;
 use smelt_runtime_client::protocol::daemon::DaemonOperation;
 
-/// 历史自定义标题的唯一写入口。smeltd 写 overlay 并同步远程目录。
+/// 历史自定义标题的唯一写入口。smeltd 写 overlay。
 pub fn rename_history_title(
     runtime: &RuntimeClient,
     kind: HistorySourceKind,
@@ -70,43 +70,34 @@ pub fn submit_automation_command(
     Ok((result, snapshot))
 }
 
-/// 列出侧栏「对话」栏里的产品对话。需要 smeltd。
+/// 列出侧栏「对话」栏里的产品对话：工作区目录里绑了智能体、开在智能体 space 里的那些。
 pub fn list_agent_conversations(
     runtime: &RuntimeClient,
 ) -> Result<Vec<AgentConversationSummary>, String> {
-    let response = runtime.request_ok(
-        &serde_json::json!({
-            "op": DaemonOperation::RemoteSessions,
-        }),
-        REQUEST_TIMEOUT,
-    )?;
-    let snapshot: RemoteSessionSnapshot = response
-        .get("remote_sessions")
-        .cloned()
-        .ok_or_else(|| "smeltd 没有返回对话目录".to_string())
-        .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()))?;
-    let mut conversations = snapshot
-        .sessions
+    use smelt_model::control_api::WorkspaceDirectoryGet;
+    use smelt_runtime_client::protocol::control::EmptyParams;
+
+    let directory = runtime
+        .call::<WorkspaceDirectoryGet>(&EmptyParams::default(), REQUEST_TIMEOUT)
+        .map_err(|error| error.to_string())?;
+    let mut conversations = directory
+        .conversations
         .into_iter()
-        .filter(|session| session.kind == RemoteSessionKind::Acp && session.is_visible())
-        .filter(|session| !is_background_acp_session_id(&session.id))
-        .filter(|session| {
-            is_agent_conversation(
-                None,
-                agent_definition_id_from_option_id(
-                    session.agent_option_id.as_deref().unwrap_or(""),
-                ),
-                Some(&session.cwd),
-            )
-        })
-        .map(|session| AgentConversationSummary {
-            agent_definition_id: agent_definition_id_from_option_id(
-                session.agent_option_id.as_deref().unwrap_or(""),
-            )
-            .map(str::to_string),
-            session_id: session.id,
-            title: session.title,
-            cwd: session.cwd,
+        .filter_map(|conversation| {
+            let acp = conversation.acp?;
+            let agent_definition_id = acp.agent_definition_id?;
+            let cwd = acp.cwd.unwrap_or_default();
+            is_agent_conversation(None, Some(&agent_definition_id), Some(&cwd)).then(|| {
+                AgentConversationSummary {
+                    session_id: acp.sid,
+                    title: conversation
+                        .custom_title
+                        .or(acp.session_title)
+                        .unwrap_or_default(),
+                    agent_definition_id: Some(agent_definition_id),
+                    cwd,
+                }
+            })
         })
         .collect::<Vec<_>>();
     conversations.sort_by(|left, right| left.session_id.cmp(&right.session_id));

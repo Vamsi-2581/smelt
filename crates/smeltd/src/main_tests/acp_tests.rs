@@ -3290,7 +3290,6 @@ fn unchanged_tool_debug_is_not_copied_into_later_snapshots() {
 #[test]
 fn kill_removes_session_and_closes_connections() {
     let acp_sessions = new_test_acp_sessions();
-    let remote_sessions = new_test_remote_sessions();
     let subscribers = new_event_hub();
     let (slot, _) = acp_sessions.reserve_with("acp-3", || {
         make_acp_session_value("acp-3", AcpSessionState::default())
@@ -3316,7 +3315,6 @@ fn kill_removes_session_and_closes_connections() {
         server,
         &serde_json::json!({"id": "acp-3"}),
         &acp_sessions,
-        &remote_sessions,
         &subscribers,
     );
 
@@ -3351,14 +3349,12 @@ fn kill_removes_session_and_closes_connections() {
 #[test]
 fn kill_unknown_session_is_a_harmless_no_op() {
     let acp_sessions = new_test_acp_sessions();
-    let remote_sessions = new_test_remote_sessions();
     let subscribers = new_event_hub();
     let (server, client) = UnixStream::pair().unwrap();
     handle_acp_kill(
         server,
         &serde_json::json!({"id": "acp-ghost"}),
         &acp_sessions,
-        &remote_sessions,
         &subscribers,
     );
     let mut resp = String::new();
@@ -3446,7 +3442,6 @@ fn kill_does_not_unpublish_until_lifecycle_is_free() {
     });
     let lifecycle = old.lifecycle.lock();
     let registry_for_kill = Arc::clone(&acp_sessions);
-    let remote_sessions = new_test_remote_sessions();
     let subscribers = new_event_hub();
     let (server, client) = UnixStream::pair().unwrap();
     let killer = thread::spawn(move || {
@@ -3454,7 +3449,6 @@ fn kill_does_not_unpublish_until_lifecycle_is_free() {
             server,
             &serde_json::json!({"id": "acp-race"}),
             &registry_for_kill,
-            &remote_sessions,
             &subscribers,
         );
     });
@@ -3482,7 +3476,6 @@ fn kill_does_not_unpublish_until_lifecycle_is_free() {
 fn open_after_kill_creates_a_fresh_slot() {
     let acp_sessions = new_test_acp_sessions();
     let subscribers = new_event_hub();
-    let remote_sessions = new_test_remote_sessions();
     let (old, _) = acp_sessions.reserve_with("acp-open-kill", || {
         make_acp_session_value("acp-open-kill", AcpSessionState::default())
     });
@@ -3492,7 +3485,6 @@ fn open_after_kill_creates_a_fresh_slot() {
         kill_server,
         &serde_json::json!({"id": "acp-open-kill"}),
         &acp_sessions,
-        &remote_sessions,
         &subscribers,
     );
     let mut kill_response = String::new();
@@ -4676,12 +4668,6 @@ fn a_poisoned_acp_session_does_not_break_cross_session_readers() {
     assert_eq!(
         crate::session_catalog::session_connection_counts("acp-poisoned", &sessions, &acp_sessions),
         (0, 0)
-    );
-    reconcile_remote_catalog_runtime(
-        &new_test_remote_sessions(),
-        &sessions,
-        &acp_sessions,
-        &new_event_hub(),
     );
     // 第二轮：中毒标志不能留着让下一个读者再踩一次。
     assert!(

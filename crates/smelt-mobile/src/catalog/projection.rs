@@ -1,8 +1,8 @@
 //! 会话目录的纯投影：订阅到的运行时状态（会话状态、工作区目录、远程目录、自动化、
 //! 智能体归属）在手机本地拼成会话列表，并维护 attention。不做 IO，单测直接喂事件。
 //!
-//! 列表每次现拼，不另存：名册来自运行时的工作区目录（项目和对话），加上远程目录里还没
-//! 进工作区目录的会话、自动化运行的会话；运行态来自会话状态。会话归哪个项目、项目叫什么，
+//! 列表每次现拼，不另存：名册来自运行时的工作区目录（项目和对话），加上自动化运行的
+//! 会话（它们不进工作区目录）；运行态来自会话状态。会话归哪个项目、项目叫什么，
 //! 和桌面侧栏用同一份算法（`smelt_model::workspace_directory`）现算。
 
 use std::collections::hash_map::Entry;
@@ -21,7 +21,7 @@ use smelt_model::automation::{
 use smelt_model::daemon_state::{DaemonPhase, DaemonSessionState, DaemonStateEvent};
 use smelt_model::new_session::{NewSessionAction, NewSessionSections, NewSessionTarget};
 use smelt_model::runtime_path::PathStyle;
-use smelt_model::session_control::{AcpAgentOption, RemoteSessionKind, RemoteSessionSnapshot};
+use smelt_model::session_control::AcpAgentOption;
 use smelt_model::workspace_directory::{
     WorkspaceConversation, WorkspaceDirectory, project_labels, project_root_of,
 };
@@ -37,8 +37,6 @@ pub(crate) struct CatalogState {
     sessions: HashMap<String, DaemonSessionState>,
     /// 手机本地的提醒与已读。
     pub(crate) attention: AttentionStore,
-    /// 快照里为空表示运行时没有这份投影，按空处理。
-    remote_sessions: Option<RemoteSessionSnapshot>,
     /// 运行时的工作区目录：开着的项目和对话。
     workspace: Option<WorkspaceDirectory>,
     /// 运行时那台机器的系统（`system.describe` 的 `os`），路径按它切。连上之前不知道，按 POSIX。
@@ -66,7 +64,6 @@ impl CatalogState {
         match event {
             DaemonStateEvent::Snapshot {
                 sessions,
-                remote_sessions,
                 workspace,
                 automations,
             } => {
@@ -107,7 +104,6 @@ impl CatalogState {
                     .into_iter()
                     .map(|state| (state.id.clone(), state))
                     .collect();
-                self.remote_sessions = remote_sessions;
                 self.workspace = workspace;
                 self.automations = automations;
                 self.primed = true;
@@ -134,11 +130,6 @@ impl CatalogState {
                 }
                 self.remove_session(&id);
                 applied.sessions_changed = true;
-            }
-            DaemonStateEvent::RemoteSessions(remote_sessions) => {
-                self.remote_sessions = Some(remote_sessions);
-                applied.sessions_changed = true;
-                applied.refresh_bindings = true;
             }
             DaemonStateEvent::Workspace(directory) => {
                 self.workspace = Some(directory);
@@ -187,24 +178,18 @@ impl CatalogState {
     pub(crate) fn remove_session(&mut self, id: &str) {
         self.sessions.remove(id);
         self.attention.remove_session(id);
-        if let Some(remote) = self.remote_sessions.as_mut() {
-            remote.sessions.retain(|session| session.id != id);
-        }
     }
 
-    /// 现拼一份列表：工作区目录 + 还没进目录的远程会话 + 自动化运行的会话。
+    /// 现拼一份列表：工作区目录 + 自动化运行的会话。
     fn listing(&self) -> Listing {
         let empty_directory = WorkspaceDirectory::default();
         let directory = self.workspace.as_ref().unwrap_or(&empty_directory);
-        let empty_remote = RemoteSessionSnapshot::default();
-        let remote = self.remote_sessions.as_ref().unwrap_or(&empty_remote);
         let mut listing = Listing::new(PathStyle::of_os(self.os.as_deref()), &directory.projects);
         for conversation in &directory.conversations {
             listing.push_conversation(conversation);
         }
-        listing.push_remote_sessions(remote);
         if let Some(automations) = self.automations.as_ref() {
-            listing.push_automation_runs(remote, automations);
+            listing.push_automation_runs(automations, &self.sessions);
         }
         listing
     }
@@ -415,64 +400,19 @@ impl Listing {
         self.rows.iter().any(|row| row.id == id)
     }
 
-    /// 远程目录里还没进工作区目录的会话（手机、命令行新建的）。
-    fn push_remote_sessions(&mut self, remote_sessions: &RemoteSessionSnapshot) {
-        for remote in remote_sessions
-            .sessions
-            .iter()
-            .filter(|remote| remote.is_visible())
-        {
-            if self.contains(&remote.id) {
-                continue;
-            }
-            let project = self.group_for_cwd(Some(&remote.cwd), false);
-            let order = self.next_order();
-            let (kind, fallback_title, agent) = match remote.kind {
-                RemoteSessionKind::Acp => {
-                    let agent = remote.agent.clone().unwrap_or_else(|| "Agent".to_string());
-                    (view::SessionKind::Acp, format!("{agent} conversation"), Some(agent))
-                }
-                RemoteSessionKind::Terminal => {
-                    (view::SessionKind::Terminal, "Terminal".to_string(), None)
-                }
-            };
-            self.rows.push(Row {
-                id: remote.id.clone(),
-                kind,
-                custom_title: Some(remote.title.clone()).filter(|title| !title.trim().is_empty()),
-                fallback_title,
-                cwd: Some(remote.cwd.clone()),
-                project,
-                agent,
-                order,
-                leaf: 0,
-            });
-        }
-    }
-
-    /// 自动化运行的对话在运行时目录里是 hidden（桌面侧栏不该被后台运行刷屏），但手机是
-    /// 指挥台：运行停下来等审批时只有手机在场。所以按运行档案把它们补进来，不带项目归属
-    /// （运行的工作区是运行时按自动化分配的目录，不是用户项目）。
+    /// 自动化运行的对话不进工作区目录（桌面侧栏不该被后台运行刷屏），但手机是指挥台：
+    /// 运行停下来等审批时只有手机在场。所以按运行档案把守护里还在的那些补进来，不带项目
+    /// 归属（运行的工作区是运行时按自动化分配的目录，不是用户项目）。
     fn push_automation_runs(
         &mut self,
-        remote_sessions: &RemoteSessionSnapshot,
         automations: &AutomationFile,
+        live: &HashMap<String, DaemonSessionState>,
     ) {
         for run in &automations.runs {
             let Some(session_id) = run.session_id.as_deref() else {
                 continue;
             };
-            if self.contains(session_id) {
-                continue;
-            }
-            let Some(remote) = remote_sessions
-                .sessions
-                .iter()
-                .find(|remote| remote.id == session_id)
-            else {
-                continue;
-            };
-            if !remote.is_present() || remote.kind != RemoteSessionKind::Acp {
+            if self.contains(session_id) || !live.contains_key(session_id) {
                 continue;
             }
             let order = self.next_order();
@@ -480,21 +420,15 @@ impl Listing {
                 id: session_id.to_string(),
                 kind: view::SessionKind::Acp,
                 custom_title: None,
-                fallback_title: if remote.title.trim().is_empty() {
-                    run.context.automation_name.clone()
-                } else {
-                    remote.title.clone()
-                },
-                cwd: Some(remote.cwd.clone()),
+                fallback_title: run.context.automation_name.clone(),
+                cwd: Some(run.context.cwd.clone()),
                 project: None,
-                agent: remote
-                    .agent
-                    .clone()
-                    .or_else(|| run.context.engine_kind_id.clone()),
+                agent: run.context.engine_kind_id.clone(),
                 order,
                 leaf: 0,
             });
         }
+
     }
 }
 

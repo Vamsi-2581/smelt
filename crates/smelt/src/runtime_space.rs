@@ -116,12 +116,6 @@ impl crate::Workspace {
             .is_none_or(|space| space.sessions_restored)
     }
 
-    pub(crate) fn all_pending_restore_session_ids(&self) -> std::collections::HashSet<String> {
-        self.spaces
-            .iter()
-            .flat_map(|space| crate::pending_restore_session_ids(&space.restore_pending))
-            .collect()
-    }
 }
 
 /// 一个项目：所在运行时 + 根路径。

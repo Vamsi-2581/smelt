@@ -3572,8 +3572,33 @@ pub(crate) fn settle_acp_session_for_shutdown(sess: &AcpSession) {
     smelt_core::acp_session::interrupt_open_turn(&mut reduced);
 }
 
-/// Ensure an ACP runtime exists without attaching a controlling client. Both desktop
-/// `acp_open` and mobile `acp_create` use this path, so launch/resume semantics cannot drift.
+/// 起一段运行时自己开的 ACP 对话（手机、命令行、Pi 派生；已有同 id 的 runtime 时复用），
+/// 起好写进工作区目录。写不进目录就收掉刚起的进程：不在目录里的对话谁都看不到。
+pub(crate) fn open_daemon_conversation(
+    conversation: &smelt_core::session_control::DaemonConversation,
+    sessions: &Sessions,
+    acp_sessions: &AcpSessions,
+    subscribers: &EventHubHandle,
+) -> Result<Arc<AcpSlot<AcpSession>>, String> {
+    let request = parse_acp_open_request(&conversation.open_request())
+        .ok_or_else(|| "invalid ACP create request".to_string())?;
+    let slot = ensure_acp_session(&request, sessions, acp_sessions, subscribers)?;
+    let entered = crate::workspace_directory::default_store().and_then(|store| {
+        crate::workspace_directory::enter_conversation(
+            &store,
+            conversation.directory_entry(uuid::Uuid::new_v4().to_string()),
+            subscribers,
+        )
+    });
+    if let Err(failure) = entered {
+        let _ = kill_acp_session(&conversation.sid, acp_sessions, subscribers);
+        return Err(format!("对话没能写进工作区目录：{}", failure.message));
+    }
+    Ok(slot)
+}
+
+/// Ensure an ACP runtime exists without attaching a controlling client. 桌面的 `acp_open`、
+/// 运行时自己开的对话和自动化运行都走这里，启动和续接的语义不会分叉。
 pub(crate) fn ensure_acp_session(
     req: &AcpOpenRequest,
     sessions: &Sessions,
@@ -3593,7 +3618,7 @@ pub(crate) fn ensure_acp_session(
             adopt_unknown_conversation_binding(&slot.value, req.conversation_binding.clone());
         }
         if let Some(error) =
-            runtime_id_taken_by_other_kind(&req.id, sessions, acp_sessions, RemoteSessionKind::Acp)
+            runtime_id_taken_by_other_kind(&req.id, sessions, acp_sessions, RuntimeKind::Acp)
         {
             if created {
                 acp_sessions.remove_if_same(&req.id, &slot);
@@ -3683,111 +3708,6 @@ pub(crate) fn ensure_acp_session(
         drop(lifecycle);
         return Ok(slot);
     }
-}
-
-pub(crate) fn handle_acp_create<C: ClientSocket>(
-    mut conn: C,
-    v: &serde_json::Value,
-    sessions: &Sessions,
-    acp_sessions: &AcpSessions,
-    subscribers: &EventHubHandle,
-    remote_sessions: &RemoteSessions,
-) {
-    let result = (|| -> Result<(), String> {
-        let request =
-            parse_acp_open_request(v).ok_or_else(|| "invalid ACP create request".to_string())?;
-        let remote_session = match v.get("remote_session") {
-            Some(value) => Some(
-                serde_json::from_value::<RemoteAcpSession>(value.clone())
-                    .map_err(|error| format!("invalid remote ACP session: {error}"))?,
-            ),
-            None => None,
-        };
-        create_daemon_acp_session(
-            &request,
-            remote_session,
-            sessions,
-            acp_sessions,
-            subscribers,
-            remote_sessions,
-        )?;
-        Ok(())
-    })();
-    let response = match result {
-        Ok(()) => serde_json::json!({"ok": true}),
-        Err(error) => serde_json::json!({"ok": false, "error": error}),
-    };
-    let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
-}
-
-/// 创建一个无需 GUI 控制连接也能存活的 ACP 会话。移动端 `acp_create` 与 daemon
-/// Task Runtime 共用，避免两条启动路径在 provider session 独占和远程目录事务上漂移。
-pub(crate) fn create_daemon_acp_session(
-    request: &AcpOpenRequest,
-    mut remote_session: Option<RemoteAcpSession>,
-    sessions: &Sessions,
-    acp_sessions: &AcpSessions,
-    subscribers: &EventHubHandle,
-    remote_sessions: &RemoteSessions,
-) -> Result<Arc<AcpSlot<AcpSession>>, String> {
-    if let Some(session) = &remote_session
-        && session.id != request.id
-    {
-        return Err("remote ACP session id mismatch".to_string());
-    }
-    if let Some(session) = &mut remote_session {
-        session.lifecycle = RemoteSessionLifecycle::Creating;
-        let (_, snapshot) = mutate_remote_catalog(remote_sessions, |catalog| {
-            catalog.upsert_acp(session.clone())
-        })?;
-        broadcast_remote_sessions(subscribers, &snapshot);
-    }
-    let slot = match ensure_acp_session(request, sessions, acp_sessions, subscribers) {
-        Ok(slot) => slot,
-        Err(error) => {
-            if remote_session.is_some() {
-                let _ = remove_remote_session_if_unbound(
-                    remote_sessions,
-                    subscribers,
-                    RemoteSessionKind::Acp,
-                    &request.id,
-                );
-            }
-            return Err(error);
-        }
-    };
-    if remote_session.is_some() {
-        let activation = acp_sessions.with_current(&request.id, &slot, |session| {
-            activate_remote_session_instance(
-                remote_sessions,
-                RemoteSessionKind::Acp,
-                &request.id,
-                session.instance,
-            )
-        });
-        let snapshot = match activation {
-            Some(Ok(snapshot)) => snapshot,
-            Some(Err(error)) => {
-                let _ = acp_sessions.with_current(&request.id, &slot, |session| {
-                    let _ = retire_acp_runtime(session);
-                    let _ = remove_remote_session_if_unbound(
-                        remote_sessions,
-                        subscribers,
-                        RemoteSessionKind::Acp,
-                        &request.id,
-                    );
-                    acp_sessions.remove_if_same(&request.id, &slot);
-                    forget_session(subscribers, &request.id, session.instance);
-                });
-                return Err(error);
-            }
-            None => {
-                return Err("ACP runtime was replaced before catalog activation".to_string());
-            }
-        };
-        broadcast_remote_sessions(subscribers, &snapshot);
-    }
-    Ok(slot)
 }
 
 /// 只读旁观，不参与 client 顶替，可多个并存。
@@ -4146,11 +4066,10 @@ pub(crate) fn handle_acp_kill<C: ClientSocket>(
     conn: C,
     v: &serde_json::Value,
     acp_sessions: &AcpSessions,
-    remote_sessions: &RemoteSessions,
     subscribers: &EventHubHandle,
 ) {
     let id = v["id"].as_str().unwrap_or_default();
-    let result = kill_acp_session(id, acp_sessions, remote_sessions, subscribers);
+    let result = kill_acp_session(id, acp_sessions, subscribers);
     let mut c = conn;
     let response = match result {
         Ok(()) => serde_json::json!({ "ok": true }),
@@ -4162,34 +4081,15 @@ pub(crate) fn handle_acp_kill<C: ClientSocket>(
 pub(crate) fn kill_acp_session(
     id: &str,
     acp_sessions: &AcpSessions,
-    remote_sessions: &RemoteSessions,
     subscribers: &EventHubHandle,
 ) -> Result<(), String> {
-    let remote_owned =
-        is_known_remote_session(remote_sessions, RemoteSessionKind::Acp, id) == Some(true);
-    if remote_owned {
-        match set_remote_lifecycle(
-            remote_sessions,
-            subscribers,
-            RemoteSessionKind::Acp,
-            id,
-            RemoteSessionLifecycle::Closing,
-        )? {
-            true => {}
-            false => return Err("remote session disappeared".to_string()),
-        }
-    }
-    let slot = acp_sessions.get(id);
-    let had_slot = slot.is_some();
     let mut removed_instance = None;
-    let mut retire_failed = false;
-    let mut error = if let Some(slot) = slot {
+    let error = if let Some(slot) = acp_sessions.get(id) {
         let _lifecycle = slot.lifecycle.lock();
         if !acp_sessions.is_current(id, &slot) {
             Some("ACP session changed during kill; retry".to_string())
         } else if !retire_acp_runtime(&slot.value) {
             eprintln!("[acp] kill 会话 {id} 时未能证明 provider 已退出，拒绝释放 sid");
-            retire_failed = true;
             Some("ACP runtime 未能退出".to_string())
         } else {
             let sess = &slot.value;
@@ -4215,45 +4115,13 @@ pub(crate) fn kill_acp_session(
                 w.close_after_flush();
             }
             drop(out);
-            let cleanup_error = if remote_owned {
-                remove_remote_session_for_instance(
-                    remote_sessions,
-                    subscribers,
-                    RemoteSessionKind::Acp,
-                    id,
-                    sess.instance,
-                )
-                .err()
-            } else {
-                None
-            };
             acp_sessions.remove_if_same(id, &slot);
             removed_instance = Some(sess.instance);
-            cleanup_error
+            None
         }
     } else {
         None
     };
-    if error.is_none() && remote_owned && !had_slot {
-        if let Err(remove_error) = remove_remote_session_if_unbound(
-            remote_sessions,
-            subscribers,
-            RemoteSessionKind::Acp,
-            id,
-        ) {
-            error = Some(remove_error);
-        }
-    } else if retire_failed && remote_owned {
-        // 不能证明 provider 已退出时 runtime 仍在表内，目录也必须保持可见、可重试。
-        // `Failed` 会被当前工作区投影过滤，用户反而失去再次 kill/restart 的入口。
-        let _ = set_remote_lifecycle(
-            remote_sessions,
-            subscribers,
-            RemoteSessionKind::Acp,
-            id,
-            RemoteSessionLifecycle::Active,
-        );
-    }
     if let Some(instance) = removed_instance {
         forget_session(subscribers, id, instance);
     } else if error.is_none() {

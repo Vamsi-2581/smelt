@@ -63,7 +63,6 @@ fn delete(
         id,
         &new_sessions(),
         &new_acp_sessions(),
-        &new_test_remote_sessions(),
         &new_test_automation_store(),
         event_hub,
     )
@@ -160,4 +159,25 @@ fn a_deleted_session_leaves_the_directory() {
     let revision = published.revision;
     workspace_directory::forget_session(&temp.store, "term-remote", &event_hub).unwrap();
     assert_eq!(published_directory(&event_hub).unwrap().revision, revision);
+}
+
+/// 运行时自己开的对话（手机、命令行、Pi 派生）起好之后写进目录；同一个会话的重试（同一个
+/// `request_id`）不再写第二段，返回已经在的那一段。
+#[test]
+fn a_daemon_opened_conversation_enters_the_directory_once() {
+    let temp = TempStore::new();
+    let event_hub = new_event_hub();
+    let mut first = terminal_conversation();
+    first.terminals[0].id = Some("term-phone".to_string());
+    let entered =
+        workspace_directory::enter_conversation(&temp.store, first.clone(), &event_hub).unwrap();
+    assert_eq!(entered.id, first.id);
+
+    let mut retry = terminal_conversation();
+    retry.terminals[0].id = Some("term-phone".to_string());
+    let again = workspace_directory::enter_conversation(&temp.store, retry, &event_hub).unwrap();
+    assert_eq!(again.id, first.id, "重试拿到的是已经在的那一段");
+
+    let published = published_directory(&event_hub).expect("写进去之后推过目录");
+    assert_eq!(published.conversations.len(), 1);
 }

@@ -172,7 +172,6 @@ fn a_reattach_at_the_same_geometry_never_signals_the_child() {
         "t".to_string(),
         Arc::clone(&sessions),
         new_event_hub(),
-        None,
         slot,
     );
     // 让 sh 起来把 trap 装好。

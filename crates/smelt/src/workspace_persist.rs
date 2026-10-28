@@ -21,58 +21,6 @@ use crate::{
     SidebarGrouping, Workspace, WorkspaceRoute,
 };
 
-/// 工作区快照要记住用户还能再打开的会话。
-///
-/// 远程投影的终端 PTY 随 daemon 进程死去，不能当开着的标签存。ACP 对话有
-/// history / resume：smeltd 冷启动会按「没有 live runtime」清空远程目录，
-/// 若 GUI 也不落盘，全局对话（智能体 space）就会从侧栏消失，只剩项目里那些
-/// 本来就写在工作区里的会话。
-pub(crate) fn persist_in_workspace_snapshot(is_acp: bool, remote_owned: bool) -> bool {
-    is_acp || !remote_owned
-}
-
-/// 这段会话在不在运行时的工作区目录里。
-pub(crate) fn in_workspace_directory(session: &crate::Session) -> bool {
-    persist_in_workspace_snapshot(
-        matches!(session.kind, SessionKind::Conversation(_)),
-        session.remote_owned,
-    )
-}
-
-/// 远程目录缺席时要不要拆掉 GUI 上的 ACP 投影。
-///
-/// 误投影的后台 session 仍然拆掉。普通对话不拆：daemon 冷启动会清空没有
-/// live runtime 的远程目录，那不是用户删了它。真删除走 `SessionTerminated`。
-pub(crate) fn unproject_acp_when_remote_catalog_drops(
-    remote_owned: bool,
-    auto_projected_background: bool,
-) -> bool {
-    remote_owned && auto_projected_background
-}
-
-/// 还没落地的恢复会话占着哪些 smeltd 会话 id。
-///
-/// 启动时远程目录先到、存档恢复后到（恢复要等 managed daemon 就绪）。只看已经建
-/// 好的 `sessions` 会把“正在恢复的那一个”当成缺失，把同一场对话再投影一份；两个
-/// 视图随后互抢同一个 ACP 会话的 client，表现就是侧栏里两条一模一样的会话、切过去
-/// 反复断开重连。
-pub(crate) fn pending_restore_session_ids(
-    pending: &[(usize, SessionState)],
-) -> std::collections::HashSet<String> {
-    pending
-        .iter()
-        .flat_map(|(_, state)| {
-            state
-                .acp
-                .as_ref()
-                .and_then(|acp| acp.sid.clone())
-                .into_iter()
-                .chain(crate::pane_state_leaf_ids(&state.layout))
-        })
-        .filter(|id| !id.is_empty())
-        .collect()
-}
-
 pub(crate) fn merge_restore_pending<T: Clone>(mut sessions: Vec<T>, pending: &[(usize, T)]) -> Vec<T> {
     let mut pending = pending.to_vec();
     pending.sort_by_key(|(index, _)| *index);
@@ -685,7 +633,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let is_local = *key == RuntimeKey::Local;
         let mut local_conversations = self
             .sessions
             .iter()
@@ -756,9 +703,6 @@ impl Workspace {
             self.start_directory_restore(runtime, added, window, cx);
         } else if !added.is_empty() {
             self.restore_incoming_conversations(runtime, added, window, cx);
-        }
-        if inbound.first && is_local {
-            self.reconcile_remote_catalog_projection(window, cx);
         }
         self.save_state(cx);
         cx.notify();
@@ -864,15 +808,12 @@ impl Workspace {
         .detach();
     }
 
-    /// 一段会话在运行时目录里该是的样子。不进目录的（远程投影的终端）返回 `None`。
+    /// 一段会话在运行时目录里该是的样子。ACP 视图还没就绪时返回 `None`。
     fn directory_conversation(
         &self,
         session: &crate::Session,
         cx: &App,
     ) -> Option<WorkspaceConversation> {
-        if !in_workspace_directory(session) {
-            return None;
-        }
         let last_updated_at = session.effective_updated_at(cx).min(i64::MAX as u64) as i64;
         let (terminals, acp) = match &session.kind {
             SessionKind::Term { dock, active } => {
@@ -1218,42 +1159,10 @@ mod workspace_snapshot_write_queue_tests {
 mod agent_conversation_persist_tests {
     use super::{
         RuntimeKey, SavedConversationUi, acp_directory, acp_saved_from_directory,
-        conversation_from_record, conversation_record, persist_in_workspace_snapshot, project_key,
-        project_roots_of, session_state_from_conversation, unproject_acp_when_remote_catalog_drops,
+        conversation_from_record, conversation_record, project_key, project_roots_of,
+        session_state_from_conversation,
     };
     use smelt_model::workspace_directory::{WorkspaceAcp, WorkspaceConversation, WorkspaceTerminal};
-
-    /// 复现：手机/远程投影的 ACP 若不当工作区会话落盘，daemon 冷启动清空远程目录后
-    /// 全局对话从侧栏消失，项目里的对话却还在。
-    #[test]
-    fn remote_owned_acp_conversations_are_workspace_durable() {
-        assert!(
-            persist_in_workspace_snapshot(true, true),
-            "ACP 对话必须进工作区目录，即使最初是远程投影"
-        );
-        assert!(
-            persist_in_workspace_snapshot(true, false),
-            "本机开的 ACP 对话本来就要落盘"
-        );
-        assert!(
-            !persist_in_workspace_snapshot(false, true),
-            "远程终端 PTY 随进程死去，不能当开着的标签存"
-        );
-        assert!(persist_in_workspace_snapshot(false, false));
-    }
-
-    #[test]
-    fn daemon_restart_does_not_unproject_an_open_acp_conversation() {
-        assert!(
-            !unproject_acp_when_remote_catalog_drops(true, false),
-            "远程目录被冷启动清空不是用户删除"
-        );
-        assert!(
-            unproject_acp_when_remote_catalog_drops(true, true),
-            "误投影的后台 session 仍然要拆掉"
-        );
-        assert!(!unproject_acp_when_remote_catalog_drops(false, false));
-    }
 
     /// 智能体 space 上的 ACP 对话经运行时目录走一趟，恢复用到的字段都还在。
     #[test]

@@ -259,27 +259,6 @@ mod restore_order_tests {
         assert!(should_auto_resume_active_acp(true));
     }
 
-    /// 启动时远程目录比存档恢复先到。排队中的会话必须算作「已占用这个 id」，
-    /// 否则手机建的会话会被投影一份、恢复再装一份。
-    #[test]
-    fn pending_restores_reserve_their_daemon_session_ids() {
-        let mut terminal = state("term-0", false);
-        terminal.layout = PaneState::Leaf {
-            cwd: Some("/term-0".into()),
-            id: Some("term-sid".into()),
-            custom_title: None,
-            launch_label: None,
-            launch_cmd: None,
-        };
-        let pending = vec![(0, terminal), (1, state("acp-1", true))];
-
-        let ids = crate::pending_restore_session_ids(&pending);
-
-        assert!(ids.contains("term-sid"));
-        assert!(ids.contains("sid-acp-1"));
-        assert_eq!(ids.len(), 2);
-    }
-
     #[test]
     fn user_session_mutation_disables_saved_index_insertion() {
         assert_eq!(planned_restore_insert_position(&[1, 3], 2, 2), Some(1));

@@ -147,36 +147,6 @@ pub struct AgentProfileRecord {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RemoteSessionCatalogSnapshot {
-    pub acp: Vec<RemoteAcpSessionRecord>,
-    pub terminal: Vec<RemoteTerminalSessionRecord>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RemoteAcpSessionRecord {
-    pub id: String,
-    pub cwd: String,
-    pub title: String,
-    pub agent_option_id: String,
-    pub agent: String,
-    pub launch_command: String,
-    pub launch_env_json: Vec<u8>,
-    pub resume_id: Option<String>,
-    pub created_at: i64,
-    pub lifecycle: String,
-    pub hidden: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RemoteTerminalSessionRecord {
-    pub id: String,
-    pub cwd: String,
-    pub title: String,
-    pub created_at: i64,
-    pub lifecycle: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublishedSessionSnapshot {
     pub version: u32,
     pub sessions: Vec<PublishedSessionRecord>,
