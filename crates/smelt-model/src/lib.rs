@@ -22,6 +22,7 @@ pub mod copilot_quota;
 pub mod daemon_state;
 pub mod default_conversation;
 pub mod font_config;
+pub mod kitty_graphics;
 pub mod launch_settings;
 pub mod memory_settings;
 pub mod new_session;
