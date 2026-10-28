@@ -81,6 +81,7 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
   final _pinnedDefault = ValueNotifier<(String, String)?>(null);
   StreamSubscription<(String, AttentionItem)>? _attention;
   Timer? _attentionBannerTimer;
+  ScaffoldMessengerState? _attentionMessenger;
   AppUpdater? _updater;
 
   /// 每个版本只提示一次：查到了、下好了各一次。
@@ -128,6 +129,7 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
   void dispose() {
     _attention?.cancel();
     _attentionBannerTimer?.cancel();
+    _attentionMessenger?.hideCurrentMaterialBanner();
     _updater?.removeListener(_onUpdate);
     _sessionFilter.dispose();
     _tabNotifier.dispose();
@@ -188,6 +190,7 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
     final session = model.catalog.session(runtimeId, item.sessionId);
     final machine = model.fleet.runtime(runtimeId)?.name;
     final messenger = ScaffoldMessenger.of(context);
+    _attentionMessenger = messenger;
     _attentionBannerTimer?.cancel();
     messenger.hideCurrentMaterialBanner();
     messenger.showMaterialBanner(
