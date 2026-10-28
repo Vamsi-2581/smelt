@@ -134,7 +134,7 @@ pub(crate) fn handle_conn<C: ClientSocket + crate::protocol::PeerSource>(
         }
         DaemonOperation::AcpRestart => handle_acp_restart(conn, &v, &acp_sessions, &event_hub),
         DaemonOperation::List => handle_list(conn, &sessions, &acp_sessions),
-        DaemonOperation::HistoryRename => handle_history_rename(conn, &v, &event_hub),
+        DaemonOperation::HistoryRename => handle_history_rename(conn, &v, &sessions, &event_hub),
         DaemonOperation::AutomationsSnapshot => {
             handle_automations_snapshot(conn, &automations, &event_hub)
         }
@@ -143,7 +143,7 @@ pub(crate) fn handle_conn<C: ClientSocket + crate::protocol::PeerSource>(
         }
         DaemonOperation::EventPublish => handle_event_publish(conn, &v, &automations, &event_hub),
         DaemonOperation::ConversationRename => {
-            handle_conversation_rename(conn, &v, &acp_sessions, &event_hub)
+            handle_conversation_rename(conn, &v, &sessions, &acp_sessions, &event_hub)
         }
         DaemonOperation::Kill => handle_kill(conn, &v, &sessions, &event_hub),
         DaemonOperation::Upgrade => handle_upgrade(conn, &v),

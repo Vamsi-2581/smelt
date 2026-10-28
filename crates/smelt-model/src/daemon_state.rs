@@ -70,6 +70,10 @@ pub struct DaemonSessionState {
     /// 对话切换走。旧守护不报该字段时为 None，退化成纯终端标题语义。
     #[serde(default)]
     pub conversation_id: Option<String>,
+    /// 用户给 `conversation_id` 那段对话起的名字（历史页、侧栏改名写的同一份），守护按
+    /// 身份查好推来。
+    #[serde(default)]
+    pub custom_title: Option<String>,
     #[serde(default)]
     pub cwd: Option<String>,
     /// unix 秒，进入当前 phase 的时刻。
@@ -124,6 +128,7 @@ impl Default for DaemonSessionState {
             launch: None,
             provider: None,
             conversation_id: None,
+            custom_title: None,
             cwd: None,
             phase_since: 0,
             updated_at: 0,

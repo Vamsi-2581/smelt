@@ -872,7 +872,6 @@ pub(crate) use smelt_model::agent_status::AgentStatus;
 pub(crate) use smelt_ui::daemon_states_global::{
     AttentionGlobal, AttentionItem, AttentionKind, DaemonStates,
 };
-pub(crate) use smelt_ui::history_titles_global::HistoryTitles;
 
 /// 按稳定 session id 读取守护状态镜像；终端 pane 和 ACP 会话必须共用这一个入口，
 /// 否则状态栏会出现 attention 已完成、ACP 本地快照仍显示运行中的双事实源竞态。
@@ -1511,10 +1510,10 @@ impl CopySessionIdSource {
     }
 }
 
-/// 用户给这段对话起过的名字（历史页 / 侧栏改名写的是同一份覆盖层）。
+/// 用户给这一格当前那段对话起过的名字（历史页 / 侧栏改名写的是同一份）。运行时按
+/// 这一格的身份查好，随会话状态推来。
 fn pane_conversation_custom_title(view: &Entity<TerminalView>, cx: &App) -> Option<String> {
-    let (agent, conversation_id) = pane_conversation_identity(view, cx)?;
-    HistoryTitles::get(agent.id(), None, &conversation_id, cx)
+    daemon_state_for(view, cx)?.custom_title
 }
 
 /// 侧栏分屏子行显示的 pane 标题：用户改过名就用改的，否则走自动推导。
@@ -2394,12 +2393,6 @@ struct Workspace {
     /// 历史会话标题搜索框；只过滤已加载列表，不触发 transcript 重扫。
     history_filter: Option<Entity<gpui_component::input::InputState>>,
     _history_filter_sub: Option<Subscription>,
-    /// 上一次把用户命名覆盖层读进 `HistoryTitles` 缓存的时刻。侧栏每帧都要用它，
-    /// 但改名本身会写穿缓存，所以这里只是低频兜底（覆盖移动端/历史页的远端改名）。
-    /// 缓存变了由 `_history_titles_sub` 重绘，这里不直接 notify。
-    history_titles_at: Option<Instant>,
-    /// 是否已有一次后台重读在路上，防止逐帧重复 spawn。
-    history_titles_inflight: bool,
     /// 当前选中查看的历史会话；None 表示未选。
     session_detail: Option<session_history::OpenedHistory>,
     /// 历史会话右键删除的二次确认目标（None = 没在删除）。
@@ -2542,9 +2535,6 @@ struct Workspace {
     _agent_hosts_sub: Option<Subscription>,
     /// provider 账户状态（额度）变化时重绘侧栏额度行。
     _provider_status_sub: Option<Subscription>,
-    /// 侧栏 pane 标题在 render 里读 `HistoryTitles`。读 Global 不会自动订阅，
-    /// 后台覆盖层刷新、另一扇窗口和手机上的改名都靠这里把工作台标脏。
-    _history_titles_sub: Option<Subscription>,
     /// 外观全局变化。不能放进 `settings_subs`：设置滑块重建时会清掉那个 vec。
     _appearance_sub: Option<Subscription>,
     /// 侧栏按哪一天算的「今天」。跨日检查拿它比，见 [`Self::start_date_change_watch`]。
@@ -2844,8 +2834,6 @@ impl Workspace {
             history_agent_bindings: HashMap::new(),
             history_filter: None,
             _history_filter_sub: None,
-            history_titles_at: None,
-            history_titles_inflight: false,
             session_detail: None,
             delete_history_target: None,
             history_detail_list_state: gpui::ListState::new(0, gpui::ListAlignment::Top, px(800.)),
@@ -2942,7 +2930,6 @@ impl Workspace {
             _agent_host_sub: None,
             _agent_hosts_sub: None,
             _provider_status_sub: None,
-            _history_titles_sub: None,
             _appearance_sub: None,
             shown_date: Local::now().date_naive(),
             _date_change_timer: None,
@@ -3022,8 +3009,6 @@ impl Workspace {
                 |_, _, cx| cx.notify(),
             ),
         );
-        ws._history_titles_sub =
-            Some(cx.observe_global_in::<HistoryTitles>(window, |_, _, cx| cx.notify()));
         ws._appearance_sub = Some(
             cx.observe_global_in::<Appearance>(window, |this, _window, cx| {
                 this.schedule_visible_refresh(cx)
@@ -4169,7 +4154,6 @@ fn main() {
         let daemon_states = DaemonStates::default();
         cx.set_global(daemon_states);
         cx.set_global(WorkspaceDirectoriesGlobal::default());
-        cx.set_global(HistoryTitles::default());
         // provider 账户状态（额度 + Pi 模型目录版本）：刷新循环写，侧栏和对话
         // 模型菜单读。必须在建 Workspace 之前装好，否则启动首查无处可写。
         cx.set_global(smelt_ui::provider_status_global::ProviderStatus::default());

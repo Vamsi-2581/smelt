@@ -1415,14 +1415,8 @@ impl Workspace {
         } else {
             settings::initial_acp_config_for(&RuntimeKey::Local, agent, &[], cx)
         };
-        // 智能体名是动态身份，不是用户给某段会话的命名覆盖层。无用户标题时，
-        // Session::title 会按自动标题、当前智能体名依次回退。
-        let custom_title = crate::HistoryTitles::get(
-            settings::HistorySourceKind::from(agent).id(),
-            profile_id.as_deref(),
-            &resume_id,
-            cx,
-        );
+        // 用户给这段对话起的名字在运行时，建好后随工作区目录推来（按 provider 身份现算）。
+        let custom_title = None;
         let agent_definition_id = definition.map(|definition| definition.id);
         if let Some(id) = agent_definition_id.as_deref() {
             crate::session_history::remember_history_agent(
@@ -2724,55 +2718,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 把用户命名覆盖层读进 `HistoryTitles` 缓存。
-    ///
-    /// 改名走写穿，本地改完立即可见；这里只负责兜住不经过本窗口的写入（历史页、
-    /// 移动端、另一扇窗口），因此 5 秒一次足够，且必须在后台线程读存储——侧栏
-    /// 渲染路径上不允许出现同步存储访问。内容变了由 `HistoryTitles` 的观察者重绘
-    /// 工作台，这里不再单独 notify。
-    pub(crate) fn refresh_history_titles(&mut self, cx: &mut Context<Self>) {
-        let fresh = self
-            .history_titles_at
-            .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(5));
-        if fresh || self.history_titles_inflight {
-            return;
-        }
-        self.history_titles_inflight = true;
-        cx.spawn(async move |this, cx| {
-            let titles = cx
-                .background_executor()
-                .spawn(async move {
-                    use smelt_runtime_client::protocol::control::EmptyParams;
-                    use smelt_runtime_client::protocol::history::HistoryTitlesCall;
-                    crate::runtime_call::call::<HistoryTitlesCall>(
-                        EmptyParams::default(),
-                        crate::runtime_call::RUNTIME_CALL_TIMEOUT,
-                    )
-                    .map(|result| {
-                        result
-                            .titles
-                            .into_iter()
-                            .map(|t| ((t.agent, t.profile_id, t.resume_id), t.title))
-                            .collect::<std::collections::HashMap<_, _>>()
-                    })
-                })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.history_titles_inflight = false;
-                this.history_titles_at = Some(Instant::now());
-                // 取不到时保留上一份，5 秒后再试；空表会把侧栏标题全打回原始值。
-                match titles {
-                    Ok(titles) => crate::HistoryTitles::replace_all(titles, cx),
-                    Err(error) => eprintln!(
-                        "[history] 读取会话标题失败：{}",
-                        crate::runtime_call::error_text(error)
-                    ),
-                }
-            });
-        })
-        .detach();
-    }
-
     /// `runtime`：这段对话的存档在哪台机器上。
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn set_history_custom_title(
@@ -2796,13 +2741,6 @@ impl Workspace {
             eprintln!("[session-metadata] 保存会话名称失败: {error}");
             return;
         }
-        crate::HistoryTitles::set(
-            agent.id(),
-            profile_id.as_deref(),
-            &resume_id,
-            custom_title.as_deref(),
-            cx,
-        );
 
         let key = session_history::session_list_key(agent, profile_id.as_deref(), &cwd);
         if let Some((_, list)) = self.session_list.get_mut(&key) {

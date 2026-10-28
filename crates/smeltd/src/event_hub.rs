@@ -710,6 +710,7 @@ fn session_dto(state: &SessionState) -> SessionStateChanged {
         launch: state.launch.clone(),
         provider: state.provider.clone(),
         conversation_id: state.conversation_id.clone(),
+        custom_title: state.custom_title.clone(),
         title: state.title.clone(),
         phase: match state.phase {
             Phase::Connecting => CoreSessionPhase::Connecting,

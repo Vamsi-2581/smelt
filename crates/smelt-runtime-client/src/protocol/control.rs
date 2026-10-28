@@ -120,7 +120,6 @@ define_control_methods! {
     HistoryList => (HISTORY_LIST_METHOD, "history.list"),
     HistoryDetail => (HISTORY_DETAIL_METHOD, "history.detail"),
     HistoryDelete => (HISTORY_DELETE_METHOD, "history.delete"),
-    HistoryTitles => (HISTORY_TITLES_METHOD, "history.titles"),
     AgentHostGet => (AGENT_HOST_GET_METHOD, "agent.host.get"),
     AgentHostApplyEdit => (AGENT_HOST_APPLY_EDIT_METHOD, "agent.host.apply_edit"),
     LaunchGet => (LAUNCH_GET_METHOD, "launch.get"),
@@ -647,7 +646,7 @@ mod tests {
                 Some(*method)
             );
         }
-        assert_eq!(names.len(), 123);
+        assert_eq!(names.len(), 122);
     }
 
     #[test]

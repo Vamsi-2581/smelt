@@ -189,10 +189,16 @@ fn dispatch_control(
         history @ (ControlMethod::HistoryList
         | ControlMethod::HistoryDetail
         | ControlMethod::HistoryDelete
-        | ControlMethod::HistoryTitles
         | ControlMethod::HistoryRememberAgent) => {
             match super::history_control::dispatch(history, params) {
-                Ok(result) => success_value(control_version, &request_id, result),
+                Ok(result) => {
+                    if history == ControlMethod::HistoryDelete {
+                        // 删存档连同名字一起清：侧栏里对这段对话的名字跟着变。
+                        super::workspace_directory::publish_current(event_hub);
+                        super::terminal_names::refresh_all(sessions, event_hub);
+                    }
+                    success_value(control_version, &request_id, result)
+                }
                 Err(error) => error_value(control_version, request_id, error),
             }
         }
@@ -793,9 +799,11 @@ fn dispatch_control(
             directory_response(
                 control_version,
                 request_id,
-                super::workspace_directory::default_store().and_then(|store| {
-                    super::workspace_directory::rename(&store, &params, acp_sessions, event_hub)
-                }),
+                super::workspace_directory::default_store()
+                    .and_then(|store| {
+                        super::workspace_directory::rename(&store, &params, acp_sessions, event_hub)
+                    })
+                    .inspect(|_| super::terminal_names::refresh_all(sessions, event_hub)),
             )
         }
         ControlMethod::WorkspaceDirectoryGet => {

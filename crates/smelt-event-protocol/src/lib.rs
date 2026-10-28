@@ -15,8 +15,11 @@ use std::{fmt, str::FromStr};
 ///
 /// v4：远程会话目录下线，`remote_sessions.changed`、它的快照和读权限删掉。手机、命令行、
 /// 智能体新建的对话由运行时直接写进工作区目录，客户端只看 `workspace.changed`。
-pub const EVENT_BUS_PROTOCOL_VERSION: u16 = 4;
-pub const MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION: u16 = 4;
+///
+/// v5：会话状态多了 `custom_title`（终端当前那段对话的名字，守护按身份查好）。会话状态
+/// 严格解码，旧客户端认不出这个字段，所以升版。
+pub const EVENT_BUS_PROTOCOL_VERSION: u16 = 5;
+pub const MIN_SUPPORTED_EVENT_BUS_PROTOCOL_VERSION: u16 = 5;
 
 pub const CORE_PROJECTION_VERSION: u16 = 1;
 /// v2 起 SessionStateChanged 带 hook 检测到的 provider，v3 起再带 provider 自己的
@@ -390,6 +393,10 @@ pub struct SessionStateChanged {
     /// 客户端据此把会话对上 provider 的历史存档（改名、显示名跟随对话）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
+    /// 用户给 `conversation_id` 那段对话起的名字（`history_title` 的投影），守护在换对话、
+    /// 改名时查好。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_title: Option<String>,
     pub title: Option<String>,
     pub phase: CoreSessionPhase,
     #[serde(rename = "phase_since")]

@@ -51,6 +51,10 @@ pub(crate) struct SessionState {
     /// 能不能续接不看这里，看 [`Self::cli_exited`]。
     #[serde(default)]
     pub(crate) conversation_id: Option<String>,
+    /// 用户给 `conversation_id` 那段对话起的名字。只是 `history_title` 的投影，由
+    /// [`crate::terminal_names`] 在换对话、改名时写；`conversation_id` 变了就清掉。
+    #[serde(default)]
+    pub(crate) custom_title: Option<String>,
     /// CLI 进程已经退出、终端回到 shell。`SessionEnded` 置位；之后又有
     /// `SessionStarted`，或相位门控放行的活事件，再清掉。对话 id 不受影响。
     /// 为 true 时这条终端不能 `--resume`（见 `resume_of`）。不发 SessionEnd 的
@@ -123,6 +127,7 @@ impl Default for SessionState {
             agent_token: String::new(),
             title: None,
             conversation_id: None,
+            custom_title: None,
             cli_exited: false,
             phase: Phase::Idle,
             phase_since: 0,
@@ -268,6 +273,8 @@ fn switch_conversation(state: &mut SessionState, event: &AgentEvent) -> BindingT
     if state.conversation_id.is_some() {
         state.title = None;
     }
+    // 名字属于上一段对话；这一段的由 `terminal_names::refresh` 随后查上来。
+    state.custom_title = None;
     state.conversation_id = Some(id.to_string());
     BindingTransition::Switched
 }
@@ -448,6 +455,7 @@ mod agent_event_reducer_tests {
         named.conversation_title = Some("Compare Pi and Codex".into());
         apply_agent_event(&mut state, &named);
 
+        state.custom_title = Some("用户起的名".into());
         let mut same = event(AgentEventKind::ToolFinished);
         same.conversation_id = Some("conv-1".into());
         apply_agent_event(&mut state, &same);
@@ -456,12 +464,14 @@ mod agent_event_reducer_tests {
             Some("Compare Pi and Codex"),
             "同一段对话的后续事件不该清掉标题"
         );
+        assert_eq!(state.custom_title.as_deref(), Some("用户起的名"));
 
         let mut switched = event(AgentEventKind::SessionStarted);
         switched.conversation_id = Some("conv-2".into());
         apply_agent_event(&mut state, &switched);
         assert_eq!(state.conversation_id.as_deref(), Some("conv-2"));
         assert_eq!(state.title, None, "上一段对话的标题必须让位给新对话");
+        assert_eq!(state.custom_title, None, "用户给上一段对话起的名字也让位");
     }
 
     /// 子任务事件可能带子会话自己的 id；让它改写绑定会把主对话冲掉。

@@ -5,6 +5,7 @@ use super::super::*;
 pub(super) fn handle_conversation_rename<C: ClientSocket>(
     conn: C,
     v: &serde_json::Value,
+    sessions: &Sessions,
     acp_sessions: &AcpSessions,
     event_hub: &EventHubHandle,
 ) {
@@ -30,6 +31,7 @@ pub(super) fn handle_conversation_rename<C: ClientSocket>(
             event_hub,
         )
         .map_err(|error| error.message)?;
+        crate::terminal_names::refresh_all(sessions, event_hub);
         Ok(smelt_core::session_control::AgentConversationSummary {
             session_id: acp.sid,
             title: title.to_string(),

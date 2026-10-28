@@ -719,6 +719,7 @@ mod tests {
             launch: Some("agent".to_string()),
             provider: Some("codex".to_string()),
             conversation_id: Some(format!("conv-{id}")),
+            custom_title: None,
             title: Some(id.to_string()),
             phase: CoreSessionPhase::Thinking,
             phase_since_unix_seconds: 10,

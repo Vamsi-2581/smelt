@@ -133,6 +133,7 @@ mod session_catalog;
 mod session_control;
 mod session_directory;
 mod session_state;
+mod terminal_names;
 mod terminal_output;
 mod terminal_progress;
 mod terminal_registry;
@@ -1020,6 +1021,7 @@ fn apply_history_rename(
 fn handle_history_rename<C: ClientSocket>(
     mut conn: C,
     v: &serde_json::Value,
+    sessions: &Sessions,
     event_hub: &EventHubHandle,
 ) {
     let result = (|| -> Result<(), String> {
@@ -1031,6 +1033,7 @@ fn handle_history_rename<C: ClientSocket>(
         let title = v.get("title").and_then(serde_json::Value::as_str);
         apply_history_rename(kind, profile_id, resume_id, title)?;
         workspace_directory::publish_current(event_hub);
+        terminal_names::refresh_all(sessions, event_hub);
         Ok(())
     })();
     let response = match result {

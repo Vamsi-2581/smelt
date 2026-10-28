@@ -956,6 +956,7 @@ fn dto(id: &str, revision: u64, phase: CoreSessionPhase) -> SessionStateChanged 
         launch: None,
         provider: None,
         conversation_id: None,
+        custom_title: None,
         title: Some(format!("{id} r{revision}")),
         phase,
         phase_since_unix_seconds: 1,
