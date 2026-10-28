@@ -3,17 +3,20 @@
 //! 本机连接和远程（iroh 把 QUIC 流接到一对套接字的一端）交出的都是这个类型，上层的
 //! 阻塞读写、`try_clone`、读写超时、`shutdown` 对两种传输完全一样。
 //!
-//! - Unix：`std::os::unix::net::UnixStream` / `UnixListener`。
+//! - Unix：包着 std 的 `UnixStream` / `UnixListener`，见 [`unix`]：macOS 内核的阻塞读会
+//!   漏掉对端的半关闭，读改成 poll 等可读再非阻塞地读，其余照用 std。
 //! - Windows：系统的 AF_UNIX（Windows 10 1803 起支持），整个自己包，见 [`windows`]：
 //!   系统驱动在阻塞调用上会丢唤醒。方法和 std 的一致，`pair()`、`bind`、`incoming`
 //!   也有。Tokio 在 Windows 上没有 AF_UNIX，守护的接受循环是同步的，不需要把这条监听
 //!   塞进 tokio。
 
+#[cfg(unix)]
+mod unix;
 #[cfg(windows)]
 mod windows;
 
 #[cfg(unix)]
-pub use std::os::unix::net::{UnixListener, UnixStream};
+pub use unix::{UnixListener, UnixStream};
 #[cfg(windows)]
 pub use windows::{UnixListener, UnixStream};
 
@@ -32,8 +35,9 @@ mod tests {
     const ARRIVES: Duration = Duration::from_secs(5);
 
     /// Windows 的 afunix.sys 有个竞态：读刚挂上时对端恰好写入或关闭，唤醒偶尔丢掉，读一
-    /// 直等到超时。每轮让「读」和「对端写完再关」撞在一起，必须先读到数据再读到 EOF。
-    /// 一半轮次对端整个关掉，一半只关写方向（半关闭）。
+    /// 直等到超时；macOS 的内核在阻塞读快要睡下时会漏掉对端的半关闭。每轮让「读」和「对端
+    /// 写完再关」撞在一起，必须先读到数据再读到 EOF。一半轮次对端整个关掉，一半只关写方向
+    /// （半关闭）。
     #[test]
     fn a_read_racing_the_peers_write_and_close_sees_the_bytes_then_eof() {
         for round in 0..1000 {

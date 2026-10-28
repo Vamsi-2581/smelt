@@ -24,6 +24,10 @@ base64 = "0.22"
 tungstenite = "0.29"
 rust-embed = { version = "8", features = ["debug-embed"] }
 
+# Unix 上读不阻塞在内核的 recv 里，用 poll + MSG_DONTWAIT，见 stream/unix.rs。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Windows 上 std 没有 UnixStream，系统 AF_UNIX 由 stream/windows.rs 自己包：建连、
 # 读写、accept 的等待都走 AFD poll，要 windows-sys 的这些 API。
 [target.'cfg(windows)'.dependencies]

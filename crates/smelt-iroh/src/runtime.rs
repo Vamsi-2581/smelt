@@ -278,7 +278,7 @@ fn bridge_tracked(
 ) -> io::Result<(RuntimeStream, tokio::task::JoinHandle<()>)> {
     let (ours, theirs) = RuntimeStream::pair()?;
     ours.set_nonblocking(true)?;
-    let ours = tokio::net::UnixStream::from_std(ours)?;
+    let ours = tokio::net::UnixStream::from_std(ours.into())?;
     Ok((theirs, tokio::spawn(pump(send, recv, ours))))
 }
 

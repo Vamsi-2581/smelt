@@ -11022,6 +11022,7 @@ name = "smelt-runtime-client"
 version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
+ "libc",
  "rust-embed",
  "serde",
  "serde_json",
