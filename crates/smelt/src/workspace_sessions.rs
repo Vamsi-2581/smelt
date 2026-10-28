@@ -1943,7 +1943,14 @@ impl Workspace {
         let Some(space) = self.space_mut(&project.runtime) else {
             return;
         };
-        crate::sidebar_order::toggle_pinned_project(&mut space.pinned_projects, &project.root);
+        crate::sidebar_order::toggle_pinned_project_at_boundary(
+            &mut space.projects,
+            &mut space.pinned_projects,
+            &project.root,
+        );
+        // 和拖拽排序一样滑到新位置，让人看得见它挪去了哪。
+        self.sidebar_reorder_generation += 1;
+        self.sidebar_drop_origin = None;
         self.save_state(cx);
         cx.notify();
     }
