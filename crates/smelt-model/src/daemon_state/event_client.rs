@@ -708,13 +708,17 @@ fn daemon_session_state(state: SessionStateChanged) -> DaemonSessionState {
         launch: state.launch,
         provider: state.provider,
         conversation_id: state.conversation_id,
+        custom_title: state.custom_title,
         cwd: state.cwd,
         phase_since: state.phase_since_unix_seconds,
         updated_at: state.updated_at_unix_seconds,
         structured_events: state.structured_events,
         turn_events: state.turn_events,
+        // 连接数只有会话列表（list op）才带，推送里没有；取和旧守护缺字段时一样的值。
+        connected: true,
+        interactive_connections: 0,
+        watcher_connections: 0,
         runtime: state.runtime,
-        ..Default::default()
     }
 }
 
@@ -1059,6 +1063,35 @@ mod tests {
             client.decode_message(message).unwrap(),
             Some(DaemonStateEvent::Update(state))
                 if state.revision == 5 && state.conversation_id.is_none()
+        ));
+    }
+
+    /// 侧栏终端行的名字只从这里来：守护按对话身份查好推来，改名后靠它刷新。
+    #[test]
+    fn session_projection_carries_the_users_name_for_the_conversation() {
+        let mut client = desktop_client();
+        let mut named = session_dto("session-1", 3, 4);
+        named.custom_title = Some("用户起的名".into());
+        let event = complete_snapshot(&mut client, 7, vec![named.clone()]);
+        assert!(
+            matches!(
+                event,
+                DaemonStateEvent::Snapshot { sessions, .. }
+                    if sessions[0].custom_title.as_deref() == Some("用户起的名")
+            ),
+            "快照必须把用户起的名字带到 UI"
+        );
+
+        named.revision = 5;
+        named.custom_title = Some("改过的名".into());
+        let message = event_message(
+            CORE_TOPIC_SESSION_STATE_CHANGED,
+            serde_json::to_value(named).unwrap(),
+        );
+        assert!(matches!(
+            client.decode_message(message).unwrap(),
+            Some(DaemonStateEvent::Update(state))
+                if state.custom_title.as_deref() == Some("改过的名")
         ));
     }
 
