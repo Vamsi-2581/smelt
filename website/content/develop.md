@@ -31,7 +31,7 @@ cargo build --bin smeltd
   Windows 桌面按需拉起它，Linux 上可以装成 systemd 用户服务。跟 GUI 之间靠本机
   socket 通信（attach 时先回报真实尺寸，再发网格 keyframe 快照与增量输出，重放区间
   按 `replay_len` 划界）。Windows 上 Rust 客户端连 `%USERPROFILE%\.smelt\smeltd.sock`
-  （`uds_windows` 的 AF_UNIX），Bun / Pi 走当前用户的命名管道。就算 GUI 挂了，`smeltd`
+  （AF_UNIX，`stream/windows.rs` 自己包的非阻塞套接字），Bun / Pi 走当前用户的命名管道。就算 GUI 挂了，`smeltd`
   照样把 shell 养着；重开 GUI 按会话 id 自动 reattach。升级守护是先优雅停机再换
   新版本，不交接 fd，进行中的终端会话和回合会中断。手机和另一台桌面经 iroh 连的也是它。
 - **smelt-pi** —— Pi 运行时单二进制，跑官方 JSONL RPC。`make smelt-pi` 走
