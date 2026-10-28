@@ -37,6 +37,14 @@ pub struct WorkspaceSnapshot {
     pub sessions: Vec<WorkspaceSessionRecord>,
 }
 
+/// 工作区目录现在是哪一份、改到第几次。版本号只在同一个 `epoch` 里能比：库换过（删了
+/// 重建、换了一份）`epoch` 就不同，版本号从头数。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkspaceCatalogVersion {
+    pub epoch: String,
+    pub revision: u64,
+}
+
 /// 一次单条改动之后目录的版本。`changed` 为 false 时什么都没写，版本也没动。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorkspaceDirectoryCommit {

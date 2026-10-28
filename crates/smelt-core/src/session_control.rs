@@ -529,6 +529,7 @@ mod tests {
     fn directory_knows_which_session_ids_are_terminals_and_acp() {
         let directory = WorkspaceDirectory {
             revision: 1,
+            epoch: String::new(),
             projects: Vec::new(),
             conversations: vec![
                 WorkspaceConversation {

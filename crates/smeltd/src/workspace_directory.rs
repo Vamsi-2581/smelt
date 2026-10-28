@@ -99,9 +99,7 @@ pub(crate) fn delete_conversation(
         .iter()
         .find(|conversation| conversation.id == id)
     else {
-        return Ok(WorkspaceRevision {
-            revision: directory.revision,
-        });
+        return Ok(directory.version());
     };
     for terminal in conversation.terminals.iter().filter_map(|t| t.id.as_deref()) {
         super::kill_terminal_session(terminal, sessions, event_hub)
@@ -259,9 +257,7 @@ fn publish(change: &DirectoryChange, event_hub: &EventHubHandle) -> WorkspaceRev
     {
         dlog(&format!("推送工作区目录失败：{error}"));
     }
-    WorkspaceRevision {
-        revision: change.directory.revision,
-    }
+    change.directory.version()
 }
 
 fn control_error(error: DirectoryError) -> ControlError {

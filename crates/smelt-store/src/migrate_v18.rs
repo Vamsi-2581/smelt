@@ -209,7 +209,12 @@ pub(crate) fn write_v18_state(
         crate::config::write_runtime_id(transaction, id)?;
     }
     if let Some(revision) = state.workspace_catalog_revision {
-        crate::config::write_workspace_catalog_revision(transaction, revision)?;
+        // v18 的目录表还没有 epoch 列（v29 才加），按那时的形状写。
+        transaction.execute(
+            "INSERT INTO workspace_catalog(id, revision) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET revision = excluded.revision",
+            [i64::try_from(revision).unwrap_or(i64::MAX)],
+        )?;
     }
     for (agent, profile, resume, id) in &state.history_agent_bindings {
         crate::history::write_history_agent_binding(transaction, agent, profile, resume, id)?;

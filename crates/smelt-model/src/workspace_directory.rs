@@ -11,9 +11,12 @@ use crate::agent_kind::ConversationLaunchSpec;
 use crate::conversation::ConversationBinding;
 use crate::runtime_path::PathStyle;
 
-/// 整份目录。`revision` 每次有改动加一。
+/// 整份目录。`revision` 每次有改动加一，只在同一个 `epoch` 里能比，见 [`WorkspaceRevision`]。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceDirectory {
+    /// 运行时这份库的随机身份。库换过（删了重建）就不同，版本号从头数。
+    #[serde(default)]
+    pub epoch: String,
     pub revision: u64,
     /// 打开的项目根目录，按打开的先后。
     #[serde(default)]
@@ -111,10 +114,36 @@ pub struct WorkspaceProjectParams {
     pub root: String,
 }
 
-/// 命令执行后目录的版本。没改动时是原来的版本。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// 目录的版本：哪一份（`epoch`）、改到第几次。命令回执也是它，没改动时是原来的版本。
+///
+/// 版本号只在同一个 `epoch` 里能比。`epoch` 不同说明运行时的库换过，版本号从头数，
+/// 新的那份不能因为数小就被当成旧的扔掉。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceRevision {
+    #[serde(default)]
+    pub epoch: String,
     pub revision: u64,
+}
+
+impl WorkspaceRevision {
+    /// 同一份目录里比 `other` 旧。不同份之间谈不上新旧。
+    pub fn is_older_than(&self, other: &Self) -> bool {
+        self.epoch == other.epoch && self.revision < other.revision
+    }
+
+    /// 收到它时该不该替换手上的 `current`：换了一份，或同一份里更新。
+    pub fn supersedes(&self, current: &Self) -> bool {
+        self.epoch != current.epoch || self.revision > current.revision
+    }
+}
+
+impl WorkspaceDirectory {
+    pub fn version(&self) -> WorkspaceRevision {
+        WorkspaceRevision {
+            epoch: self.epoch.clone(),
+            revision: self.revision,
+        }
+    }
 }
 
 /// cwd 归属哪个项目根：cwd 就是根、或落在根之下（必须是完整路径段，`/a/bc` 不算
@@ -187,6 +216,31 @@ fn label_with_parents(style: PathStyle, root: &str, base: &str, extra: usize) ->
         return base.to_string();
     }
     format!("{} · {}", segs[start..end].join(joiner), base)
+}
+
+#[cfg(test)]
+mod revision_tests {
+    use super::WorkspaceRevision;
+
+    fn at(epoch: &str, revision: u64) -> WorkspaceRevision {
+        WorkspaceRevision {
+            epoch: epoch.into(),
+            revision,
+        }
+    }
+
+    /// 同一份里按版本号比；库换过之后版本号从头数，新的那份不是旧的。
+    #[test]
+    fn revisions_compare_only_within_one_epoch() {
+        assert!(at("a", 3).is_older_than(&at("a", 4)));
+        assert!(!at("a", 4).is_older_than(&at("a", 4)));
+        assert!(!at("b", 1).is_older_than(&at("a", 40)), "换了库");
+
+        assert!(at("a", 5).supersedes(&at("a", 4)));
+        assert!(!at("a", 4).supersedes(&at("a", 4)), "同一份不重复收");
+        assert!(!at("a", 3).supersedes(&at("a", 4)));
+        assert!(at("b", 1).supersedes(&at("a", 40)), "换了库就收新的");
+    }
 }
 
 #[cfg(test)]

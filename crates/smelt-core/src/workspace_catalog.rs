@@ -60,8 +60,8 @@ pub struct DirectoryChange {
 
 pub fn directory_on(store: &smelt_store::Store) -> Result<WorkspaceDirectory, DirectoryError> {
     let _guard = CATALOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let (revision, snapshot) = store.workspace_directory()?;
-    Ok(directory_from_snapshot(revision, snapshot))
+    let (version, snapshot) = store.workspace_directory()?;
+    Ok(directory_from_snapshot(version, snapshot))
 }
 
 pub fn create_conversation_on(
@@ -120,8 +120,8 @@ pub fn forget_session_on(
     session_id: &str,
 ) -> Result<DirectoryChange, DirectoryError> {
     change_on(store, |store| {
-        let (_, snapshot) = store.workspace_directory()?;
-        let directory = directory_from_snapshot(0, snapshot);
+        let (version, snapshot) = store.workspace_directory()?;
+        let directory = directory_from_snapshot(version, snapshot);
         let Some(conversation) = directory.conversations.into_iter().find(|conversation| {
             conversation.acp.as_ref().is_some_and(|acp| acp.sid == session_id)
                 || conversation
@@ -218,9 +218,9 @@ fn change_on(
 ) -> Result<DirectoryChange, DirectoryError> {
     let _guard = CATALOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (changed, removed) = change(store)?;
-    let (revision, snapshot) = store.workspace_directory()?;
+    let (version, snapshot) = store.workspace_directory()?;
     Ok(DirectoryChange {
-        directory: directory_from_snapshot(revision, snapshot),
+        directory: directory_from_snapshot(version, snapshot),
         changed,
         removed,
     })
@@ -235,11 +235,12 @@ fn default_store() -> Result<smelt_store::Store, DirectoryError> {
 }
 
 fn directory_from_snapshot(
-    revision: u64,
+    version: smelt_store::WorkspaceCatalogVersion,
     snapshot: smelt_store::WorkspaceSnapshot,
 ) -> WorkspaceDirectory {
     WorkspaceDirectory {
-        revision,
+        epoch: version.epoch,
+        revision: version.revision,
         projects: snapshot.projects,
         conversations: snapshot
             .sessions

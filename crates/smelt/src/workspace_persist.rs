@@ -539,7 +539,7 @@ fn send_directory_commands(runtime: &Runtime, commands: &DirectoryCommands) -> D
         };
         match client.call::<WorkspaceConversationDelete>(&params, timeout) {
             Ok(revision) => {
-                outcome.confirm(revision.revision);
+                outcome.confirm(revision);
                 outcome.deleted.push(id.clone());
             }
             Err(error) => failed("关闭对话", error),
@@ -548,7 +548,7 @@ fn send_directory_commands(runtime: &Runtime, commands: &DirectoryCommands) -> D
     for conversation in &commands.creates {
         match client.call::<WorkspaceConversationCreate>(conversation, timeout) {
             Ok(revision) => {
-                outcome.confirm(revision.revision);
+                outcome.confirm(revision);
                 outcome.created.push(conversation.clone());
             }
             Err(error) => failed("新建对话", error),
@@ -557,7 +557,7 @@ fn send_directory_commands(runtime: &Runtime, commands: &DirectoryCommands) -> D
     for conversation in &commands.updates {
         match client.call::<WorkspaceConversationUpdate>(conversation, timeout) {
             Ok(revision) => {
-                outcome.confirm(revision.revision);
+                outcome.confirm(revision);
                 outcome.settled.push(conversation.clone());
             }
             // 别处已经关掉了：推送随后会把它从本地摘掉，不必再发。
@@ -664,7 +664,8 @@ impl Workspace {
         let Some(space) = self.space_mut(key) else {
             return;
         };
-        if space.directory.is_stale(directory.revision) {
+        let version = directory.version();
+        if space.directory.is_stale(&version) {
             return;
         }
         local_conversations.extend(
@@ -682,7 +683,7 @@ impl Workspace {
         };
         space.projects = order_by_saved(directory.projects, &order, String::as_str);
         let inbound = space.directory.receive(
-            directory.revision,
+            version,
             directory.conversations,
             &local_conversations,
         );

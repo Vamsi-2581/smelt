@@ -45,8 +45,8 @@ pub use snapshots::{
     PublishedSessionSnapshot, QuotaCacheQuota, QuotaCacheSnapshot,
     QuotaCacheStatusRecord, QuotaCacheWindowRecord, RemoteConfigSnapshot,
     TerminalThemeSnapshot,
-    WorkspaceAcpRecord, WorkspaceDirectoryCommit, WorkspaceSessionRecord, WorkspaceSnapshot,
-    WorkspaceTerminalRecord,
+    WorkspaceAcpRecord, WorkspaceCatalogVersion, WorkspaceDirectoryCommit, WorkspaceSessionRecord,
+    WorkspaceSnapshot, WorkspaceTerminalRecord,
 };
 
 pub const DATABASE_FILE_NAME: &str = "smelt.sqlite3";
@@ -58,7 +58,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 28;
+pub const STORE_SCHEMA_VERSION: u32 = 29;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -232,7 +232,9 @@ impl Store {
     }
 
     /// 工作区目录的当前版本和内容，在同一次读里取，两者对得上。从没写过时内容为空。
-    pub fn workspace_directory(&self) -> Result<(u64, WorkspaceSnapshot), StoreError> {
+    pub fn workspace_directory(
+        &self,
+    ) -> Result<(WorkspaceCatalogVersion, WorkspaceSnapshot), StoreError> {
         imp::workspace_directory(&self.backend)
     }
 
@@ -927,11 +929,11 @@ mod imp {
 
     pub(super) fn workspace_directory(
         backend: &Backend,
-    ) -> Result<(u64, super::WorkspaceSnapshot), StoreError> {
+    ) -> Result<(super::WorkspaceCatalogVersion, super::WorkspaceSnapshot), StoreError> {
         read(backend, |connection| {
-            let revision = crate::config::read_workspace_catalog_revision(connection)?;
+            let version = crate::config::read_workspace_catalog_version(connection)?;
             let snapshot = crate::workspace::read_workspace_snapshot(connection)?;
-            Ok((revision, snapshot.unwrap_or_default()))
+            Ok((version, snapshot.unwrap_or_default()))
         })
     }
 
@@ -1857,6 +1859,16 @@ mod imp {
             transaction.commit()?;
             return Ok(());
         }
+        if current == 28 {
+            apply_v29_workspace_epoch(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            // 没有冻结的 v28 形状：加上 epoch 列后与当前形状逐字一致，就说明原来正是 v28。
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
+            transaction.commit()?;
+            return Ok(());
+        }
         if current == 27 {
             apply_v28_drop_remote_session_catalog(&transaction)?;
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
@@ -2362,7 +2374,21 @@ mod imp {
         if !table_columns(transaction, "remote_acp_session")?.is_empty() {
             transaction.execute_batch(crate::schema::MIGRATE_V27_TO_V28)?;
         }
-        Ok(())
+        apply_v29_workspace_epoch(transaction)
+    }
+
+    /// v29：工作区目录带上这份库的随机身份（epoch）。客户端靠它认出库换过，版本号从头数
+    /// 时不把新目录当成旧的扔掉。
+    fn apply_v29_workspace_epoch(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+        if !table_columns(transaction, "workspace_catalog")?
+            .iter()
+            .any(|column| column == "epoch")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V28_TO_V29)?;
+        }
+        transaction
+            .execute_batch(crate::schema::ENSURE_WORKSPACE_EPOCH)
+            .map_err(StoreError::from)
     }
 
     /// 旧库里每段对话的会话顺序：ACP 会话在前，终端按布局树深度优先，布局树里没挂上的
@@ -3243,8 +3269,9 @@ mod imp {
     }
 
     fn create_current_schema(transaction: &rusqlite::Transaction<'_>) -> Result<(), StoreError> {
+        transaction.execute_batch(crate::schema::CREATE_SCHEMA)?;
         transaction
-            .execute_batch(crate::schema::CREATE_SCHEMA)
+            .execute_batch(crate::schema::ENSURE_WORKSPACE_EPOCH)
             .map_err(StoreError::from)
     }
 
@@ -3341,7 +3368,7 @@ mod imp {
     }
     pub(super) fn workspace_directory(
         _backend: &Backend,
-    ) -> Result<(u64, super::WorkspaceSnapshot), StoreError> {
+    ) -> Result<(super::WorkspaceCatalogVersion, super::WorkspaceSnapshot), StoreError> {
         unsupported()
     }
     pub(super) fn create_workspace_conversation(
@@ -4927,6 +4954,7 @@ CREATE TABLE published_session (
         connection
             .execute_batch(crate::schema::CREATE_SCHEMA)
             .unwrap();
+        connection.execute_batch(V28_WORKSPACE_EPOCH).unwrap();
         connection.execute_batch(V27_REMOTE_SESSION_TABLES).unwrap();
         connection.execute_batch(V26_PROJECT_ROOT_AND_MENU).unwrap();
         connection.execute_batch(V25_WORKSPACE_CATALOG_WRITER).unwrap();
@@ -5067,7 +5095,8 @@ CREATE TABLE published_session (
             .unwrap();
         connection
             .execute_batch(&format!(
-                "{V25_WORKSPACE_CATALOG_WRITER}
+                "{V28_WORKSPACE_EPOCH}
+                 {V25_WORKSPACE_CATALOG_WRITER}
                  INSERT INTO workspace_catalog(id, revision, writer, writer_seq)
                  VALUES (1, 7, 'client-a', 3);"
             ))
@@ -5084,7 +5113,7 @@ CREATE TABLE published_session (
         let connection = rusqlite::Connection::open(&path).unwrap();
         assert_eq!(
             imp::table_columns(&connection, "workspace_catalog").unwrap(),
-            ["id", "revision"]
+            ["id", "revision", "epoch"]
         );
         drop(connection);
         let fresh = dir.join("fresh.sqlite3");
@@ -6691,7 +6720,7 @@ CREATE TABLE published_session (
             Err(StoreError::AcpConversationMissingSid { id }) if id == "c3"
         ));
         assert_eq!(directory_ids(&store), ["c1"]);
-        assert_eq!(store.workspace_directory().unwrap().0, 1);
+        assert_eq!(store.workspace_directory().unwrap().0.revision, 1);
     }
 
     /// 开关项目是单条改动：开过的再开不推进版本；关掉项目，项目下的对话还在。
@@ -6708,8 +6737,8 @@ CREATE TABLE published_session (
 
         assert!(store.close_workspace_project("/repo").unwrap().changed);
         assert!(!store.close_workspace_project("/repo").unwrap().changed);
-        let (revision, snapshot) = store.workspace_directory().unwrap();
-        assert_eq!(revision, 4);
+        let (version, snapshot) = store.workspace_directory().unwrap();
+        assert_eq!(version.revision, 4);
         assert_eq!(snapshot.projects, ["/other"]);
         assert_eq!(directory_ids(&store), ["c1"]);
         assert!(matches!(
@@ -6723,6 +6752,11 @@ CREATE TABLE published_session (
     const V25_WORKSPACE_CATALOG_WRITER: &str = "
 ALTER TABLE workspace_catalog ADD COLUMN writer TEXT;
 ALTER TABLE workspace_catalog ADD COLUMN writer_seq INTEGER;
+";
+
+    /// v28 及更早的目录表没有 epoch 列。用当前结构的库退回旧版本做夹具时先去掉。
+    const V28_WORKSPACE_EPOCH: &str = "
+ALTER TABLE workspace_catalog DROP COLUMN epoch;
 ";
 
     /// v27 及更早还在、v28 删掉的远程会话目录两张表。用当前结构的库退回旧版本做夹具时补上。
@@ -6829,9 +6863,10 @@ CREATE TABLE worktree_inherit_skip_pattern (
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(&format!(
-                "{V21_SESSION_TABLES}
+                "{V28_WORKSPACE_EPOCH}
+                 {V21_SESSION_TABLES}
                  {V21_LAYOUT_NODE_TABLE}
-                 INSERT INTO workspace_catalog(id, revision) VALUES (1, 41);
+                 UPDATE workspace_catalog SET revision = 41;
                  {V19_WORKTREE_INHERIT_TABLES}
                  INSERT INTO worktree_inherit(id, enabled) VALUES (1, 1);"
             ))
@@ -6859,6 +6894,55 @@ CREATE TABLE worktree_inherit_skip_pattern (
         );
     }
 
+    /// 目录带着这份库的身份：建库就有，改动不变；同一个路径删了重建是另一份。
+    #[test]
+    fn the_workspace_epoch_names_this_database() {
+        let dir = temp_dir("workspace-epoch");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let store = Store::open_or_create(&path).unwrap();
+        let (fresh, _) = store.workspace_directory().unwrap();
+        assert_eq!(fresh.revision, 0);
+        assert_eq!(fresh.epoch.len(), 32, "{:?}", fresh.epoch);
+
+        store.open_workspace_project("/repo").unwrap();
+        let (changed, _) = store.workspace_directory().unwrap();
+        assert_eq!(changed.epoch, fresh.epoch, "改动不换身份");
+        assert_eq!(changed.revision, 1);
+
+        drop(store);
+        std::fs::remove_file(&path).unwrap();
+        let rebuilt = Store::open_or_create(&path).unwrap();
+        let (reset, _) = rebuilt.workspace_directory().unwrap();
+        assert_eq!(reset.revision, 0);
+        assert_ne!(reset.epoch, fresh.epoch, "删了重建是另一份目录");
+    }
+
+    /// v28 的库：目录表补上 epoch，版本号照旧，形状和新建的一样。
+    #[test]
+    fn migrates_v28_adding_a_workspace_epoch() {
+        let dir = temp_dir("migrate-v28-epoch");
+        let path = dir.join(DATABASE_FILE_NAME);
+        let fresh = dir.join("fresh.sqlite3");
+        drop(Store::open_or_create(&fresh).unwrap());
+        drop(Store::open_or_create(&path).unwrap());
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "{V28_WORKSPACE_EPOCH}
+                 UPDATE workspace_catalog SET revision = 41;"
+            ))
+            .unwrap();
+        connection.pragma_update(None, "user_version", 28).unwrap();
+        drop(connection);
+
+        let store = Store::open_or_create(&path).unwrap();
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        let (version, _) = store.workspace_directory().unwrap();
+        assert_eq!(version.revision, 41);
+        assert_eq!(version.epoch.len(), 32, "{:?}", version.epoch);
+        assert_eq!(normalized_schema(&path), normalized_schema(&fresh));
+    }
+
     /// v26 的库：会话组上存的所属项目和侧栏菜单表删掉。会话那一串表要整串重建，
     /// 对话、会话、ACP 明细、启动环境、配置值一行都不能少，外键也要接到新表上。
     #[test]
@@ -6869,7 +6953,8 @@ CREATE TABLE worktree_inherit_skip_pattern (
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(&format!(
-                "{V27_REMOTE_SESSION_TABLES}
+                "{V28_WORKSPACE_EPOCH}
+                 {V27_REMOTE_SESSION_TABLES}
                  {V26_PROJECT_ROOT_AND_MENU}
                  INSERT INTO project(root, position) VALUES ('/repo', 0);
                  INSERT INTO session_group(id, position, custom_title, last_updated_at, project_root)
@@ -6951,7 +7036,8 @@ CREATE TABLE worktree_inherit_skip_pattern (
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection
             .execute_batch(&format!(
-                "{V21_SESSION_TABLES}
+                "{V28_WORKSPACE_EPOCH}
+                 {V21_SESSION_TABLES}
                  {V21_LAYOUT_NODE_TABLE}
                  {V25_WORKSPACE_CATALOG_WRITER}
                  UPDATE workspace_catalog SET writer = 'client-a', writer_seq = 1;
@@ -6966,15 +7052,14 @@ CREATE TABLE worktree_inherit_skip_pattern (
 
         let store = Store::open_or_create(&path).unwrap();
         assert_eq!(store.runtime_id().unwrap().as_deref(), Some("runtime-1"));
+        let (version, snapshot) = store.workspace_directory().unwrap();
+        assert_eq!(version.revision, 1);
         assert_eq!(
-            store.workspace_directory().unwrap(),
-            (
-                1,
-                WorkspaceSnapshot {
-                    projects: vec!["/a".to_string()],
-                    sessions: Vec::new(),
-                }
-            )
+            snapshot,
+            WorkspaceSnapshot {
+                projects: vec!["/a".to_string()],
+                sessions: Vec::new(),
+            }
         );
         assert_eq!(
             store.get_remote_config_snapshot().unwrap(),
@@ -7186,7 +7271,8 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
             let connection = rusqlite::Connection::open(&path).unwrap();
             connection
                 .execute_batch(&format!(
-                    "{V27_REMOTE_SESSION_TABLES}
+                    "{V28_WORKSPACE_EPOCH}
+                 {V27_REMOTE_SESSION_TABLES}
                      {V26_PROJECT_ROOT_AND_MENU}
                      {V21_SESSION_TABLES}
                      {layout_node_table}

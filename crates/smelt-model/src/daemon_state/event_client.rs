@@ -23,7 +23,7 @@ use smelt_runtime_client::protocol::daemon::DaemonOperation;
 
 use super::{DaemonPhase, DaemonSessionState, DaemonStateEvent};
 use crate::automation::AutomationFile;
-use crate::workspace_directory::WorkspaceDirectory;
+use crate::workspace_directory::{WorkspaceDirectory, WorkspaceRevision};
 
 #[derive(Clone, Copy)]
 struct SessionWatermark {
@@ -129,8 +129,33 @@ struct ReplacementRevisions {
     revision: Option<u64>,
 }
 
-type WorkspaceRevisions = ReplacementRevisions;
 type AutomationFileRevisions = ReplacementRevisions;
+
+/// 工作区目录的水位。版本号只在同一份库里能比（见 [`WorkspaceRevision`]）：运行时的库换过，
+/// 新目录的版本号从头数，不能因为数小被当成旧的丢掉。
+#[derive(Default)]
+struct WorkspaceRevisions {
+    current: Option<WorkspaceRevision>,
+}
+
+impl WorkspaceRevisions {
+    fn reset_from_snapshot(&mut self, directory: Option<&WorkspaceDirectory>) {
+        self.current = directory.map(WorkspaceDirectory::version);
+    }
+
+    fn accept_update(&mut self, directory: &WorkspaceDirectory) -> bool {
+        let version = directory.version();
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|current| !version.supersedes(current))
+        {
+            return false;
+        }
+        self.current = Some(version);
+        true
+    }
+}
 
 impl ReplacementRevisions {
     fn reset_from_snapshot(&mut self, revision: Option<u64>) {
@@ -464,7 +489,7 @@ impl DaemonStateEventClient {
             .expect("complete snapshot batch contains sessions");
         self.revisions.reset_from_snapshot(&sessions);
         self.workspace_revisions
-            .reset_from_snapshot(pending.workspace.as_ref().map(|value| value.revision));
+            .reset_from_snapshot(pending.workspace.as_ref());
         self.automation_revisions
             .reset_from_snapshot(pending.automations.as_ref().map(|value| value.revision));
         Ok(Some(DaemonStateEvent::Snapshot {
@@ -500,7 +525,7 @@ impl DaemonStateEventClient {
                 let directory: WorkspaceDirectory = decode_projection_event(payload, topic)?;
                 Ok(self
                     .workspace_revisions
-                    .accept_update(directory.revision)
+                    .accept_update(&directory)
                     .then_some(DaemonStateEvent::Workspace(directory)))
             }
             CORE_TOPIC_AUTOMATIONS_CHANGED if self.shape.automations => {
@@ -592,7 +617,7 @@ impl DaemonStateEventClient {
                 };
                 Ok(self
                     .workspace_revisions
-                    .accept_update(directory.revision)
+                    .accept_update(&directory)
                     .then_some(DaemonStateEvent::Workspace(directory)))
             }
             _ => Ok(None),
@@ -994,7 +1019,7 @@ mod tests {
 
     #[test]
     fn replacement_revision_tracker_rejects_duplicate_and_older_replacements() {
-        let mut tracker = WorkspaceRevisions::default();
+        let mut tracker = AutomationFileRevisions::default();
         tracker.reset_from_snapshot(Some(10));
 
         assert!(!tracker.accept_update(10));
@@ -1005,7 +1030,7 @@ mod tests {
         assert!(tracker.accept_update(1));
         assert!(!tracker.accept_update(0));
 
-        let mut legacy = WorkspaceRevisions::default();
+        let mut legacy = AutomationFileRevisions::default();
         assert!(legacy.accept_update(0));
         assert!(legacy.accept_update(0));
     }
@@ -1330,6 +1355,7 @@ mod tests {
 
     fn workspace_directory(revision: u64) -> WorkspaceDirectory {
         WorkspaceDirectory {
+            epoch: "e".to_string(),
             revision,
             projects: vec!["/workspace".to_string()],
             conversations: Vec::new(),
@@ -1392,6 +1418,34 @@ mod tests {
             DaemonStateEvent::Snapshot { workspace, .. } => assert!(workspace.is_none()),
             _ => panic!("expected Snapshot"),
         }
+    }
+
+    /// 运行时的库换过：新目录的版本号从头数，照收不误，之后在新的那份里照常比。
+    #[test]
+    fn workspace_changed_from_a_rebuilt_database_is_accepted() {
+        let mut client = desktop_client();
+        let _ = complete_snapshot(&mut client, 1, vec![]);
+        assert!(
+            client
+                .decode_message(workspace_changed(&workspace_directory(40)))
+                .unwrap()
+                .is_some()
+        );
+        let rebuilt = |revision| WorkspaceDirectory {
+            epoch: "rebuilt".to_string(),
+            ..workspace_directory(revision)
+        };
+        assert!(matches!(
+            client.decode_message(workspace_changed(&rebuilt(1))).unwrap(),
+            Some(DaemonStateEvent::Workspace(got)) if got.epoch == "rebuilt" && got.revision == 1
+        ));
+        assert!(
+            client
+                .decode_message(workspace_changed(&rebuilt(1)))
+                .unwrap()
+                .is_none(),
+            "新的那份里重复的照样丢"
+        );
     }
 
     #[test]

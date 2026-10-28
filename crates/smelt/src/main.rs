@@ -190,7 +190,7 @@ struct MainWindowClosedSubscription {
 impl Global for MainWindowClosedSubscription {}
 
 /// 各运行时推来的工作区目录，等 Workspace 认领。唯一的 daemon 订阅循环写入：首帧整份
-/// 替换，之后的推送只收版本更新的。Workspace 观察它，认领后交给各自的运行时空间对账。
+/// 替换，之后的推送只收版本更新的（库换过的算新的，见 `WorkspaceRevision::supersedes`）。Workspace 观察它，认领后交给各自的运行时空间对账。
 #[derive(Default)]
 struct WorkspaceDirectoriesGlobal {
     received: HashMap<RuntimeKey, smelt_model::workspace_directory::WorkspaceDirectory>,
@@ -210,7 +210,7 @@ impl WorkspaceDirectoriesGlobal {
                 && global
                     .received
                     .get(key)
-                    .is_some_and(|current| current.revision >= directory.revision)
+                    .is_some_and(|current| !directory.version().supersedes(&current.version()))
             {
                 return;
             }
@@ -3160,7 +3160,7 @@ impl Workspace {
             .iter()
             .filter(|(key, directory)| {
                 self.space(key)
-                    .is_some_and(|space| space.directory.revision() != Some(directory.revision))
+                    .is_some_and(|space| space.directory.version() != Some(&directory.version()))
             })
             .map(|(key, directory)| (key.clone(), directory.clone()))
             .collect::<Vec<_>>();

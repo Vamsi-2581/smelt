@@ -10,7 +10,8 @@
 //! - 关掉对话是显式命令，发成功之前一直留着，重连后接着发。
 //! - 命令和推送走两条连接，先后没保证：比已经处理过的、比命令回执里的版本旧的目录都是
 //!   旧的，不处理，等新的推送。否则刚建成的对话会被旧目录当成别处关掉摘掉，刚关掉的又被
-//!   带回来。
+//!   带回来。版本号只在同一份库（`epoch`）里比；库换过就按一份新目录对账：见过的都忘掉，
+//!   本地开着的对话发新建写回去。
 //! - 名字只从目录来（改名走 `workspace.rename`，名字写在哪由运行时定）：发出去的对话不带
 //!   名字，收到的目录里名字变了就报给界面，自己改名的回声也一样。
 //!
@@ -20,20 +21,20 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use smelt_model::workspace_directory::WorkspaceConversation;
+use smelt_model::workspace_directory::{WorkspaceConversation, WorkspaceRevision};
 
 #[derive(Default)]
 pub(crate) struct DirectorySync {
-    /// 最近一份目录的版本号和里面的对话 id。没收到之前不发任何命令：内存里没有的不代表
+    /// 最近一份目录的版本和里面的对话 id。没收到之前不发任何命令：内存里没有的不代表
     /// 运行时上没有。
-    listed: Option<(u64, HashSet<String>)>,
+    listed: Option<(WorkspaceRevision, HashSet<String>)>,
     /// 在目录里见过的对话（含这边新建成功的）。对话 id 不会重用，见过就一直算见过。
     known_conversations: HashSet<String>,
     /// 每段对话这边上次发出（或读到时）的样子，不带名字。只在发出成功时变。
     sent: HashMap<String, WorkspaceConversation>,
     pending_deletes: BTreeSet<String>,
-    /// 命令回执里运行时确认过的最高版本。比它旧的目录不含这边已经做成的改动。
-    confirmed: u64,
+    /// 命令回执里运行时确认过的最新版本。同一份库里比它旧的目录不含这边已经做成的改动。
+    confirmed: Option<WorkspaceRevision>,
     /// 上一份目录里各段对话、各格终端的名字。下一份里变了才报。
     names: HashMap<String, Option<String>>,
 }
@@ -74,13 +75,21 @@ pub(crate) struct DirectoryOutcome {
     pub(crate) created: Vec<WorkspaceConversation>,
     /// 改成功的，和运行时拒收（参数不对）的：后者再发也一样，记成发过，等内容变了再发。
     pub(crate) settled: Vec<WorkspaceConversation>,
-    /// 做成的命令回执里最高的目录版本。
-    pub(crate) revision: Option<u64>,
+    /// 做成的命令回执里最新的目录版本。
+    pub(crate) revision: Option<WorkspaceRevision>,
 }
 
 impl DirectoryOutcome {
-    pub(crate) fn confirm(&mut self, revision: u64) {
-        self.revision = self.revision.max(Some(revision));
+    pub(crate) fn confirm(&mut self, revision: WorkspaceRevision) {
+        self.revision = Some(latest(self.revision.take(), revision));
+    }
+}
+
+/// 回执按发出的先后到：同一份库里取大的，换了库以后来的为准。
+fn latest(current: Option<WorkspaceRevision>, next: WorkspaceRevision) -> WorkspaceRevision {
+    match current {
+        Some(current) if next.is_older_than(&current) => current,
+        _ => next,
     }
 }
 
@@ -89,25 +98,36 @@ impl DirectorySync {
         self.listed.is_some()
     }
 
-    /// 已经对过账的那份目录的版本号。
-    pub(crate) fn revision(&self) -> Option<u64> {
-        self.listed.as_ref().map(|(revision, _)| *revision)
+    /// 已经对过账的那份目录的版本。
+    pub(crate) fn version(&self) -> Option<&WorkspaceRevision> {
+        self.listed.as_ref().map(|(version, _)| version)
     }
 
     /// 这份目录比已经处理过的、或比命令回执确认过的旧：不处理，更新的推送随后就到。
-    pub(crate) fn is_stale(&self, revision: u64) -> bool {
-        revision < self.confirmed || self.revision().is_some_and(|seen| revision < seen)
+    /// 不同份库之间不比（见 [`WorkspaceRevision::is_older_than`]）。
+    pub(crate) fn is_stale(&self, version: &WorkspaceRevision) -> bool {
+        self.confirmed
+            .as_ref()
+            .is_some_and(|confirmed| version.is_older_than(confirmed))
+            || self.version().is_some_and(|seen| version.is_older_than(seen))
     }
 
     /// 收到一份目录里的对话。`local_conversations` 是本地已有的对话（含还在恢复的）。
     /// 调用方先用 [`Self::is_stale`] 挡掉旧的。
     pub(crate) fn receive(
         &mut self,
-        revision: u64,
+        version: WorkspaceRevision,
         conversations: Vec<WorkspaceConversation>,
         local_conversations: &HashSet<String>,
     ) -> Inbound {
         let first = self.listed.is_none();
+        if self.version().is_some_and(|seen| seen.epoch != version.epoch) {
+            // 运行时的库换过：旧库里见过的、发过的都不算数。本地开着的对话不当成别处关掉，
+            // 下一轮发新建写进新库。
+            self.known_conversations.clear();
+            self.sent.clear();
+            self.names.clear();
+        }
         let ids = conversations
             .iter()
             .map(|conversation| conversation.id.clone())
@@ -147,7 +167,7 @@ impl DirectorySync {
         for id in &removed {
             self.sent.remove(id);
         }
-        self.listed = Some((revision, ids));
+        self.listed = Some((version, ids));
         Inbound {
             first,
             added,
@@ -198,7 +218,19 @@ impl DirectorySync {
     }
 
     pub(crate) fn record(&mut self, outcome: DirectoryOutcome) {
-        self.confirmed = self.confirmed.max(outcome.revision.unwrap_or(0));
+        // 只有运行时拒收的（没有回执）时按手上这份算。
+        let same_database = outcome.revision.as_ref().is_none_or(|revision| {
+            self.version()
+                .is_some_and(|seen| seen.epoch == revision.epoch)
+        });
+        if let Some(revision) = outcome.revision {
+            self.confirmed = Some(latest(self.confirmed.take(), revision));
+        }
+        if !same_database {
+            // 回执和手上的目录不是同一份库：那边做成的不一定在这份里。只记版本，下一轮
+            // 按收到的目录重新算要发什么（重发的新建、删除运行时都当没事）。
+            return;
+        }
         for id in outcome.deleted {
             self.pending_deletes.remove(&id);
             self.sent.remove(&id);
@@ -249,6 +281,17 @@ pub(crate) fn order_by_saved<T>(
 mod tests {
     use super::*;
 
+    fn at(revision: u64) -> WorkspaceRevision {
+        in_epoch("e", revision)
+    }
+
+    fn in_epoch(epoch: &str, revision: u64) -> WorkspaceRevision {
+        WorkspaceRevision {
+            epoch: epoch.into(),
+            revision,
+        }
+    }
+
     fn conversation(id: &str, title: Option<&str>) -> WorkspaceConversation {
         WorkspaceConversation {
             id: id.to_string(),
@@ -276,7 +319,7 @@ mod tests {
     #[test]
     fn the_first_directory_is_restored_and_not_echoed_back() {
         let mut sync = DirectorySync::default();
-        let inbound = sync.receive(1, vec![conversation("a", Some("A"))], &HashSet::new());
+        let inbound = sync.receive(at(1), vec![conversation("a", Some("A"))], &HashSet::new());
         assert!(inbound.first);
         assert_eq!(inbound.added, [conversation("a", Some("A"))]);
 
@@ -290,13 +333,13 @@ mod tests {
     #[test]
     fn a_local_conversation_is_created_and_survives_an_older_directory() {
         let mut sync = DirectorySync::default();
-        sync.receive(2, Vec::new(), &HashSet::new());
+        sync.receive(at(2), Vec::new(), &HashSet::new());
 
         let local = conversation("new", None);
         let commands = sync.commands(std::slice::from_ref(&local)).unwrap();
         assert_eq!(commands.creates, std::slice::from_ref(&local));
 
-        let inbound = sync.receive(3, Vec::new(), &ids(&["new"]));
+        let inbound = sync.receive(at(3), Vec::new(), &ids(&["new"]));
         assert!(inbound.removed.is_empty());
 
         sync.record(DirectoryOutcome {
@@ -311,16 +354,16 @@ mod tests {
     #[test]
     fn a_directory_older_than_a_confirmed_create_is_stale() {
         let mut sync = DirectorySync::default();
-        sync.receive(2, Vec::new(), &HashSet::new());
+        sync.receive(at(2), Vec::new(), &HashSet::new());
         let local = conversation("new", None);
         sync.record(DirectoryOutcome {
             created: vec![local],
-            revision: Some(3),
+            revision: Some(at(3)),
             ..DirectoryOutcome::default()
         });
-        assert!(sync.is_stale(2), "比回执旧");
-        assert!(!sync.is_stale(3), "带着这次新建的那份照常处理");
-        let inbound = sync.receive(3, vec![conversation("new", None)], &ids(&["new"]));
+        assert!(sync.is_stale(&at(2)), "比回执旧");
+        assert!(!sync.is_stale(&at(3)), "带着这次新建的那份照常处理");
+        let inbound = sync.receive(at(3), vec![conversation("new", None)], &ids(&["new"]));
         assert!(inbound.removed.is_empty() && inbound.added.is_empty());
     }
 
@@ -328,33 +371,94 @@ mod tests {
     #[test]
     fn a_directory_older_than_a_confirmed_delete_is_stale() {
         let mut sync = DirectorySync::default();
-        sync.receive(4, vec![conversation("a", None)], &ids(&["a"]));
+        sync.receive(at(4), vec![conversation("a", None)], &ids(&["a"]));
         sync.close_conversation("a");
         sync.record(DirectoryOutcome {
             deleted: vec!["a".into()],
-            revision: Some(5),
+            revision: Some(at(5)),
             ..DirectoryOutcome::default()
         });
-        assert!(sync.is_stale(4));
-        assert!(!sync.is_stale(5));
+        assert!(sync.is_stale(&at(4)));
+        assert!(!sync.is_stale(&at(5)));
+    }
+
+    /// 运行时的库换过（删了重建）：新目录版本号从头数也照收；本地开着的对话不当成别处
+    /// 关掉，发新建写进新库。
+    #[test]
+    fn a_rebuilt_database_is_not_stale_and_gets_local_conversations_back() {
+        let mut sync = DirectorySync::default();
+        sync.receive(at(40), vec![conversation("a", None)], &HashSet::new());
+        sync.record(DirectoryOutcome {
+            settled: vec![conversation("a", None)],
+            revision: Some(at(41)),
+            ..DirectoryOutcome::default()
+        });
+
+        let rebuilt = in_epoch("rebuilt", 0);
+        assert!(!sync.is_stale(&rebuilt));
+        let inbound = sync.receive(rebuilt, Vec::new(), &ids(&["a"]));
+        assert!(inbound.removed.is_empty(), "不能把本地开着的全摘掉");
+        let commands = sync.commands(&[conversation("a", None)]).unwrap();
+        assert_eq!(commands.creates, [conversation("a", None)]);
+
+        // 写回新库以后，在新的那份里照常比新旧。
+        sync.record(DirectoryOutcome {
+            created: vec![conversation("a", None)],
+            revision: Some(in_epoch("rebuilt", 1)),
+            ..DirectoryOutcome::default()
+        });
+        assert!(sync.is_stale(&in_epoch("rebuilt", 0)));
+        assert!(sync.commands(&[conversation("a", None)]).unwrap().is_empty());
+    }
+
+    /// 回执来自另一份库（库刚换、新目录还没到）：只记版本不记账，等新目录到了重新算。
+    #[test]
+    fn a_receipt_from_another_database_is_not_booked() {
+        let mut sync = DirectorySync::default();
+        sync.receive(at(5), Vec::new(), &HashSet::new());
+        sync.record(DirectoryOutcome {
+            created: vec![conversation("x", None)],
+            revision: Some(in_epoch("rebuilt", 1)),
+            ..DirectoryOutcome::default()
+        });
+        assert_eq!(
+            sync.commands(&[conversation("x", None)]).unwrap().creates,
+            [conversation("x", None)],
+            "建在另一份库里的不算这份里有"
+        );
+        assert!(sync.is_stale(&in_epoch("rebuilt", 0)));
+    }
+
+    /// 运行时拒收的没有回执版本，照样记成发过，不会每次保存都重发。
+    #[test]
+    fn a_rejected_update_is_booked_without_a_receipt() {
+        let mut sync = DirectorySync::default();
+        sync.receive(at(1), vec![conversation("a", None)], &ids(&["a"]));
+        let mut changed = conversation("a", None);
+        changed.last_updated_at = 9;
+        sync.record(DirectoryOutcome {
+            settled: vec![changed.clone()],
+            ..DirectoryOutcome::default()
+        });
+        assert!(sync.commands(&[changed]).unwrap().is_empty());
     }
 
     /// 已经处理过的版本之前的也是旧的。
     #[test]
     fn a_directory_older_than_the_last_one_is_stale() {
         let mut sync = DirectorySync::default();
-        assert!(!sync.is_stale(0), "还没收到过时什么都收");
-        sync.receive(7, Vec::new(), &HashSet::new());
-        assert!(sync.is_stale(6));
-        assert!(!sync.is_stale(8));
+        assert!(!sync.is_stale(&at(0)), "还没收到过时什么都收");
+        sync.receive(at(7), Vec::new(), &HashSet::new());
+        assert!(sync.is_stale(&at(6)));
+        assert!(!sync.is_stale(&at(8)));
     }
 
     /// 别处关掉的对话本地摘掉，之后不再被当成这边新建的发回去。
     #[test]
     fn a_conversation_closed_elsewhere_is_removed_and_not_recreated() {
         let mut sync = DirectorySync::default();
-        sync.receive(4, vec![conversation("a", None)], &HashSet::new());
-        let inbound = sync.receive(5, Vec::new(), &ids(&["a"]));
+        sync.receive(at(4), vec![conversation("a", None)], &HashSet::new());
+        let inbound = sync.receive(at(5), Vec::new(), &ids(&["a"]));
         assert_eq!(inbound.removed, ["a"]);
         // 摘掉之前又保存了一次：不能建回去。
         let commands = sync.commands(&[conversation("a", None)]).unwrap();
@@ -365,8 +469,8 @@ mod tests {
     #[test]
     fn a_conversation_opened_elsewhere_is_added() {
         let mut sync = DirectorySync::default();
-        sync.receive(6, Vec::new(), &HashSet::new());
-        let inbound = sync.receive(7, vec![conversation("b", None)], &HashSet::new());
+        sync.receive(at(6), Vec::new(), &HashSet::new());
+        let inbound = sync.receive(at(7), vec![conversation("b", None)], &HashSet::new());
         assert!(!inbound.first);
         assert_eq!(inbound.added, [conversation("b", None)]);
     }
@@ -375,10 +479,10 @@ mod tests {
     #[test]
     fn only_local_changes_are_sent() {
         let mut sync = DirectorySync::default();
-        sync.receive(8, vec![conversation("a", None)], &HashSet::new());
+        sync.receive(at(8), vec![conversation("a", None)], &HashSet::new());
         let mut theirs = conversation("a", None);
         theirs.last_updated_at = 99;
-        sync.receive(9, vec![theirs], &ids(&["a"]));
+        sync.receive(at(9), vec![theirs], &ids(&["a"]));
         assert!(
             sync.commands(&[conversation("a", None)])
                 .unwrap()
@@ -400,14 +504,12 @@ mod tests {
             id: Some("pane".into()),
             ..Default::default()
         }];
-        sync.receive(
-            1,
+        sync.receive(at(1),
             vec![conversation("a", Some("old")), split.clone()],
             &HashSet::new(),
         );
 
-        let inbound = sync.receive(
-            2,
+        let inbound = sync.receive(at(2),
             vec![conversation("a", Some("new")), split.clone()],
             &ids(&["a", "t"]),
         );
@@ -418,8 +520,7 @@ mod tests {
         assert!(inbound.renamed_terminals.is_empty());
 
         split.terminals[0].custom_title = Some("测试".into());
-        let inbound = sync.receive(
-            3,
+        let inbound = sync.receive(at(3),
             vec![conversation("a", Some("new")), split.clone()],
             &ids(&["a", "t"]),
         );
@@ -434,8 +535,7 @@ mod tests {
     #[test]
     fn names_never_cause_an_update() {
         let mut sync = DirectorySync::default();
-        sync.receive(
-            1,
+        sync.receive(at(1),
             vec![conversation("a", Some("目录里的"))],
             &HashSet::new(),
         );
@@ -450,9 +550,9 @@ mod tests {
     #[test]
     fn a_pending_delete_is_sent_until_confirmed() {
         let mut sync = DirectorySync::default();
-        sync.receive(13, vec![conversation("a", None)], &HashSet::new());
+        sync.receive(at(13), vec![conversation("a", None)], &HashSet::new());
         sync.close_conversation("a");
-        let inbound = sync.receive(14, vec![conversation("a", None)], &HashSet::new());
+        let inbound = sync.receive(at(14), vec![conversation("a", None)], &HashSet::new());
         assert!(inbound.added.is_empty());
         assert_eq!(sync.commands(&[]).unwrap().deletes, ["a"]);
 

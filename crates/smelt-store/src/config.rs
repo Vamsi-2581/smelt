@@ -30,14 +30,26 @@ pub(crate) fn write_runtime_id(
 }
 
 pub(crate) fn read_workspace_catalog_revision(connection: &Connection) -> Result<u64, StoreError> {
-    let revision: Option<i64> = connection
+    Ok(read_workspace_catalog_version(connection)?.revision)
+}
+
+/// 目录这一行建库、迁移时就写好了；读不到（只有测试里手搭的库）按空目录算。
+pub(crate) fn read_workspace_catalog_version(
+    connection: &Connection,
+) -> Result<crate::WorkspaceCatalogVersion, StoreError> {
+    let row: Option<(i64, String)> = connection
         .query_row(
-            "SELECT revision FROM workspace_catalog WHERE id = 1",
+            "SELECT revision, epoch FROM workspace_catalog WHERE id = 1",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    Ok(revision.unwrap_or(0).max(0) as u64)
+    Ok(row
+        .map(|(revision, epoch)| crate::WorkspaceCatalogVersion {
+            epoch,
+            revision: revision.max(0) as u64,
+        })
+        .unwrap_or_default())
 }
 
 pub(crate) fn write_workspace_catalog_revision(
@@ -45,14 +57,14 @@ pub(crate) fn write_workspace_catalog_revision(
     revision: u64,
 ) -> Result<(), StoreError> {
     transaction.execute(
-        "INSERT INTO workspace_catalog(id, revision) VALUES (1, ?1)
+        "INSERT INTO workspace_catalog(id, revision, epoch)
+         VALUES (1, ?1, lower(hex(randomblob(16))))
          ON CONFLICT(id) DO UPDATE SET revision = excluded.revision",
         [i64::try_from(revision).unwrap_or(i64::MAX)],
     )?;
     Ok(())
 }
 
-/// 目录有一条改动提交后推进版本，返回新版本。
 pub(crate) fn bump_workspace_catalog_revision(
     transaction: &Transaction<'_>,
 ) -> Result<u64, StoreError> {

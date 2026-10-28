@@ -426,7 +426,8 @@ CREATE TABLE runtime_identity (
 );
 CREATE TABLE workspace_catalog (
   id INTEGER PRIMARY KEY CHECK (id = 1),
-  revision INTEGER NOT NULL CHECK (revision >= 0)
+  revision INTEGER NOT NULL CHECK (revision >= 0),
+  epoch TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE launch_settings (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -1734,4 +1735,17 @@ DROP TABLE workspace_menu;
 pub const MIGRATE_V27_TO_V28: &str = "
 DROP TABLE remote_acp_session;
 DROP TABLE remote_terminal_session;
+";
+
+/// 加列只能给常量默认值，所以列上是空串；真正的随机值随即写进去（见
+/// [`ENSURE_WORKSPACE_EPOCH`]），这一行从此带着它。
+pub const MIGRATE_V28_TO_V29: &str = "
+ALTER TABLE workspace_catalog ADD COLUMN epoch TEXT NOT NULL DEFAULT '';
+UPDATE workspace_catalog SET epoch = lower(hex(randomblob(16))) WHERE epoch = '';
+";
+
+/// 建库、迁移时把目录这一行连同随机身份一起写好：读目录的人永远拿得到 epoch。
+pub const ENSURE_WORKSPACE_EPOCH: &str = "
+INSERT OR IGNORE INTO workspace_catalog(id, revision, epoch)
+VALUES (1, 0, lower(hex(randomblob(16))));
 ";
