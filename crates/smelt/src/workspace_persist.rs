@@ -538,19 +538,28 @@ fn send_directory_commands(runtime: &Runtime, commands: &DirectoryCommands) -> D
             conversation_id: id.clone(),
         };
         match client.call::<WorkspaceConversationDelete>(&params, timeout) {
-            Ok(_) => outcome.deleted.push(id.clone()),
+            Ok(revision) => {
+                outcome.confirm(revision.revision);
+                outcome.deleted.push(id.clone());
+            }
             Err(error) => failed("关闭对话", error),
         }
     }
     for conversation in &commands.creates {
         match client.call::<WorkspaceConversationCreate>(conversation, timeout) {
-            Ok(_) => outcome.created.push(conversation.clone()),
+            Ok(revision) => {
+                outcome.confirm(revision.revision);
+                outcome.created.push(conversation.clone());
+            }
             Err(error) => failed("新建对话", error),
         }
     }
     for conversation in &commands.updates {
         match client.call::<WorkspaceConversationUpdate>(conversation, timeout) {
-            Ok(_) => outcome.settled.push(conversation.clone()),
+            Ok(revision) => {
+                outcome.confirm(revision.revision);
+                outcome.settled.push(conversation.clone());
+            }
             // 别处已经关掉了：推送随后会把它从本地摘掉，不必再发。
             Err(ControlClientError::Protocol(error))
                 if error.code == ControlErrorCode::NotFound => {}
@@ -655,6 +664,9 @@ impl Workspace {
         let Some(space) = self.space_mut(key) else {
             return;
         };
+        if space.directory.is_stale(directory.revision) {
+            return;
+        }
         local_conversations.extend(
             space
                 .restore_pending

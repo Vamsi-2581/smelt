@@ -8,6 +8,9 @@
 //! - 这边没见过、目录里也没有的对话是这边新建的，发新建；在目录里见过、现在没了的是
 //!   别处关掉的，本地摘掉，不再建回去。
 //! - 关掉对话是显式命令，发成功之前一直留着，重连后接着发。
+//! - 命令和推送走两条连接，先后没保证：比已经处理过的、比命令回执里的版本旧的目录都是
+//!   旧的，不处理，等新的推送。否则刚建成的对话会被旧目录当成别处关掉摘掉，刚关掉的又被
+//!   带回来。
 //! - 名字只从目录来（改名走 `workspace.rename`，名字写在哪由运行时定）：发出去的对话不带
 //!   名字，收到的目录里名字变了就报给界面，自己改名的回声也一样。
 //!
@@ -29,6 +32,8 @@ pub(crate) struct DirectorySync {
     /// 每段对话这边上次发出（或读到时）的样子，不带名字。只在发出成功时变。
     sent: HashMap<String, WorkspaceConversation>,
     pending_deletes: BTreeSet<String>,
+    /// 命令回执里运行时确认过的最高版本。比它旧的目录不含这边已经做成的改动。
+    confirmed: u64,
     /// 上一份目录里各段对话、各格终端的名字。下一份里变了才报。
     names: HashMap<String, Option<String>>,
 }
@@ -69,6 +74,14 @@ pub(crate) struct DirectoryOutcome {
     pub(crate) created: Vec<WorkspaceConversation>,
     /// 改成功的，和运行时拒收（参数不对）的：后者再发也一样，记成发过，等内容变了再发。
     pub(crate) settled: Vec<WorkspaceConversation>,
+    /// 做成的命令回执里最高的目录版本。
+    pub(crate) revision: Option<u64>,
+}
+
+impl DirectoryOutcome {
+    pub(crate) fn confirm(&mut self, revision: u64) {
+        self.revision = self.revision.max(Some(revision));
+    }
 }
 
 impl DirectorySync {
@@ -81,7 +94,13 @@ impl DirectorySync {
         self.listed.as_ref().map(|(revision, _)| *revision)
     }
 
+    /// 这份目录比已经处理过的、或比命令回执确认过的旧：不处理，更新的推送随后就到。
+    pub(crate) fn is_stale(&self, revision: u64) -> bool {
+        revision < self.confirmed || self.revision().is_some_and(|seen| revision < seen)
+    }
+
     /// 收到一份目录里的对话。`local_conversations` 是本地已有的对话（含还在恢复的）。
+    /// 调用方先用 [`Self::is_stale`] 挡掉旧的。
     pub(crate) fn receive(
         &mut self,
         revision: u64,
@@ -179,6 +198,7 @@ impl DirectorySync {
     }
 
     pub(crate) fn record(&mut self, outcome: DirectoryOutcome) {
+        self.confirmed = self.confirmed.max(outcome.revision.unwrap_or(0));
         for id in outcome.deleted {
             self.pending_deletes.remove(&id);
             self.sent.remove(&id);
@@ -284,6 +304,49 @@ mod tests {
             ..DirectoryOutcome::default()
         });
         assert!(sync.commands(&[local]).unwrap().is_empty());
+    }
+
+    /// 建成之后，比回执旧的目录（重连时的快照晚于回执到）里没有它：那是旧的，不处理，
+    /// 不能当成别处关掉了把它摘掉。
+    #[test]
+    fn a_directory_older_than_a_confirmed_create_is_stale() {
+        let mut sync = DirectorySync::default();
+        sync.receive(2, Vec::new(), &HashSet::new());
+        let local = conversation("new", None);
+        sync.record(DirectoryOutcome {
+            created: vec![local],
+            revision: Some(3),
+            ..DirectoryOutcome::default()
+        });
+        assert!(sync.is_stale(2), "比回执旧");
+        assert!(!sync.is_stale(3), "带着这次新建的那份照常处理");
+        let inbound = sync.receive(3, vec![conversation("new", None)], &ids(&["new"]));
+        assert!(inbound.removed.is_empty() && inbound.added.is_empty());
+    }
+
+    /// 关掉之后，比回执旧的目录里还有它：不处理，不能把关掉的对话带回来。
+    #[test]
+    fn a_directory_older_than_a_confirmed_delete_is_stale() {
+        let mut sync = DirectorySync::default();
+        sync.receive(4, vec![conversation("a", None)], &ids(&["a"]));
+        sync.close_conversation("a");
+        sync.record(DirectoryOutcome {
+            deleted: vec!["a".into()],
+            revision: Some(5),
+            ..DirectoryOutcome::default()
+        });
+        assert!(sync.is_stale(4));
+        assert!(!sync.is_stale(5));
+    }
+
+    /// 已经处理过的版本之前的也是旧的。
+    #[test]
+    fn a_directory_older_than_the_last_one_is_stale() {
+        let mut sync = DirectorySync::default();
+        assert!(!sync.is_stale(0), "还没收到过时什么都收");
+        sync.receive(7, Vec::new(), &HashSet::new());
+        assert!(sync.is_stale(6));
+        assert!(!sync.is_stale(8));
     }
 
     /// 别处关掉的对话本地摘掉，之后不再被当成这边新建的发回去。
