@@ -80,6 +80,7 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
   /// 不再跟着「最近」换。页面原样留着，不重建。
   final _pinnedDefault = ValueNotifier<(String, String)?>(null);
   StreamSubscription<(String, AttentionItem)>? _attention;
+  Timer? _attentionBannerTimer;
   AppUpdater? _updater;
 
   /// 每个版本只提示一次：查到了、下好了各一次。
@@ -126,6 +127,7 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
   @override
   void dispose() {
     _attention?.cancel();
+    _attentionBannerTimer?.cancel();
     _updater?.removeListener(_onUpdate);
     _sessionFilter.dispose();
     _tabNotifier.dispose();
@@ -175,7 +177,7 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
     );
   }
 
-  /// 不在指挥台、也没开着那条会话时，新的提醒弹一条可点的提示。
+  /// Show attention above the page content so it cannot cover a conversation composer.
   void _onAttention((String, AttentionItem) event) {
     final (runtimeId, item) = event;
     if (!mounted) return;
@@ -186,32 +188,45 @@ class _HomeShellState extends State<HomeShell> implements DemoShell {
     final session = model.catalog.session(runtimeId, item.sessionId);
     final machine = model.fleet.runtime(runtimeId)?.name;
     final messenger = ScaffoldMessenger.of(context);
-    messenger
-      ..clearSnackBars()
-      ..showSnackBar(
-        SnackBar(
-          // 提醒的 title 是阶段（「已完成」）；正文没有待答问题、daemon 也不知道标题时
-          // 只剩「会话 + id 前缀」。目录里有这条会话就用它的标题。
-          content: Text(
-            [?machine, session?.title ?? item.message, item.title].join(' · '),
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-          ),
-          action: session == null
-              ? null
-              : SnackBarAction(
-                  label: l10n.commonOpen,
-                  onPressed: () {
-                    if (!mounted) return;
-                    _openSession(
-                      runtimeId,
-                      session,
-                      split: isSplitLayout(context),
-                    );
-                  },
-                ),
+    _attentionBannerTimer?.cancel();
+    messenger.hideCurrentMaterialBanner();
+    messenger.showMaterialBanner(
+      MaterialBanner(
+        content: Text(
+          [?machine, session?.title ?? item.message, item.title].join(' · '),
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
         ),
-      );
+        forceActionsBelow: true,
+        actions: [
+          if (session != null)
+            TextButton(
+              onPressed: () {
+                if (!mounted) return;
+                _attentionBannerTimer?.cancel();
+                messenger.hideCurrentMaterialBanner();
+                _openSession(
+                  runtimeId,
+                  session,
+                  split: isSplitLayout(context),
+                );
+              },
+              child: Text(l10n.commonOpen),
+            ),
+          IconButton(
+            tooltip: MaterialLocalizations.of(context).closeButtonTooltip,
+            onPressed: () {
+              _attentionBannerTimer?.cancel();
+              messenger.hideCurrentMaterialBanner();
+            },
+            icon: const Icon(Icons.close),
+          ),
+        ],
+      ),
+    );
+    _attentionBannerTimer = Timer(const Duration(seconds: 5), () {
+      if (mounted) messenger.hideCurrentMaterialBanner();
+    });
   }
 
   void _showSessions(String? runtimeId) {
