@@ -14,7 +14,7 @@ pub(crate) use smelt_ui::Button;
 use std::rc::Rc;
 
 use crate::git_panel::GitStatusData;
-use smelt_client::runtime_path::PathStyle;
+use smelt_model::runtime_path::PathStyle;
 use crate::{SendSelectionToTerminal, Workspace, placeholder_view};
 use smelt_ui::IconAction as _;
 
@@ -801,9 +801,9 @@ pub(super) fn breadcrumb_segments(path: &str, roots: &[String]) -> Vec<Breadcrum
 /// 名字组件会自动回退成纯文本，不会 panic。没有扩展名的文件（Makefile 等）退而
 /// 用文件名本身（能命中 "makefile" 这类按文件名匹配的语言）。
 pub(super) fn editor_language_for_path(path: &str) -> String {
-    match smelt_client::runtime_path::PathStyle::LOCAL.extension(path) {
+    match smelt_model::runtime_path::PathStyle::LOCAL.extension(path) {
         Some(ext) => ext.to_lowercase(),
-        None => smelt_client::runtime_path::PathStyle::LOCAL.file_name(path)
+        None => smelt_model::runtime_path::PathStyle::LOCAL.file_name(path)
             .unwrap_or("text")
             .to_lowercase(),
     }

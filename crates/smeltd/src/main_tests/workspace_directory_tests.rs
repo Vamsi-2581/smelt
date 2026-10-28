@@ -107,3 +107,57 @@ fn a_command_that_changes_nothing_does_not_publish() {
     delete(&temp.store, "conv-missing", &event_hub).unwrap();
     assert_eq!(published_directory(&event_hub), None);
 }
+
+/// 手机、命令行用 `session.delete` 删掉的会话，目录里也要摘掉：终端只摘这一格，摘到最后一格
+/// 删整段对话；ACP 会话删整段对话。不然列表一直留着它，桌面重启还会把它恢复回来。
+#[test]
+fn a_deleted_session_leaves_the_directory() {
+    let temp = TempStore::new();
+    let event_hub = new_event_hub();
+    let mut split = terminal_conversation();
+    split.terminals.push(WorkspaceTerminal {
+        id: Some("term-right".to_string()),
+        cwd: Some("/repo".to_string()),
+        ..WorkspaceTerminal::default()
+    });
+    let left = split.terminals[0].id.clone().unwrap();
+    let acp = WorkspaceConversation {
+        id: "conv-acp".to_string(),
+        acp: Some(smelt_core::workspace_directory::WorkspaceAcp {
+            sid: "acp-1".to_string(),
+            agent: "pi".to_string(),
+            cwd: Some("/repo".to_string()),
+            ..Default::default()
+        }),
+        ..WorkspaceConversation::default()
+    };
+    for conversation in [&split, &acp] {
+        workspace_directory::create_conversation(&temp.store, conversation, &event_hub).unwrap();
+    }
+
+    workspace_directory::forget_session(&temp.store, &left, &event_hub).unwrap();
+    let published = published_directory(&event_hub).expect("摘掉之后推过目录");
+    let remaining = published
+        .conversations
+        .iter()
+        .find(|conversation| conversation.id == split.id)
+        .expect("还有一格，对话留着");
+    assert_eq!(
+        remaining
+            .terminals
+            .iter()
+            .map(|terminal| terminal.id.as_deref())
+            .collect::<Vec<_>>(),
+        [Some("term-right")]
+    );
+
+    workspace_directory::forget_session(&temp.store, "term-right", &event_hub).unwrap();
+    workspace_directory::forget_session(&temp.store, "acp-1", &event_hub).unwrap();
+    let published = published_directory(&event_hub).unwrap();
+    assert!(published.conversations.is_empty(), "最后一格、ACP 会话都删整段对话");
+
+    // 不在目录里的（远程目录里的会话）不改目录。
+    let revision = published.revision;
+    workspace_directory::forget_session(&temp.store, "term-remote", &event_hub).unwrap();
+    assert_eq!(published_directory(&event_hub).unwrap().revision, revision);
+}

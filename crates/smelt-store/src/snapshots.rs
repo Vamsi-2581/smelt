@@ -261,40 +261,6 @@ pub struct QuotaCacheWindowRecord {
     pub reset_after_seconds: Option<i64>,
 }
 
-/// 守护进程发布给移动端的侧栏菜单。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PublishedWorkspaceMenuSnapshot {
-    pub version: u32,
-    pub revision: u64,
-    pub source_id: String,
-    pub source_revision: u64,
-    pub projects: Vec<WorkspaceMenuProjectRecord>,
-    pub sessions: Vec<WorkspaceMenuSessionRecord>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WorkspaceMenuProjectRecord {
-    pub root: String,
-    pub title: String,
-    pub order: u32,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WorkspaceMenuSessionRecord {
-    pub id: String,
-    /// `terminal` 或 `acp`。
-    pub kind: String,
-    pub title: String,
-    pub custom_title: bool,
-    pub cwd: Option<String>,
-    pub project_root: Option<String>,
-    pub project_title: Option<String>,
-    pub project_order: u32,
-    pub session_order: u32,
-    pub leaf_order: u32,
-    pub agent: Option<String>,
-}
-
 /// 记忆召回的配置。空字符串表示没设。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MemorySettingsRecord {

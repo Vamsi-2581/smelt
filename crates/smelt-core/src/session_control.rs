@@ -858,7 +858,9 @@ pub fn list_history_for(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace_menu::WorkspaceMenuSessionKind;
+    use smelt_model::workspace_directory::{
+        WorkspaceAcp, WorkspaceConversation, WorkspaceDirectory, WorkspaceTerminal,
+    };
 
     #[test]
     fn agent_conversation_rejects_a_missing_definition() {
@@ -1332,24 +1334,60 @@ mod tests {
     }
 
     #[test]
-    fn delete_kind_prefers_catalog_over_menu() {
+    fn delete_kind_prefers_catalog_over_directory() {
         assert_eq!(
             resolve_session_delete_kind(
                 Some(RemoteSessionKind::Terminal),
-                Some(WorkspaceMenuSessionKind::Acp)
+                Some(SessionDeleteKind::Acp)
             )
             .unwrap(),
             SessionDeleteKind::Terminal
         );
         assert_eq!(
-            resolve_session_delete_kind(None, Some(WorkspaceMenuSessionKind::Terminal)).unwrap(),
+            resolve_session_delete_kind(None, Some(SessionDeleteKind::Terminal)).unwrap(),
             SessionDeleteKind::Terminal
         );
-        assert_eq!(
-            resolve_session_delete_kind(None, Some(WorkspaceMenuSessionKind::Acp)).unwrap(),
-            SessionDeleteKind::Acp
-        );
         assert!(resolve_session_delete_kind(None, None).is_err());
+    }
+
+    /// 桌面建的会话不在远程目录里，删它时按工作区目录认：终端按每格的 id，ACP 按会话 id。
+    #[test]
+    fn directory_knows_which_session_ids_are_terminals_and_acp() {
+        let directory = WorkspaceDirectory {
+            revision: 1,
+            projects: Vec::new(),
+            conversations: vec![
+                WorkspaceConversation {
+                    id: "c-term".into(),
+                    terminals: vec![
+                        WorkspaceTerminal {
+                            id: Some("t1".into()),
+                            ..WorkspaceTerminal::default()
+                        },
+                        WorkspaceTerminal::default(),
+                    ],
+                    ..WorkspaceConversation::default()
+                },
+                WorkspaceConversation {
+                    id: "c-acp".into(),
+                    acp: Some(WorkspaceAcp {
+                        sid: "a1".into(),
+                        ..WorkspaceAcp::default()
+                    }),
+                    ..WorkspaceConversation::default()
+                },
+            ],
+        };
+        assert_eq!(
+            directory_session_kind(&directory, "t1"),
+            Some(SessionDeleteKind::Terminal)
+        );
+        assert_eq!(
+            directory_session_kind(&directory, "a1"),
+            Some(SessionDeleteKind::Acp)
+        );
+        assert_eq!(directory_session_kind(&directory, "c-term"), None);
+        assert_eq!(directory_session_kind(&directory, "missing"), None);
     }
 
     #[test]

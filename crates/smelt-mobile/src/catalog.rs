@@ -671,6 +671,9 @@ fn on_connection(weak: &Weak<Shared>, generation: u64, event: &ConnectionEvent) 
         inner.signal = true;
     }
     inner.connected = event.state == ConnectionState::Connected;
+    if inner.connected {
+        inner.state.set_os(event.os.as_deref());
+    }
     if !inner.connected {
         inner.stop_worker();
     } else if inner.worker.is_none() {

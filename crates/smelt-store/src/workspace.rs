@@ -47,37 +47,21 @@ fn history_session_id_for_rewrite(
     }
 }
 
-/// 对话归哪个项目按它的 cwd 算：ACP 对话看 ACP 会话的，终端对话看第一个有 cwd 的终端。
-fn conversation_cwd(saved: &WorkspaceSessionRecord) -> Option<&str> {
-    saved
-        .acp
-        .as_ref()
-        .and_then(|acp| acp.cwd.as_deref())
-        .or_else(|| {
-            saved
-                .terminals
-                .iter()
-                .find_map(|terminal| terminal.cwd.as_deref())
-        })
-}
-
 /// 插入一段对话的会话组和它的会话行。会话 id 由调用方定好：ACP 会话一个、每个终端一个。
 fn insert_conversation(
     transaction: &Transaction<'_>,
     saved: &WorkspaceSessionRecord,
     position: i64,
-    project_root: Option<&str>,
     acp_id: Option<&str>,
     terminal_ids: &[String],
     preserved_history: &HashMap<String, Option<String>>,
 ) -> Result<(), StoreError> {
     let group_id = saved.id.trim();
     transaction.execute(
-        "INSERT INTO session_group(id, project_root, position, custom_title, last_updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO session_group(id, position, custom_title, last_updated_at)
+         VALUES (?1, ?2, ?3, ?4)",
         params![
             group_id,
-            project_root,
             position,
             saved.custom_title.as_deref(),
             saved.last_updated_at,
@@ -183,12 +167,10 @@ pub(crate) fn create_conversation(
         [],
         |row| row.get(0),
     )?;
-    let project_root = conversation_project_root(transaction, saved)?;
     insert_conversation(
         transaction,
         saved,
         position,
-        project_root.as_deref(),
         acp_id.as_deref(),
         &terminal_ids,
         &preserved_history_session_ids(transaction)?,
@@ -210,7 +192,6 @@ pub(crate) fn update_conversation(
         }
     })?;
     let (acp_id, terminal_ids) = conversation_session_ids(transaction, saved)?;
-    let project_root = conversation_project_root(transaction, saved)?;
     let before = read_conversation(transaction, group_id)?;
     // 恢复身份以库里的为准，要在删行之前读出来。
     let preserved_history = preserved_history_session_ids(transaction)?;
@@ -219,7 +200,6 @@ pub(crate) fn update_conversation(
         transaction,
         saved,
         position,
-        project_root.as_deref(),
         acp_id.as_deref(),
         &terminal_ids,
         &preserved_history,
@@ -268,18 +248,14 @@ pub(crate) fn open_project(transaction: &Transaction<'_>, root: &str) -> Result<
          VALUES (?1, (SELECT COALESCE(MAX(position) + 1, 0) FROM project))",
         [root],
     )?;
-    reassign_project_roots(transaction)?;
     Ok(true)
 }
 
-/// 关闭一个项目。项目下的对话还在，改挂到别的包含它的项目，没有就不挂。没开着返回 `false`。
+/// 关闭一个项目。项目下的对话还在：对话归哪个项目不存，客户端按 cwd 现算。没开着返回
+/// `false`。
 pub(crate) fn close_project(transaction: &Transaction<'_>, root: &str) -> Result<bool, StoreError> {
     let removed = transaction.execute("DELETE FROM project WHERE root = ?1", [root.trim()])?;
-    if removed == 0 {
-        return Ok(false);
-    }
-    reassign_project_roots(transaction)?;
-    Ok(true)
+    Ok(removed > 0)
 }
 
 fn validated_conversation_id(saved: &WorkspaceSessionRecord) -> Result<&str, StoreError> {
@@ -358,54 +334,6 @@ fn conversation_session_ids(
         }
     }
     Ok((acp_id, terminal_ids))
-}
-
-fn conversation_project_root(
-    transaction: &Transaction<'_>,
-    saved: &WorkspaceSessionRecord,
-) -> Result<Option<String>, StoreError> {
-    let roots = project_roots(transaction)?;
-    Ok(conversation_cwd(saved)
-        .and_then(|cwd| matching_project_root(cwd, &roots))
-        .map(str::to_string))
-}
-
-fn project_roots(connection: &Connection) -> Result<Vec<String>, StoreError> {
-    connection
-        .prepare("SELECT root FROM project ORDER BY position")?
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(StoreError::from)
-}
-
-/// 项目开关之后，按各段对话的 cwd 重新算它挂在哪个项目下（嵌套项目挂最深的那个）。
-fn reassign_project_roots(transaction: &Transaction<'_>) -> Result<(), StoreError> {
-    let roots = project_roots(transaction)?;
-    let mut cwds: Vec<(String, String)> = Vec::new();
-    {
-        let mut statement = transaction.prepare(
-            "SELECT group_id, cwd FROM session WHERE cwd IS NOT NULL ORDER BY group_id, position",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        for row in rows {
-            let (group_id, cwd) = row?;
-            if cwds.last().is_none_or(|(last, _)| *last != group_id) {
-                cwds.push((group_id, cwd));
-            }
-        }
-    }
-    transaction.execute("UPDATE session_group SET project_root = NULL", [])?;
-    for (group_id, cwd) in cwds {
-        if let Some(root) = matching_project_root(&cwd, &roots) {
-            transaction.execute(
-                "UPDATE session_group SET project_root = ?1 WHERE id = ?2",
-                params![root, group_id],
-            )?;
-        }
-    }
-    Ok(())
 }
 
 /// 守护确认了一份恢复身份。行还不在（这段对话还没进目录）或 id 为空时返回 `None`，不建行；
@@ -736,19 +664,3 @@ impl WorkspaceReadCache {
     }
 }
 
-fn matching_project_root<'a>(cwd: &str, roots: &'a [String]) -> Option<&'a str> {
-    roots
-        .iter()
-        .filter(|root| path_contains(root, cwd))
-        .max_by_key(|root| root.len())
-        .map(String::as_str)
-}
-
-fn path_contains(root: &str, path: &str) -> bool {
-    let root = root.trim_end_matches(['/', '\\']);
-    let path = path.trim_end_matches(['/', '\\']);
-    path == root
-        || path
-            .strip_prefix(root)
-            .is_some_and(|rest| rest.starts_with('/') || rest.starts_with('\\'))
-}

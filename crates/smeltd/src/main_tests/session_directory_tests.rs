@@ -91,7 +91,7 @@ fn list_includes_recovered_sessions_as_disconnected() {
                 sessions: new_sessions(),
                 acp_sessions: new_test_acp_sessions(),
                 remote_sessions: new_test_remote_sessions(),
-                workspace_menu: new_test_workspace_menu(),
+                workspace_directory: new_test_workspace_directory(),
                 automations: new_test_automation_store(),
                 exe_mtime: 0,
                 daemon_fingerprint: None,
@@ -126,7 +126,6 @@ fn subscribe_snapshot_includes_recovered_sessions() {
             &sessions,
             &acp_sessions,
             &remote_sessions,
-            &new_test_workspace_menu(),
             AutomationFile::default(),
         );
         assert_eq!(snapshot.sessions.len(), 1);
@@ -159,7 +158,7 @@ fn kill_recovered_session_removes_identity() {
                 sessions: Arc::clone(&sessions),
                 acp_sessions: Arc::clone(&acp_sessions),
                 remote_sessions: Arc::clone(&remote_sessions),
-                workspace_menu: new_test_workspace_menu(),
+                workspace_directory: new_test_workspace_directory(),
                 automations: new_test_automation_store(),
                 exe_mtime: 0,
                 daemon_fingerprint: None,
@@ -180,7 +179,6 @@ fn kill_recovered_session_removes_identity() {
             &sessions,
             &acp_sessions,
             &remote_sessions,
-            &new_test_workspace_menu(),
             AutomationFile::default(),
         );
         assert!(snapshot.sessions.is_empty());
@@ -257,7 +255,6 @@ fn live_acp_wins_over_recovered_identity_in_snapshot() {
             &sessions,
             &acp_sessions,
             &new_test_remote_sessions(),
-            &new_test_workspace_menu(),
             AutomationFile::default(),
         );
         let same_id = snapshot
@@ -303,7 +300,6 @@ fn acp_kill_removes_disconnected_identity() {
             &new_sessions(),
             &acp_sessions,
             &remote_sessions,
-            &new_test_workspace_menu(),
             AutomationFile::default(),
         );
         assert!(snapshot.sessions.is_empty());

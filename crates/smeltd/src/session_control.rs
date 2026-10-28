@@ -16,15 +16,14 @@ use smelt_core::control_api::{
 use smelt_core::new_session::NewSessionTarget;
 use smelt_core::session_control::{
     AcpAgentOption, RemoteAcpSession, RemoteSessionKind, RemoteSessionRecord,
-    RemoteTerminalSession, SessionDeleteKind, is_background_acp_session_id,
-    resolve_session_delete_kind,
+    RemoteTerminalSession, SessionDeleteKind, directory_session_kind,
+    is_background_acp_session_id, resolve_session_delete_kind,
 };
-use smelt_core::workspace_menu::WorkspaceMenuSnapshot;
+use smelt_core::workspace_directory::WorkspaceDirectory;
 use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode};
 
 use super::{
-    AcpSessions, EventHubHandle, RemoteSessions, Sessions, WorkspaceMenuStore, now_unix,
-    workspace_menu_snapshot,
+    AcpSessions, EventHubHandle, RemoteSessions, Sessions, WorkspaceDirectoryReader, now_unix,
 };
 
 /// 远程新建的终端先按这个尺寸起；客户端接上后按自己的视口 resize。
@@ -184,13 +183,14 @@ fn session_id(prefix: &str, request_id: Option<&str>) -> Result<String, ControlE
 }
 
 fn require_project<'a>(
-    menu: &'a WorkspaceMenuSnapshot,
+    directory: &'a WorkspaceDirectory,
     project_root: &str,
 ) -> Result<&'a str, ControlError> {
-    menu.projects
+    directory
+        .projects
         .iter()
-        .find(|project| project.root == project_root)
-        .map(|project| project.root.as_str())
+        .find(|root| *root == project_root)
+        .map(String::as_str)
         .ok_or_else(|| {
             error(
                 ControlErrorCode::FailedPrecondition,
@@ -204,7 +204,7 @@ fn require_project<'a>(
 fn resolve_acp_cwd(
     project_root: &str,
     option: &AcpAgentOption,
-    menu: &WorkspaceMenuSnapshot,
+    directory: &WorkspaceDirectory,
 ) -> Result<String, ControlError> {
     if project_root.is_empty() {
         let definition_id = option.agent_definition_id().ok_or_else(|| {
@@ -217,7 +217,7 @@ fn resolve_acp_cwd(
             .map(|dir| dir.to_string_lossy().into_owned())
             .ok_or_else(|| error(ControlErrorCode::OperationFailed, "无法创建智能体工作区"));
     }
-    require_project(menu, project_root).map(str::to_string)
+    require_project(directory, project_root).map(str::to_string)
 }
 
 fn already_bound(message: &str) -> ControlError {
@@ -232,14 +232,14 @@ fn already_bound(message: &str) -> ControlError {
 fn plan_create(
     params: SessionCreateParams,
     target: CreateTarget,
-    menu: &WorkspaceMenuSnapshot,
+    directory: &WorkspaceDirectory,
     existing: impl FnOnce(&str) -> Result<Option<RemoteSessionRecord>, ControlError>,
     runtime_taken: impl FnOnce(&str) -> bool,
 ) -> Result<CreatePlan, ControlError> {
     let project_root = params.project_root.trim();
     match target {
         CreateTarget::Terminal { launch } => {
-            let cwd = require_project(menu, project_root)?.to_string();
+            let cwd = require_project(directory, project_root)?.to_string();
             let id = session_id("term", params.request_id.as_deref())?;
             if let Some(record) = existing(&id)? {
                 let session = record
@@ -265,7 +265,7 @@ fn plan_create(
             })
         }
         CreateTarget::Acp(option) => {
-            let cwd = resolve_acp_cwd(project_root, &option, menu)?;
+            let cwd = resolve_acp_cwd(project_root, &option, directory)?;
             let resume_id = non_empty(params.resume_id.as_deref()).map(str::to_string);
             let id = session_id("acp", params.request_id.as_deref())?;
             if let Some(record) = existing(&id)? {
@@ -325,15 +325,17 @@ pub(crate) fn create_session(
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
     remote_sessions: &RemoteSessions,
-    workspace_menu: &WorkspaceMenuStore,
+    workspace_directory: &WorkspaceDirectoryReader,
     event_hub: &EventHubHandle,
 ) -> Result<SessionCreateResult, ControlError> {
     let target = resolve_target(&params)?;
-    let menu = workspace_menu_snapshot(workspace_menu);
+    let directory = workspace_directory
+        .read()
+        .map_err(|message| error(ControlErrorCode::TemporarilyUnavailable, message))?;
     let plan = plan_create(
         params,
         target,
-        &menu,
+        &directory,
         |id| remote_record(remote_sessions, id),
         |id| sessions.get(id).is_some() || acp_sessions.get(id).is_some(),
     )?;
@@ -404,13 +406,13 @@ pub(crate) fn create_remote_acp_session(
 }
 
 /// 这个 id 是终端还是对话。远程目录是所有权真相；不在目录里的看运行时自己的会话表，
-/// 最后才看桌面发布的菜单（桌面拥有、眼下没在跑的会话）。
+/// 最后才看工作区目录（桌面建的、眼下没在跑的会话）。
 fn session_delete_kind(
     id: &str,
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
     remote_sessions: &RemoteSessions,
-    workspace_menu: &WorkspaceMenuStore,
+    workspace_directory: &WorkspaceDirectoryReader,
 ) -> Option<SessionDeleteKind> {
     let catalog_kind = remote_sessions
         .lock()
@@ -425,12 +427,11 @@ fn session_delete_kind(
     } else {
         None
     };
-    let menu_kind = workspace_menu
-        .lock()
-        .unwrap()
-        .session(id)
-        .map(|session| session.kind);
-    resolve_session_delete_kind(catalog_kind.or(runtime_kind), menu_kind).ok()
+    let directory_kind = workspace_directory
+        .read()
+        .ok()
+        .and_then(|directory| directory_session_kind(&directory, id));
+    resolve_session_delete_kind(catalog_kind.or(runtime_kind), directory_kind).ok()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -439,7 +440,7 @@ pub(crate) fn delete_session(
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
     remote_sessions: &RemoteSessions,
-    workspace_menu: &WorkspaceMenuStore,
+    workspace_directory: &WorkspaceDirectoryReader,
     automations: &AutomationStore,
     event_hub: &EventHubHandle,
 ) -> Result<(), ControlError> {
@@ -458,7 +459,7 @@ pub(crate) fn delete_session(
             "自动化运行的会话由运行时管理，不能删除",
         ));
     }
-    let kind = session_delete_kind(id, sessions, acp_sessions, remote_sessions, workspace_menu)
+    let kind = session_delete_kind(id, sessions, acp_sessions, remote_sessions, workspace_directory)
         .ok_or_else(|| error(ControlErrorCode::NotFound, format!("会话不存在：{id}")))?;
     match kind {
         SessionDeleteKind::Terminal => {
@@ -468,7 +469,15 @@ pub(crate) fn delete_session(
             super::kill_acp_session(id, acp_sessions, remote_sessions, event_hub)
         }
     }
-    .map_err(|message| error(ControlErrorCode::OperationFailed, message))
+    .map_err(|message| error(ControlErrorCode::OperationFailed, message))?;
+    // 工作区目录里也摘掉：列表跟着目录走，桌面重启也按目录恢复。进程已经收掉了，摘不掉
+    // 只记日志，不把这次删除报成失败。
+    if let Err(failure) = super::workspace_directory::default_store().and_then(|store| {
+        super::workspace_directory::forget_session(&store, id, event_hub)
+    }) {
+        super::dlog(&format!("删掉会话 {id} 后没能从工作区目录摘掉：{}", failure.message));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -479,21 +488,17 @@ mod tests {
     use smelt_core::agent_kind::{
         ConversationAgentKind, ConversationLaunchSpec, TerminalAgentKind,
     };
-    use smelt_core::workspace_menu::{
-        WorkspaceMenuProject, WorkspaceMenuSession, WorkspaceMenuSessionKind,
+    use smelt_core::workspace_directory::{
+        WorkspaceAcp, WorkspaceConversation, WorkspaceTerminal,
     };
 
     use super::*;
 
-    fn menu_with_project(root: &str) -> WorkspaceMenuSnapshot {
-        WorkspaceMenuSnapshot::current(
-            vec![WorkspaceMenuProject {
-                root: root.into(),
-                title: "repo".into(),
-                order: 0,
-            }],
-            Vec::new(),
-        )
+    fn directory_with_projects(roots: &[&str]) -> WorkspaceDirectory {
+        WorkspaceDirectory {
+            projects: roots.iter().map(|root| root.to_string()).collect(),
+            ..WorkspaceDirectory::default()
+        }
     }
 
     fn claude_option() -> AcpAgentOption {
@@ -521,13 +526,13 @@ mod tests {
 
     fn plan_acp(
         params: SessionCreateParams,
-        menu: &WorkspaceMenuSnapshot,
+        directory: &WorkspaceDirectory,
         existing: Option<RemoteSessionRecord>,
     ) -> Result<CreatePlan, ControlError> {
         plan_create(
             params,
             CreateTarget::Acp(claude_option()),
-            menu,
+            directory,
             |_| Ok(existing),
             |_| false,
         )
@@ -550,8 +555,8 @@ mod tests {
 
     #[test]
     fn retry_with_the_same_request_reuses_the_recorded_session() {
-        let menu = menu_with_project("/repo");
-        let CreatePlan::Acp(first) = plan_acp(acp_params("/repo", REQUEST), &menu, None).unwrap()
+        let directory = directory_with_projects(&["/repo"]);
+        let CreatePlan::Acp(first) = plan_acp(acp_params("/repo", REQUEST), &directory, None).unwrap()
         else {
             panic!("应规划成对话");
         };
@@ -561,7 +566,7 @@ mod tests {
         });
 
         let CreatePlan::Acp(retry) =
-            plan_acp(acp_params("/repo", REQUEST), &menu, Some(recorded)).unwrap()
+            plan_acp(acp_params("/repo", REQUEST), &directory, Some(recorded)).unwrap()
         else {
             panic!("应规划成对话");
         };
@@ -575,28 +580,14 @@ mod tests {
 
     #[test]
     fn retry_with_different_parameters_is_a_conflict() {
-        let menu = WorkspaceMenuSnapshot::current(
-            vec![
-                WorkspaceMenuProject {
-                    root: "/repo".into(),
-                    title: "repo".into(),
-                    order: 0,
-                },
-                WorkspaceMenuProject {
-                    root: "/other".into(),
-                    title: "other".into(),
-                    order: 1,
-                },
-            ],
-            Vec::new(),
-        );
-        let CreatePlan::Acp(first) = plan_acp(acp_params("/repo", REQUEST), &menu, None).unwrap()
+        let directory = directory_with_projects(&["/repo", "/other"]);
+        let CreatePlan::Acp(first) = plan_acp(acp_params("/repo", REQUEST), &directory, None).unwrap()
         else {
             panic!("应规划成对话");
         };
         let recorded = || Some(RemoteSessionRecord::from(first.clone()));
 
-        let other_project = plan_acp(acp_params("/other", REQUEST), &menu, recorded());
+        let other_project = plan_acp(acp_params("/other", REQUEST), &directory, recorded());
         assert_eq!(
             other_project.err().unwrap().code,
             ControlErrorCode::Conflict
@@ -607,7 +598,7 @@ mod tests {
             ..acp_params("/repo", REQUEST)
         };
         assert_eq!(
-            plan_acp(resumed, &menu, recorded()).err().unwrap().code,
+            plan_acp(resumed, &directory, recorded()).err().unwrap().code,
             ControlErrorCode::Conflict
         );
 
@@ -617,7 +608,7 @@ mod tests {
                 ..acp_params("/repo", REQUEST)
             },
             CreateTarget::Terminal { launch: None },
-            &menu,
+            &directory,
             |id| {
                 Ok(Some(RemoteSessionRecord::from(RemoteAcpSession {
                     id: id.to_string(),
@@ -635,11 +626,11 @@ mod tests {
 
     #[test]
     fn a_request_id_cannot_adopt_a_local_runtime() {
-        let menu = menu_with_project("/repo");
+        let directory = directory_with_projects(&["/repo"]);
         let plan = plan_create(
             acp_params("/repo", REQUEST),
             CreateTarget::Acp(claude_option()),
-            &menu,
+            &directory,
             |_| Ok(None),
             |_| true,
         );
@@ -647,9 +638,9 @@ mod tests {
     }
 
     #[test]
-    fn projects_outside_the_workspace_menu_are_rejected() {
-        let menu = menu_with_project("/repo");
-        let acp = plan_acp(acp_params("/etc", REQUEST), &menu, None);
+    fn projects_outside_the_workspace_directory_are_rejected() {
+        let directory = directory_with_projects(&["/repo"]);
+        let acp = plan_acp(acp_params("/etc", REQUEST), &directory, None);
         assert_eq!(
             acp.err().unwrap().code,
             ControlErrorCode::FailedPrecondition
@@ -661,7 +652,7 @@ mod tests {
                 ..Default::default()
             },
             CreateTarget::Terminal { launch: None },
-            &menu,
+            &directory,
             |_| Ok(None),
             |_| false,
         );
@@ -671,13 +662,13 @@ mod tests {
         );
 
         // 只有智能体对话可以不带项目；普通对话不带项目是参数错误。
-        let missing = plan_acp(acp_params("", REQUEST), &menu, None);
+        let missing = plan_acp(acp_params("", REQUEST), &directory, None);
         assert_eq!(missing.err().unwrap().code, ControlErrorCode::InvalidParams);
     }
 
     #[test]
     fn terminal_plan_uses_the_project_and_keeps_the_launch_command() {
-        let menu = menu_with_project("/repo");
+        let directory = directory_with_projects(&["/repo"]);
         let CreatePlan::Terminal { session, launch } = plan_create(
             SessionCreateParams {
                 project_root: "/repo".into(),
@@ -687,7 +678,7 @@ mod tests {
             CreateTarget::Terminal {
                 launch: Some("claude".into()),
             },
-            &menu,
+            &directory,
             |_| Ok(None),
             |_| false,
         )
@@ -789,28 +780,33 @@ mod tests {
         }
     }
 
-    fn menu_session(id: &str, kind: WorkspaceMenuSessionKind) -> WorkspaceMenuSession {
-        WorkspaceMenuSession {
-            id: id.into(),
-            kind,
-            title: String::new(),
-            custom_title: false,
-            cwd: None,
-            project_root: None,
-            project_title: None,
-            project_order: 0,
-            session_order: 0,
-            leaf_order: 0,
-            agent: None,
+    fn acp_conversation(sid: &str) -> WorkspaceConversation {
+        WorkspaceConversation {
+            id: format!("c-{sid}"),
+            acp: Some(WorkspaceAcp {
+                sid: sid.into(),
+                ..WorkspaceAcp::default()
+            }),
+            ..WorkspaceConversation::default()
+        }
+    }
+
+    fn terminal_conversation(terminal_id: &str) -> WorkspaceConversation {
+        WorkspaceConversation {
+            id: format!("c-{terminal_id}"),
+            terminals: vec![WorkspaceTerminal {
+                id: Some(terminal_id.into()),
+                ..WorkspaceTerminal::default()
+            }],
+            ..WorkspaceConversation::default()
         }
     }
 
     #[test]
-    fn delete_kind_comes_from_the_catalog_then_runtime_then_menu() {
+    fn delete_kind_comes_from_the_catalog_then_runtime_then_directory() {
         let sessions = super::super::new_sessions();
         let acp_sessions = super::super::new_test_acp_sessions();
         let remote_sessions = super::super::new_test_remote_sessions();
-        let workspace_menu = super::super::new_test_workspace_menu();
         super::super::mutate_remote_catalog(&remote_sessions, |catalog| {
             catalog.upsert_terminal(remote_terminal("shared"))
         })
@@ -818,27 +814,29 @@ mod tests {
         acp_sessions.reserve_with("acp-live", || {
             super::super::make_acp_session("acp-live", None, None, None)
         });
-        *workspace_menu.lock().unwrap() = WorkspaceMenuSnapshot::current(
-            Vec::new(),
-            vec![
-                menu_session("shared", WorkspaceMenuSessionKind::Acp),
-                menu_session("acp-live", WorkspaceMenuSessionKind::Terminal),
-                menu_session("dormant", WorkspaceMenuSessionKind::Acp),
+        let workspace_directory = WorkspaceDirectoryReader::fixed(WorkspaceDirectory {
+            conversations: vec![
+                acp_conversation("shared"),
+                terminal_conversation("acp-live"),
+                acp_conversation("dormant"),
+                terminal_conversation("dormant-term"),
             ],
-        );
+            ..WorkspaceDirectory::default()
+        });
         let kind = |id| {
             session_delete_kind(
                 id,
                 &sessions,
                 &acp_sessions,
                 &remote_sessions,
-                &workspace_menu,
+                &workspace_directory,
             )
         };
 
         assert_eq!(kind("shared"), Some(SessionDeleteKind::Terminal));
         assert_eq!(kind("acp-live"), Some(SessionDeleteKind::Acp));
         assert_eq!(kind("dormant"), Some(SessionDeleteKind::Acp));
+        assert_eq!(kind("dormant-term"), Some(SessionDeleteKind::Terminal));
         assert_eq!(kind("missing"), None);
     }
 
@@ -853,7 +851,7 @@ mod tests {
             &super::super::new_sessions(),
             acp_sessions,
             remote_sessions,
-            &super::super::new_test_workspace_menu(),
+            &super::super::new_test_workspace_directory(),
             automations,
             &super::super::new_event_hub(),
         )

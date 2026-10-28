@@ -30,7 +30,7 @@ pub(crate) struct ServerShared {
     pub(crate) sessions: Sessions,
     pub(crate) acp_sessions: AcpSessions,
     pub(crate) remote_sessions: RemoteSessions,
-    pub(crate) workspace_menu: WorkspaceMenuStore,
+    pub(crate) workspace_directory: WorkspaceDirectoryReader,
     pub(crate) automations: AutomationStore,
     pub(crate) exe_mtime: u64,
     /// 启动时钉死的进程指纹（version 回给 GUI 判 outdated 用）。
@@ -73,7 +73,7 @@ pub(crate) fn handle_conn<C: ClientSocket + crate::protocol::PeerSource>(
         sessions,
         acp_sessions,
         remote_sessions,
-        workspace_menu,
+        workspace_directory,
         automations,
         exe_mtime,
         daemon_fingerprint,
@@ -103,7 +103,7 @@ pub(crate) fn handle_conn<C: ClientSocket + crate::protocol::PeerSource>(
             &sessions,
             &acp_sessions,
             &remote_sessions,
-            &workspace_menu,
+            &workspace_directory,
             &automations,
             &event_hub,
             exe_mtime,
@@ -133,12 +133,12 @@ pub(crate) fn handle_conn<C: ClientSocket + crate::protocol::PeerSource>(
             &remote_sessions,
         ),
         DaemonOperation::AcpWatch => {
-            handle_acp_watch(conn, reader, &v, acp_sessions, &workspace_menu, &event_hub)
+            handle_acp_watch(conn, reader, &v, acp_sessions, &workspace_directory, &event_hub)
         }
         DaemonOperation::AcpSnapshot => handle_acp_snapshot(conn, &v, &acp_sessions, &event_hub),
         DaemonOperation::AcpSkills => handle_acp_skills(conn, &v, &acp_sessions),
         DaemonOperation::AcpSubmitInput => {
-            handle_acp_submit_input(conn, &v, &acp_sessions, &workspace_menu, &event_hub)
+            handle_acp_submit_input(conn, &v, &acp_sessions, &workspace_directory, &event_hub)
         }
         DaemonOperation::AcpAction => handle_acp_action(conn, &v, &acp_sessions, &event_hub),
         DaemonOperation::AcpKill => {
@@ -149,9 +149,6 @@ pub(crate) fn handle_conn<C: ClientSocket + crate::protocol::PeerSource>(
         DaemonOperation::RemoteSessions => handle_remote_sessions_op(conn, &remote_sessions),
         DaemonOperation::HistoryRename => {
             handle_history_rename(conn, &v, &remote_sessions, &event_hub)
-        }
-        DaemonOperation::WorkspaceMenu => {
-            handle_workspace_menu(conn, &v, &workspace_menu, &event_hub)
         }
         DaemonOperation::AutomationsSnapshot => {
             handle_automations_snapshot(conn, &automations, &event_hub)

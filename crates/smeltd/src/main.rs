@@ -168,9 +168,6 @@ use smelt_core::session_control::{
     RemoteAcpSession, RemoteSessionCatalog, RemoteSessionKind, RemoteSessionLifecycle,
     RemoteSessionSnapshot, RemoteTerminalSession, find_agent_option_for,
 };
-use smelt_core::workspace_menu::{
-    WorkspaceMenuSnapshot, load_published_workspace_menu, persist_published_workspace_menu,
-};
 use terminal_output::{KeyframeNeed, OutputAttachment, enqueue_session_streams};
 use terminal_progress::ProgressTracker;
 use terminal_registry::{TerminalRegistry, TerminalSlot};
@@ -914,7 +911,6 @@ fn started_at() -> u64 {
 struct DaemonProjectionSeed {
     sessions: Vec<SessionState>,
     remote_sessions: Option<RemoteSessionSnapshot>,
-    workspace_menu: Option<WorkspaceMenuSnapshot>,
     workspace: Option<smelt_core::workspace_directory::WorkspaceDirectory>,
     automations: Option<AutomationFile>,
 }
@@ -962,7 +958,7 @@ impl RemoteCatalogState {
     ///
     /// 打开失败往往只是**一瞬间**的事：磁盘临时不可写、sidecar 和主库对不上、
     /// 另一个进程正在替换文件。把首次失败当成终局，代价是整个 daemon 生命周期
-    /// 里远程目录都不可用——手机端永远只有一句英文错误，桌面也发布不了菜单，
+    /// 里远程目录都不可用——手机端永远只有一句英文错误，
     /// 而唯一的出路是重启进程。故障消失之后，下一次访问就该自己走出来。
     ///
     /// 不做节流：只有目录处于不可用状态时才会走到这里，而这条路上的调用（远程
@@ -1007,14 +1003,10 @@ impl RemoteCatalogState {
 }
 
 type RemoteSessions = Arc<Mutex<RemoteCatalogState>>;
-type WorkspaceMenuStore = Arc<Mutex<WorkspaceMenuSnapshot>>;
+pub(crate) use workspace_directory::WorkspaceDirectoryReader;
 
 fn new_remote_sessions() -> RemoteSessions {
     Arc::new(Mutex::new(RemoteCatalogState::load_default()))
-}
-
-fn new_workspace_menu() -> WorkspaceMenuStore {
-    Arc::new(Mutex::new(load_published_workspace_menu()))
 }
 
 #[cfg(test)]
@@ -1030,8 +1022,8 @@ fn new_test_remote_sessions() -> RemoteSessions {
 }
 
 #[cfg(test)]
-fn new_test_workspace_menu() -> WorkspaceMenuStore {
-    Arc::new(Mutex::new(WorkspaceMenuSnapshot::default()))
+fn new_test_workspace_directory() -> WorkspaceDirectoryReader {
+    WorkspaceDirectoryReader::fixed(Default::default())
 }
 
 #[cfg(test)]
@@ -1116,39 +1108,6 @@ fn broadcast_remote_sessions(event_hub: &EventHubHandle, snapshot: &RemoteSessio
     if let Err(error) = event_hub.publish_remote_sessions(snapshot) {
         eprintln!("[event-hub] remote sessions publish failed: {error}");
     }
-}
-
-fn broadcast_workspace_menu(event_hub: &EventHubHandle, snapshot: &WorkspaceMenuSnapshot) {
-    if let Err(error) = event_hub.publish_workspace_menu(snapshot) {
-        eprintln!("[event-hub] workspace menu publish failed: {error}");
-    }
-}
-
-fn publish_workspace_menu_snapshot(
-    store: &WorkspaceMenuStore,
-    event_hub: &EventHubHandle,
-    mut menu: WorkspaceMenuSnapshot,
-) -> Result<WorkspaceMenuSnapshot, String> {
-    let mut stored = store.lock().unwrap();
-    // 同一桌面实例的 RPC 可能因断线重试或后台完成顺序而倒序抵达。daemon revision
-    // 只能表达“已接收顺序”，不能判断哪个 payload 更新，因此同时保存发布者序号。
-    if !menu.source_id.is_empty()
-        && menu.source_id == stored.source_id
-        && menu.source_revision != 0
-        && menu.source_revision <= stored.source_revision
-    {
-        return Ok(stored.clone());
-    }
-    menu.revision = stored.revision.saturating_add(1);
-    persist_published_workspace_menu(&menu)?;
-    *stored = menu.clone();
-    drop(stored);
-    broadcast_workspace_menu(event_hub, &menu);
-    Ok(menu)
-}
-
-fn workspace_menu_snapshot(store: &WorkspaceMenuStore) -> WorkspaceMenuSnapshot {
-    store.lock().unwrap().clone()
 }
 
 fn remote_session_snapshot(
@@ -1347,31 +1306,6 @@ fn handle_history_rename<C: ClientSocket>(
     })();
     let response = match result {
         Ok(()) => serde_json::json!({ "ok": true }),
-        Err(error) => serde_json::json!({ "ok": false, "error": error }),
-    };
-    let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
-}
-
-fn handle_workspace_menu<C: ClientSocket>(
-    mut conn: C,
-    v: &serde_json::Value,
-    store: &WorkspaceMenuStore,
-    event_hub: &EventHubHandle,
-) {
-    let result = (|| -> Result<WorkspaceMenuSnapshot, String> {
-        let menu = v
-            .get("menu")
-            .cloned()
-            .ok_or_else(|| "missing menu".to_string())?;
-        let menu: WorkspaceMenuSnapshot = serde_json::from_value(menu)
-            .map_err(|error| format!("invalid workspace menu: {error}"))?;
-        if menu.version == 0 {
-            return Err("workspace menu version must be current".to_string());
-        }
-        publish_workspace_menu_snapshot(store, event_hub, menu)
-    })();
-    let response = match result {
-        Ok(menu) => serde_json::json!({ "ok": true, "revision": menu.revision }),
         Err(error) => serde_json::json!({ "ok": false, "error": error }),
     };
     let _ = smelt_runtime_client::protocol::write_json_line(&mut conn, &response);
@@ -2720,7 +2654,7 @@ fn main() {
     // 远程目录是 daemon 独占的持久化状态，新进程重新打开
     // 即可。读取异常时 fail-closed，绝不把损坏文档当成空目录发布给 GUI。
     let remote_sessions = new_remote_sessions();
-    let workspace_menu = new_workspace_menu();
+    let workspace_directory = WorkspaceDirectoryReader::from_store();
     // 升级的接班进程：前任回执后才退出，退出前监听还在它手里。等它退了再绑。
     #[cfg(windows)]
     if let Some(pid) = predecessor_pid
@@ -2774,7 +2708,6 @@ fn main() {
         &sessions,
         &acp_sessions,
         &remote_sessions,
-        &workspace_menu,
         automations.lock().unwrap().snapshot(),
     ));
 
@@ -2792,7 +2725,7 @@ fn main() {
         sessions,
         acp_sessions,
         remote_sessions,
-        workspace_menu,
+        workspace_directory,
         automations,
         event_hub,
         daemon_fingerprint,
@@ -3036,7 +2969,7 @@ fn run_serve_loop(
     sessions: Sessions,
     acp_sessions: AcpSessions,
     remote_sessions: RemoteSessions,
-    workspace_menu: WorkspaceMenuStore,
+    workspace_directory: WorkspaceDirectoryReader,
     automations: AutomationStore,
     event_hub: EventHubHandle,
     daemon_fingerprint: Option<String>,
@@ -3061,7 +2994,7 @@ fn run_serve_loop(
         sessions,
         acp_sessions,
         remote_sessions,
-        workspace_menu,
+        workspace_directory,
         automations,
         exe_mtime,
         daemon_fingerprint,

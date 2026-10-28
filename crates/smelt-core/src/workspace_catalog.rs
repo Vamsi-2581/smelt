@@ -112,6 +112,38 @@ pub fn close_project_on(
     })
 }
 
+/// 一个会话被删掉了（手机、命令行的 `session.delete`；进程调用方已经收掉）：从目录里摘掉。
+/// ACP 会话删整段对话；终端只摘这一格，摘完没有终端了删整段对话。不在目录里的会话
+/// （只在远程目录里的）不改。读和改在同一把锁里，不会夹进别的改动。
+pub fn forget_session_on(
+    store: &smelt_store::Store,
+    session_id: &str,
+) -> Result<DirectoryChange, DirectoryError> {
+    change_on(store, |store| {
+        let (_, snapshot) = store.workspace_directory()?;
+        let directory = directory_from_snapshot(0, snapshot);
+        let Some(conversation) = directory.conversations.into_iter().find(|conversation| {
+            conversation.acp.as_ref().is_some_and(|acp| acp.sid == session_id)
+                || conversation
+                    .terminals
+                    .iter()
+                    .any(|terminal| terminal.id.as_deref() == Some(session_id))
+        }) else {
+            return Ok((false, None));
+        };
+        let mut remaining = conversation.clone();
+        remaining
+            .terminals
+            .retain(|terminal| terminal.id.as_deref() != Some(session_id));
+        if remaining.acp.is_some() || remaining.terminals.is_empty() {
+            let (commit, removed) = store.delete_workspace_conversation(&conversation.id)?;
+            return Ok((commit.changed, removed.map(conversation_from_record)));
+        }
+        let commit = store.update_workspace_conversation(&conversation_record(&remaining))?;
+        Ok((commit.changed, None))
+    })
+}
+
 /// 把以 `sid` 为 ACP 会话的那段对话改名：对话标题和 ACP 会话标题一起改。GUI 没开时，
 /// 下次冷启动靠这份标题，而不是远程目录里的种子标题。没有这段对话、或标题本来就是它，
 /// 不改动。

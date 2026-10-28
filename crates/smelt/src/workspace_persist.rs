@@ -438,8 +438,6 @@ struct SnapshotJob {
     commands: Option<DirectoryCommands>,
     /// 用户打开、关闭的项目，按发生的先后。跟在对话命令后面发。
     project_ops: Vec<ProjectOp>,
-    /// 同步发给 smeltd 的侧栏菜单。远程客户端只消费 daemon 订阅，不读工作区目录。
-    menu: smelt_model::workspace_menu::WorkspaceMenuSnapshot,
 }
 
 /// 打开或关闭一个项目。项目列表不在本地另记一份，发出去等推送回来再变。
@@ -530,11 +528,6 @@ fn persist_ws_snapshot(job: &SnapshotJob) -> (DirectoryOutcome, Vec<String>) {
         .map(|commands| send_directory_commands(&job.runtime, commands))
         .unwrap_or_default();
     let project_errors = send_project_ops(&job.runtime, &job.project_ops);
-    if let Err(e) =
-        smelt_client::session_ops::publish_workspace_menu(job.runtime.client(), &job.menu)
-    {
-        eprintln!("[workspace] 发布侧栏菜单失败: {e}");
-    }
     (outcome, project_errors)
 }
 
@@ -984,7 +977,6 @@ impl Workspace {
             ui,
             commands,
             project_ops: Vec::new(),
-            menu: self.workspace_menu_snapshot(key, cx),
         })
     }
 
@@ -1166,7 +1158,6 @@ mod workspace_snapshot_write_queue_tests {
                 ..Default::default()
             }),
             project_ops: Vec::new(),
-            menu: Default::default(),
         }
     }
 

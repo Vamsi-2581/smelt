@@ -3,14 +3,57 @@
 //!
 //! 库由调用方给：控制分发传默认主库，测试传临时库。
 
+use std::sync::Arc;
+
 use smelt_core::automation_store::AutomationStore;
 use smelt_core::session_control::is_background_acp_session_id;
 use smelt_core::workspace_catalog::{self, DirectoryChange, DirectoryError};
-use smelt_core::workspace_directory::{WorkspaceConversation, WorkspaceRevision};
+use smelt_core::workspace_directory::{
+    WorkspaceConversation, WorkspaceDirectory, WorkspaceRevision,
+};
 use smelt_runtime_client::protocol::control::{ControlError, ControlErrorCode};
 use smelt_store::Store;
 
 use super::{AcpSessions, EventHubHandle, RemoteSessions, Sessions, dlog};
+
+/// 读当前的工作区目录。新建会话校验项目、删会话认类型、唤醒挂起的对话、Pi 通讯录都按它
+/// 判断，不另存一份。生产从主库现读；测试换成固定的一份（测试进程里默认主库是关着的）。
+#[derive(Clone)]
+pub(crate) struct WorkspaceDirectoryReader(
+    Arc<dyn Fn() -> Result<WorkspaceDirectory, String> + Send + Sync>,
+);
+
+impl WorkspaceDirectoryReader {
+    pub(crate) fn from_store() -> Self {
+        Self(Arc::new(|| {
+            workspace_catalog::directory().map_err(|error| error.to_string())
+        }))
+    }
+
+    /// 守护还没起好（没有服务状态）时用：读不到目录。
+    pub(crate) fn unavailable() -> Self {
+        Self(Arc::new(|| Err("工作区目录还没就绪".to_string())))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixed(directory: WorkspaceDirectory) -> Self {
+        Self(Arc::new(move || Ok(directory.clone())))
+    }
+
+    pub(crate) fn read(&self) -> Result<WorkspaceDirectory, String> {
+        (self.0)()
+    }
+
+    /// 目录里有没有以 `sid` 为 ACP 会话的对话。读不到目录按没有算。
+    pub(crate) fn has_acp(&self, sid: &str) -> bool {
+        self.read().is_ok_and(|directory| {
+            directory
+                .conversations
+                .iter()
+                .any(|conversation| conversation.acp.as_ref().is_some_and(|acp| acp.sid == sid))
+        })
+    }
+}
 
 /// 守护的默认主库。
 pub(crate) fn default_store() -> Result<Store, ControlError> {
@@ -91,6 +134,17 @@ pub(crate) fn close_project(
     event_hub: &EventHubHandle,
 ) -> Result<WorkspaceRevision, ControlError> {
     let change = workspace_catalog::close_project_on(store, root).map_err(control_error)?;
+    Ok(publish(&change, event_hub))
+}
+
+/// `session.delete` 删掉的会话从目录里摘掉，改了就推（见 [`workspace_catalog::forget_session_on`]）。
+/// 进程调用方已经收掉了，这里只改目录。
+pub(crate) fn forget_session(
+    store: &Store,
+    session_id: &str,
+    event_hub: &EventHubHandle,
+) -> Result<WorkspaceRevision, ControlError> {
+    let change = workspace_catalog::forget_session_on(store, session_id).map_err(control_error)?;
     Ok(publish(&change, event_hub))
 }
 

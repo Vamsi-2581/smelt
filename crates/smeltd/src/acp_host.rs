@@ -44,7 +44,7 @@ pub(crate) use watched::Watched;
 //       `{"snapshot": ConversationSnapshot}`，之后归约有实质变化再推同形状的行。
 //       写线程还没把上一份写完时，后到的变化并进同一份，不另排一条字节队列。
 //       同 id 只允许一个控制连接，第二次 open 顶掉前一个。
-//   {"op":"acp_watch","id":".."} → 只读镜像，可多个并存。会话没在跑但属于桌面菜单时
+//   {"op":"acp_watch","id":".."} → 只读镜像，可多个并存。会话没在跑但在工作区目录里时
 //     先请桌面端唤醒；唤醒不了回一行 `{"unavailable":{"reason":..}}`。
 //     `acp_watch` / `acp_snapshot` 可带 `"include_debug": false`：不要工具参数和
 //     runtime debug sidecar。后者含每次模型调用的完整 provider payload（图片会在
@@ -3229,7 +3229,7 @@ pub(crate) fn handle_acp_submit_input<C: ClientSocket>(
     mut conn: C,
     v: &serde_json::Value,
     acp_sessions: &AcpSessions,
-    workspace_menu: &WorkspaceMenuStore,
+    workspace_directory: &WorkspaceDirectoryReader,
     subscribers: &EventHubHandle,
 ) {
     let id = v["id"].as_str().unwrap_or_default();
@@ -3257,7 +3257,7 @@ pub(crate) fn handle_acp_submit_input<C: ClientSocket>(
         }
         // 用户在这个对话里说话了，别的对话发来的消息链断在这里。
         crate::peer_messages::reset_chain(id);
-        let slot = ensure_conversation_runtime(id, acp_sessions, workspace_menu, subscribers)
+        let slot = ensure_conversation_runtime(id, acp_sessions, workspace_directory, subscribers)
             .map_err(smelt_core::conversation::ConversationSubmitError::rejected)?;
         acp_sessions
             .with_current(id, &slot, |session| {
@@ -3792,7 +3792,7 @@ pub(crate) fn create_daemon_acp_session(
 
 /// 只读旁观，不参与 client 顶替，可多个并存。
 ///
-/// 会话没在跑时 daemon 自己起不来它：启动规格归桌面端。如果它是桌面菜单里的
+/// 会话没在跑时 daemon 自己起不来它：启动规格归桌面端。如果它是工作区目录里的
 /// 对话（daemon 冷重启后桌面只放了占位），就请桌面端拉起来再接上；拉不起来写一行
 /// `{"unavailable": {"reason": ..}}` 说清楚，绝不静默断开——旁观方分不清「没有」
 /// 和「还没到」，只会一直转圈。
@@ -3801,7 +3801,7 @@ pub(crate) fn handle_acp_watch<C: ClientSocket>(
     mut reader: BufReader<C>,
     v: &serde_json::Value,
     acp_sessions: AcpSessions,
-    workspace_menu: &WorkspaceMenuStore,
+    workspace_directory: &WorkspaceDirectoryReader,
     subscribers: &EventHubHandle,
 ) {
     let id = v["id"].as_str().unwrap_or_default().to_string();
@@ -3811,7 +3811,7 @@ pub(crate) fn handle_acp_watch<C: ClientSocket>(
     let include_debug = request_includes_debug(v);
     let image_refs = request_image_refs(v);
     // 旁观不唤醒挂起的 runtime：镜像够看。
-    let slot = match conversation_slot(&id, &acp_sessions, workspace_menu, subscribers) {
+    let slot = match conversation_slot(&id, &acp_sessions, workspace_directory, subscribers) {
         Ok(slot) => slot,
         Err(reason) => {
             let _ = smelt_runtime_client::protocol::write_json_line(
@@ -3905,12 +3905,12 @@ pub(crate) fn handle_acp_watch<C: ClientSocket>(
 /// 投递和 GUI 主线程的一拍。宽裕到覆盖 GUI 刚起、对话占位还在恢复的窗口。
 const ACP_WAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// 这段对话的注册表槽：在就直接给；不在但在桌面侧栏菜单里（daemon 冷启动后桌面只放了
+/// 这段对话的注册表槽：在就直接给；不在但在工作区目录里（daemon 冷启动后桌面只放了
 /// 占位），请桌面打开再等它出现。错误串直接给人看：手机上的提示、peer 发送方收到的退信。
 pub(crate) fn conversation_slot(
     id: &str,
     acp_sessions: &AcpSessions,
-    workspace_menu: &WorkspaceMenuStore,
+    workspace_directory: &WorkspaceDirectoryReader,
     subscribers: &EventHubHandle,
 ) -> Result<Arc<AcpSlot<AcpSession>>, String> {
     if let Some(slot) = acp_sessions.get(id) {
@@ -3919,7 +3919,7 @@ pub(crate) fn conversation_slot(
     wake_dormant_conversation(
         id,
         acp_sessions,
-        workspace_menu,
+        workspace_directory,
         subscribers,
         ACP_WAKE_TIMEOUT,
     )
@@ -3930,10 +3930,10 @@ pub(crate) fn conversation_slot(
 pub(crate) fn ensure_conversation_runtime(
     id: &str,
     acp_sessions: &AcpSessions,
-    workspace_menu: &WorkspaceMenuStore,
+    workspace_directory: &WorkspaceDirectoryReader,
     subscribers: &EventHubHandle,
 ) -> Result<Arc<AcpSlot<AcpSession>>, String> {
-    let slot = conversation_slot(id, acp_sessions, workspace_menu, subscribers)?;
+    let slot = conversation_slot(id, acp_sessions, workspace_directory, subscribers)?;
     crate::acp_idle::wake_suspended_acp_session(id, &slot, acp_sessions, subscribers)?;
     Ok(slot)
 }
@@ -3942,11 +3942,11 @@ pub(crate) fn ensure_conversation_runtime(
 fn wake_dormant_conversation(
     id: &str,
     acp_sessions: &AcpSessions,
-    workspace_menu: &WorkspaceMenuStore,
+    workspace_directory: &WorkspaceDirectoryReader,
     subscribers: &EventHubHandle,
     timeout: Duration,
 ) -> Result<Arc<AcpSlot<AcpSession>>, String> {
-    if workspace_menu.lock().unwrap().acp_session(id).is_none() {
+    if !workspace_directory.has_acp(id) {
         return Err("This conversation is no longer running.".to_string());
     }
     match subscribers.request_conversation_wake(id) {

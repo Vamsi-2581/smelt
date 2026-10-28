@@ -332,7 +332,7 @@ impl Courier {
         let slot = crate::acp_host::ensure_conversation_runtime(
             target,
             &self.acp_sessions,
-            &workspace_menu(),
+            &workspace_directory(),
             &self.subscribers,
         )?;
         let sess = &slot.value;
@@ -432,11 +432,22 @@ fn with_target(mut reply: serde_json::Value, id: &str, title: &str) -> serde_jso
     reply
 }
 
-fn workspace_menu() -> WorkspaceMenuStore {
+fn workspace_directory() -> WorkspaceDirectoryReader {
     SERVER
         .get()
-        .map(|server| Arc::clone(&server.workspace_menu))
+        .map(|server| server.workspace_directory.clone())
+        .unwrap_or_else(WorkspaceDirectoryReader::unavailable)
+}
+
+/// 工作区目录里一段对话的名字：用户起的，其次 ACP 会话自己的标题。
+fn directory_title(conversation: &smelt_core::workspace_directory::WorkspaceConversation) -> String {
+    conversation
+        .custom_title
+        .as_deref()
+        .or_else(|| conversation.acp.as_ref()?.session_title.as_deref())
+        .map(str::trim)
         .unwrap_or_default()
+        .to_string()
 }
 
 /// 对话目录里的一项。
@@ -481,25 +492,25 @@ fn live_peer(id: &str, sess: &AcpSession) -> Peer {
     }
 }
 
-/// 侧栏菜单里、这次 daemon 还没打开过的 Pi 对话。
+/// 工作区目录里、这次 daemon 还没打开过的 Pi 对话。
 fn dormant_peers(acp_sessions: &AcpSessions) -> Vec<Peer> {
     let pi = smelt_core::agent_kind::ConversationAgentKind::Pi.id();
-    let menu = workspace_menu();
-    let menu = menu.lock().unwrap();
-    menu.sessions
+    let Ok(directory) = workspace_directory().read() else {
+        return Vec::new();
+    };
+    directory
+        .conversations
         .iter()
-        .filter(|session| {
-            session.kind == smelt_core::workspace_menu::WorkspaceMenuSessionKind::Acp
-                && session.agent.as_deref() == Some(pi)
-                && !is_automation(&session.id)
-                && acp_sessions.get(&session.id).is_none()
-        })
-        .map(|session| Peer {
-            id: session.id.clone(),
-            title: session.title.trim().to_string(),
-            project: session.cwd.clone().or_else(|| session.project_root.clone()),
-            state: "dormant",
-            bypasses: None,
+        .filter_map(|conversation| {
+            let acp = conversation.acp.as_ref()?;
+            (acp.agent == pi && !is_automation(&acp.sid) && acp_sessions.get(&acp.sid).is_none())
+                .then(|| Peer {
+                    id: acp.sid.clone(),
+                    title: directory_title(conversation),
+                    project: acp.cwd.clone(),
+                    state: "dormant",
+                    bypasses: None,
+                })
         })
         .collect()
 }
@@ -536,17 +547,24 @@ fn not_found(id: &str) -> serde_json::Value {
     )
 }
 
-/// 侧栏上的名字：桌面菜单里的（含用户改过的），其次远程目录里的，再次会话自己的标题。
+/// 侧栏上的名字：工作区目录里的（含用户改过的），其次远程目录里的，再次会话自己的标题。
 fn title_of(id: &str, sess: &AcpSession) -> String {
     if let Some(server) = SERVER.get() {
-        let menu = server
-            .workspace_menu
-            .lock()
-            .unwrap()
-            .acp_session(id)
-            .map(|session| session.title.trim().to_string())
+        let directory = server
+            .workspace_directory
+            .read()
+            .ok()
+            .and_then(|directory| {
+                directory
+                    .conversations
+                    .iter()
+                    .find(|conversation| {
+                        conversation.acp.as_ref().is_some_and(|acp| acp.sid == id)
+                    })
+                    .map(directory_title)
+            })
             .filter(|title| !title.is_empty());
-        if let Some(title) = menu {
+        if let Some(title) = directory {
             return title;
         }
         let catalog = server

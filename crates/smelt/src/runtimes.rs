@@ -1,7 +1,7 @@
 //! 桌面挂着的运行时（设计文档 D6）。本机运行时总在；远程运行时来自
 //! 客户端库里登记的连接。会话、视图各自记着自己属于哪个运行时，调用、连接都发给它。
 
-use smelt_client::runtime_path::PathStyle;
+use smelt_model::runtime_path::PathStyle;
 use smelt_runtime_client::RuntimeClient;
 
 pub(crate) use smelt_client::runtime::{Runtime, RuntimeKey};
@@ -43,12 +43,9 @@ pub(crate) fn smelt_home(key: &RuntimeKey, cx: &gpui::App) -> Option<String> {
 pub(crate) fn path_style(key: &RuntimeKey, cx: &gpui::App) -> PathStyle {
     match key {
         RuntimeKey::Local => PathStyle::LOCAL,
-        RuntimeKey::Remote(_) => {
-            match remote_of(key, cx).and_then(|remote| remote.connection.os.as_deref()) {
-                Some("windows") => PathStyle::Windows,
-                _ => PathStyle::Posix,
-            }
-        }
+        RuntimeKey::Remote(_) => PathStyle::of_os(
+            remote_of(key, cx).and_then(|remote| remote.connection.os.as_deref()),
+        ),
     }
 }
 

@@ -8,9 +8,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::agent_kind::ConversationLaunchSpec;
-use crate::workspace_menu::{
-    WorkspaceMenuProject, WorkspaceMenuSessionKind, WorkspaceMenuSnapshot,
-};
+use crate::workspace_directory::WorkspaceDirectory;
 
 /// 可开对话的 agent 选项。出线（`new_session.catalog`）只带展示与回传用的字段；
 /// 启动规格和历史目录只在运行时那台机器上有意义，不出线，客户端解出来是空的。
@@ -369,12 +367,6 @@ pub struct RemoteSessionSnapshot {
     pub sessions: Vec<RemoteSessionRecord>,
 }
 
-pub fn workspace_projects(menu: &WorkspaceMenuSnapshot) -> Vec<WorkspaceMenuProject> {
-    let mut projects = menu.projects.clone();
-    projects.sort_by_key(|project| project.order);
-    projects
-}
-
 /// 延迟 reattach 完成时是否还该插入桌面投影。目录已经撤回，或本地已有同 id，都丢弃。
 pub fn accept_remote_terminal_projection(
     id: &str,
@@ -428,20 +420,40 @@ pub enum SessionDeleteKind {
     Acp,
 }
 
-/// 远程目录里的 kind 是所有权真相；菜单只覆盖未进目录的本地会话。
+/// 工作区目录里这个会话 id 是终端还是 ACP 会话。不在目录里是 `None`。
+pub fn directory_session_kind(
+    directory: &WorkspaceDirectory,
+    session_id: &str,
+) -> Option<SessionDeleteKind> {
+    directory.conversations.iter().find_map(|conversation| {
+        if conversation
+            .acp
+            .as_ref()
+            .is_some_and(|acp| acp.sid == session_id)
+        {
+            Some(SessionDeleteKind::Acp)
+        } else if conversation
+            .terminals
+            .iter()
+            .any(|terminal| terminal.id.as_deref() == Some(session_id))
+        {
+            Some(SessionDeleteKind::Terminal)
+        } else {
+            None
+        }
+    })
+}
+
+/// 远程目录里的 kind 是所有权真相；工作区目录覆盖桌面建、没进远程目录的会话。
 /// 两边都没有就失败，不要默认当 ACP 杀——会把远程终端的目录摘掉却留下 PTY。
 pub fn resolve_session_delete_kind(
     catalog_kind: Option<RemoteSessionKind>,
-    menu_kind: Option<WorkspaceMenuSessionKind>,
+    directory_kind: Option<SessionDeleteKind>,
 ) -> Result<SessionDeleteKind, String> {
     match catalog_kind {
         Some(RemoteSessionKind::Terminal) => Ok(SessionDeleteKind::Terminal),
         Some(RemoteSessionKind::Acp) => Ok(SessionDeleteKind::Acp),
-        None => match menu_kind {
-            Some(WorkspaceMenuSessionKind::Terminal) => Ok(SessionDeleteKind::Terminal),
-            Some(WorkspaceMenuSessionKind::Acp) => Ok(SessionDeleteKind::Acp),
-            None => Err("session not found".to_string()),
-        },
+        None => directory_kind.ok_or_else(|| "session not found".to_string()),
     }
 }
 

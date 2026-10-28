@@ -68,7 +68,7 @@ attention.created
 插件收到 session.state_changed
     -> 调用 workspace.create_isolated
     -> 领域提交成功
-    -> 发布 workspace_menu.changed
+    -> 发布 workspace.changed
 ```
 
 事件处理器不能持有核心领域对象，也不能直接写 SQLite、PTY、ACP socket 或内存状态。
@@ -251,7 +251,6 @@ session.removed
 attention.created
 attention.cleared
 remote_sessions.changed
-workspace_menu.changed
 workspace.changed
 automations.changed
 plugin.started
@@ -273,7 +272,7 @@ plugin.<plugin_id>.*
 plugin.com.example.auto-review.review_requested
 ```
 
-EventHub 必须校验发布者身份与 topic 前缀，插件不能伪造 `session.*`、`workspace_menu.*` 或其他核心
+EventHub 必须校验发布者身份与 topic 前缀，插件不能伪造 `session.*`、`workspace.*` 或其他核心
 事实。
 
 ### Topic descriptor

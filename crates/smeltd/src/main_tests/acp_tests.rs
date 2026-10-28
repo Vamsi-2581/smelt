@@ -491,7 +491,7 @@ fn submit_input_applies_pending_model_before_the_prompt() {
             "config_values": [["model", "sonnet"]],
         }),
         &acp_sessions,
-        &new_test_workspace_menu(),
+        &new_test_workspace_directory(),
         &new_event_hub(),
     );
     let mut response = String::new();
@@ -551,7 +551,7 @@ fn switching_model_does_not_stop_the_current_turn() {
             "config_values": [["model", "github-copilot/kimi-k3"]],
         }),
         &acp_sessions,
-        &new_test_workspace_menu(),
+        &new_test_workspace_directory(),
         &new_event_hub(),
     );
     let mut response = String::new();
@@ -2394,25 +2394,21 @@ fn read_watch_unavailable(client: UnixStream) -> String {
     v["unavailable"]["reason"].as_str().unwrap().to_string()
 }
 
-fn desktop_menu_with_acp(id: &str) -> WorkspaceMenuStore {
-    let menu = new_test_workspace_menu();
-    *menu.lock().unwrap() = WorkspaceMenuSnapshot::current(
-        vec![],
-        vec![smelt_core::workspace_menu::WorkspaceMenuSession {
-            id: id.into(),
-            kind: smelt_core::workspace_menu::WorkspaceMenuSessionKind::Acp,
-            title: "agent chat".into(),
-            custom_title: false,
-            cwd: None,
-            project_root: None,
-            project_title: None,
-            project_order: 0,
-            session_order: 0,
-            leaf_order: 0,
-            agent: Some("pi".into()),
+/// 工作区目录里有这段对话、但守护还没打开它（守护冷启动后桌面只放了占位）。
+fn directory_with_acp(id: &str) -> WorkspaceDirectoryReader {
+    WorkspaceDirectoryReader::fixed(smelt_core::workspace_directory::WorkspaceDirectory {
+        conversations: vec![smelt_core::workspace_directory::WorkspaceConversation {
+            id: format!("conv-{id}"),
+            custom_title: Some("agent chat".into()),
+            acp: Some(smelt_core::workspace_directory::WorkspaceAcp {
+                sid: id.into(),
+                agent: "pi".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
         }],
-    );
-    menu
+        ..Default::default()
+    })
 }
 
 fn subscribe_conversation_wake(subscribers: &EventHubHandle) -> smelt_event_bus::Subscription {
@@ -2442,7 +2438,7 @@ fn watch_on_unknown_session_reports_unavailable_instead_of_silently_closing() {
         reader,
         &serde_json::json!({"id": "acp-nope"}),
         acp_sessions,
-        &new_test_workspace_menu(),
+        &new_test_workspace_directory(),
         &new_event_hub(),
     );
     // 静默 EOF 会让手机一直转圈：旁观方必须拿到一句明确的「没有」。
@@ -2460,7 +2456,7 @@ fn watch_on_dormant_desktop_conversation_without_desktop_fails_fast() {
         reader,
         &serde_json::json!({"id": "acp-dormant"}),
         acp_sessions,
-        &desktop_menu_with_acp("acp-dormant"),
+        &directory_with_acp("acp-dormant"),
         &new_event_hub(),
     );
     assert!(read_watch_unavailable(client).contains("not open"));
@@ -2484,7 +2480,7 @@ fn submit_to_dormant_desktop_conversation_asks_the_desktop_and_fails_fast_withou
             "input": {"text": "在吗", "images": []},
         }),
         &acp_sessions,
-        &desktop_menu_with_acp("acp-dormant"),
+        &directory_with_acp("acp-dormant"),
         &new_event_hub(),
     );
     let mut response = String::new();
@@ -2503,7 +2499,7 @@ fn watch_on_dormant_desktop_conversation_wakes_desktop_then_attaches() {
     let acp_sessions = new_test_acp_sessions();
     let subscribers = new_event_hub();
     let wake_requests = subscribe_conversation_wake(&subscribers);
-    let menu = desktop_menu_with_acp("acp-dormant");
+    let directory = directory_with_acp("acp-dormant");
 
     let (server, client) = UnixStream::pair().unwrap();
     client
@@ -2517,7 +2513,7 @@ fn watch_on_dormant_desktop_conversation_wakes_desktop_then_attaches() {
             reader,
             &serde_json::json!({"id": "acp-dormant"}),
             sessions_for_watch,
-            &menu,
+            &directory,
             &subscribers,
         );
     });
@@ -2575,7 +2571,7 @@ fn watch_delivers_initial_snapshot_matching_to_snapshot() {
             reader,
             &serde_json::json!({"id": "acp-1"}),
             acp_sessions,
-            &new_test_workspace_menu(),
+            &new_test_workspace_directory(),
             &new_event_hub(),
         );
     });
@@ -2622,7 +2618,7 @@ fn watch_registration_is_serialized_with_snapshot_push() {
             reader,
             &serde_json::json!({"id": "acp-watch-race"}),
             sessions_for_watch,
-            &new_test_workspace_menu(),
+            &new_test_workspace_directory(),
             &new_event_hub(),
         );
     });
@@ -2790,7 +2786,7 @@ fn watch_without_debug_never_streams_the_debug_sidecars() {
             reader,
             &serde_json::json!({"id": "acp-watch-lean", "include_debug": false}),
             sessions_for_watch,
-            &new_test_workspace_menu(),
+            &new_test_workspace_directory(),
             &new_event_hub(),
         );
     });
@@ -4431,7 +4427,7 @@ fn watch_frames_follow_the_image_projection(image_refs: bool) {
             reader,
             &request,
             sessions_for_watch,
-            &new_test_workspace_menu(),
+            &new_test_workspace_directory(),
             &new_event_hub(),
         );
     });

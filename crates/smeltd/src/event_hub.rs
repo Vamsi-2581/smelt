@@ -11,19 +11,16 @@ use smelt_event_bus::{
 use smelt_event_protocol::{
     AggregateRef, CORE_PROJECTION_VERSION, CORE_SESSION_PROJECTION_VERSION,
     CORE_SNAPSHOT_AUTOMATIONS, CORE_SNAPSHOT_REMOTE_SESSIONS, CORE_SNAPSHOT_SESSIONS,
-    CORE_SNAPSHOT_WORKSPACE, CORE_SNAPSHOT_WORKSPACE_MENU, CORE_TOPIC_AUTOMATIONS_CHANGED,
+    CORE_SNAPSHOT_WORKSPACE, CORE_TOPIC_AUTOMATIONS_CHANGED,
     CORE_TOPIC_CONVERSATION_WAKE_REQUESTED, CORE_TOPIC_WORKSPACE_CHANGED,
     CORE_TOPIC_REMOTE_SESSIONS_CHANGED, CORE_TOPIC_SESSION_REMOVED,
-    CORE_TOPIC_SESSION_STATE_CHANGED, CORE_TOPIC_WORKSPACE_MENU_CHANGED, Capability,
+    CORE_TOPIC_SESSION_STATE_CHANGED, Capability,
     ConversationWakeRequested, CoreProjectionEvent, CoreSessionPhase, CorrelationId,
     EventEnvelope, EventId, EventSource, PluginId, PublisherIdentity, SessionStateChanged,
     SessionStateRemoved, SessionStatesSnapshot, SnapshotKind, SubscriptionId, Topic,
 };
 
-use super::{
-    AutomationFile, DaemonProjectionSeed, Phase, RemoteSessionSnapshot, SessionState,
-    WorkspaceMenuSnapshot,
-};
+use super::{AutomationFile, DaemonProjectionSeed, Phase, RemoteSessionSnapshot, SessionState};
 
 const MAILBOX_CAPACITY: usize = 256;
 
@@ -35,7 +32,6 @@ struct ProjectionState {
     sessions_revision: u64,
     retired_instances: BTreeMap<String, u64>,
     remote_sessions: Option<CoreProjectionEvent>,
-    workspace_menu: Option<CoreProjectionEvent>,
     workspace: Option<CoreProjectionEvent>,
     automations: Option<CoreProjectionEvent>,
 }
@@ -68,7 +64,6 @@ impl SnapshotProvider for ProjectionSnapshotProvider {
                 )
             }
             CORE_SNAPSHOT_REMOTE_SESSIONS => projection_value(&projection.remote_sessions),
-            CORE_SNAPSHOT_WORKSPACE_MENU => projection_value(&projection.workspace_menu),
             CORE_SNAPSHOT_WORKSPACE => projection_value(&projection.workspace),
             CORE_SNAPSHOT_AUTOMATIONS => projection_value(&projection.automations),
             _ => {
@@ -166,10 +161,6 @@ impl DaemonEventHub {
         merge_projection(
             &mut projection.remote_sessions,
             seed.remote_sessions.map(projection_event),
-        );
-        merge_projection(
-            &mut projection.workspace_menu,
-            seed.workspace_menu.map(projection_event),
         );
         merge_projection(
             &mut projection.workspace,
@@ -292,20 +283,6 @@ impl DaemonEventHub {
         )
     }
 
-    pub(crate) fn publish_workspace_menu(
-        &self,
-        snapshot: &WorkspaceMenuSnapshot,
-    ) -> Result<bool, EventBusError> {
-        self.publish_projection(
-            CORE_TOPIC_WORKSPACE_MENU_CHANGED,
-            snapshot.revision,
-            serde_json::to_value(snapshot).map_err(|error| {
-                EventBusError::new(format!("serialize workspace menu: {error}"))
-            })?,
-            ProjectionTarget::WorkspaceMenu,
-        )
-    }
-
     /// 工作区目录改完之后推整份。版本不比已推出去的新就不推：并发的两次改动各自读回
     /// 整份目录，后读的那份一定带着更大的版本。
     pub(crate) fn publish_workspace(
@@ -349,7 +326,6 @@ impl DaemonEventHub {
             .map_err(|_| EventBusError::new("daemon projection lock poisoned"))?;
         let current = match target {
             ProjectionTarget::RemoteSessions => &projection.remote_sessions,
-            ProjectionTarget::WorkspaceMenu => &projection.workspace_menu,
             ProjectionTarget::Workspace => &projection.workspace,
             ProjectionTarget::Automations => &projection.automations,
         };
@@ -380,7 +356,6 @@ impl DaemonEventHub {
         )?;
         match target {
             ProjectionTarget::RemoteSessions => projection.remote_sessions = Some(event),
-            ProjectionTarget::WorkspaceMenu => projection.workspace_menu = Some(event),
             ProjectionTarget::Workspace => projection.workspace = Some(event),
             ProjectionTarget::Automations => projection.automations = Some(event),
         }
@@ -633,7 +608,6 @@ impl DaemonEventHub {
         )]);
         for (field, kind) in [
             ("remote_sessions", CORE_SNAPSHOT_REMOTE_SESSIONS),
-            ("workspace_menu", CORE_SNAPSHOT_WORKSPACE_MENU),
             ("workspace", CORE_SNAPSHOT_WORKSPACE),
             ("automations", CORE_SNAPSHOT_AUTOMATIONS),
         ] {
@@ -677,7 +651,6 @@ fn core_envelope(
 
 enum ProjectionTarget {
     RemoteSessions,
-    WorkspaceMenu,
     Workspace,
     Automations,
 }
@@ -692,7 +665,6 @@ fn register_snapshot_providers(
     for kind in [
         CORE_SNAPSHOT_SESSIONS,
         CORE_SNAPSHOT_REMOTE_SESSIONS,
-        CORE_SNAPSHOT_WORKSPACE_MENU,
         CORE_SNAPSHOT_WORKSPACE,
         CORE_SNAPSHOT_AUTOMATIONS,
     ] {

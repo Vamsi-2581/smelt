@@ -6,7 +6,6 @@ pub mod compat;
 pub mod daemon_state;
 pub mod daemon_stop;
 pub mod runtime;
-pub mod runtime_path;
 pub mod session_kill;
 pub mod session_ops;
 // 桌面的在线更新：macOS 换 .app 包，Windows 拉起安装程序。

@@ -8,7 +8,6 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 use serde_json::{Value, json};
 use smelt_model::agent_kind::HistorySourceKind;
 use smelt_model::session_control::*;
-use smelt_model::workspace_menu::WorkspaceMenuSnapshot;
 use smelt_runtime_client::RuntimeClient;
 use smelt_runtime_client::protocol::daemon::DaemonOperation;
 
@@ -40,20 +39,6 @@ pub fn rename_history_title(
     Ok(())
 }
 
-/// 桌面发布侧栏菜单。smeltd 是唯一持有者；远程客户端只消费 subscribe，不读工作区快照。
-pub fn publish_workspace_menu(
-    runtime: &RuntimeClient,
-    menu: &WorkspaceMenuSnapshot,
-) -> Result<(), String> {
-    runtime.request_ok(
-        &serde_json::json!({
-            "op": DaemonOperation::WorkspaceMenu,
-            "menu": menu,
-        }),
-        REQUEST_TIMEOUT,
-    )?;
-    Ok(())
-}
 
 pub fn submit_automation_command(
     runtime: &RuntimeClient,

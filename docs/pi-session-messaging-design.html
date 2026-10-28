@@ -499,7 +499,7 @@
       <tr>
         <td>侧栏目录</td>
         <td>已有</td>
-        <td>桌面把侧栏投影成 <code>WorkspaceMenuSnapshot</code> 发给 daemon（id、标题、cwd、agent），按运行时分开发。daemon 自己建的对话另在远程目录里</td>
+        <td>运行时自己的工作区目录（<code>workspace.changed</code>，对话的 ACP 会话 id、标题、cwd、agent）。daemon 自己建的对话另在远程目录里</td>
       </tr>
       <tr>
         <td>拉起没在跑的对话</td>
@@ -610,7 +610,7 @@ flowchart TB
   subgraph Daemon["smeltd（同进程）"]
     BgA["A 的驱动线程<br/>BackgroundSupervisor<br/>SMELT_BACKGROUND_TASK_SOCK"]
     Gate["绑上的应答<br/>来源 = 绑定时的会话 id"]
-    Dir["对话目录<br/>注册表 + 侧栏菜单"]
+    Dir["对话目录<br/>注册表 + 工作区目录"]
     Outbox["发件队列（内存）<br/>每个目标一条投递线程"]
     Ensure["ensure_conversation_runtime<br/>唤醒挂起 · 请桌面打开"]
     BgB["B 的驱动线程<br/>BackgroundSupervisor<br/>peer 投递队列 · peer_inbox"]
@@ -656,7 +656,7 @@ flowchart TB
         <td><code>busy</code> / <code>idle</code> / <code>suspended</code></td>
       </tr>
       <tr>
-        <td>桌面发来的侧栏菜单（<code>WorkspaceMenuSnapshot</code>）</td>
+        <td>运行时的工作区目录（<code>WorkspaceDirectory</code>）</td>
         <td><code>kind = acp</code>、<code>agent = "pi"</code>、不在注册表里的对话：侧栏上有，这次 daemon 还没打开过</td>
         <td><code>dormant</code></td>
       </tr>
@@ -673,7 +673,7 @@ flowchart TB
   <p>
     <code>acp_host.rs</code> 里两个函数，分别回答「有没有这个对话」和「它在不在跑」：
   </p>
-  <pre><code>/// 注册表里有就直接给；没有但在侧栏菜单里，请桌面打开，等槽出现（最多 15 秒）。
+  <pre><code>/// 注册表里有就直接给；没有但在工作区目录里，请桌面打开，等槽出现（最多 15 秒）。
 fn conversation_slot(id) -&gt; Result&lt;Slot, String&gt;
 
 /// 在 conversation_slot 之上，挂起的再唤醒，等 runtime 就绪。

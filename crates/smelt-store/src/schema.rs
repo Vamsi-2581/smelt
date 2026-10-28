@@ -14,7 +14,7 @@
 //! 不要再引入通用的 key/value 或 JSON 文档表。v17 及更早版本的形状以冻结的
 //! `V17_SCHEMA` 为准，旧版本的迁移和形状校验都从它推导。
 
-pub const TABLES: [&str; 43] = [
+pub const TABLES: [&str; 40] = [
     "acp_config_value",
     "acp_detail",
     "acp_launch_env",
@@ -55,9 +55,6 @@ pub const TABLES: [&str; 43] = [
     "terminal_theme",
     "terminal_theme_palette",
     "workspace_catalog",
-    "workspace_menu",
-    "workspace_menu_project",
-    "workspace_menu_session",
 ];
 
 /// v17 的表清单。v18 去掉了通用 `kv`，各领域改成按字段建表。
@@ -242,7 +239,6 @@ CREATE TABLE project (
 
 CREATE TABLE session_group (
   id TEXT PRIMARY KEY,
-  project_root TEXT REFERENCES project(root) ON DELETE SET NULL,
   position INTEGER NOT NULL UNIQUE CHECK (position >= 0),
   custom_title TEXT,
   last_updated_at INTEGER NOT NULL DEFAULT 0
@@ -536,33 +532,6 @@ CREATE TABLE quota_cache_window (
   reset_after_seconds INTEGER,
   PRIMARY KEY (provider_id, position)
 ) WITHOUT ROWID;
-CREATE TABLE workspace_menu (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  version INTEGER NOT NULL CHECK (version >= 0),
-  revision INTEGER NOT NULL CHECK (revision >= 0),
-  source_id TEXT NOT NULL,
-  source_revision INTEGER NOT NULL CHECK (source_revision >= 0)
-);
-CREATE TABLE workspace_menu_project (
-  position INTEGER PRIMARY KEY CHECK (position >= 0),
-  root TEXT NOT NULL,
-  title TEXT NOT NULL,
-  display_order INTEGER NOT NULL CHECK (display_order >= 0)
-);
-CREATE TABLE workspace_menu_session (
-  position INTEGER PRIMARY KEY CHECK (position >= 0),
-  id TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK (kind IN ('terminal', 'acp')),
-  title TEXT NOT NULL,
-  custom_title INTEGER NOT NULL CHECK (custom_title IN (0, 1)),
-  cwd TEXT,
-  project_root TEXT,
-  project_title TEXT,
-  project_order INTEGER NOT NULL CHECK (project_order >= 0),
-  session_order INTEGER NOT NULL CHECK (session_order >= 0),
-  leaf_order INTEGER NOT NULL CHECK (leaf_order >= 0),
-  agent TEXT
-);
 ";
 
 /// v17 的完整结构，冻结不再改。v17 之前各版本的迁移和形状校验都以它为准：
@@ -1691,4 +1660,92 @@ ALTER TABLE published_session ADD COLUMN cli_exited INTEGER NOT NULL DEFAULT 0 C
 pub const MIGRATE_V25_TO_V26: &str = "
 ALTER TABLE workspace_catalog DROP COLUMN writer_seq;
 ALTER TABLE workspace_catalog DROP COLUMN writer;
+";
+
+/// v26 → v27：会话组不再存所属项目（客户端按 cwd 现算），桌面发布的侧栏菜单表删掉
+/// （手机和守护都改读工作区目录）。
+///
+/// `project_root` 带外键，只能重建 `session_group`；它被 `session` 级联引用，一路往下还有
+/// `acp_detail`、`acp_launch_env`、`acp_config_value`。外键开着时改名会把子表的引用一起
+/// 改到旧表上，删旧表就会把会话级联删光，所以整串一起改名、按原样新建、从父到子拷数据、
+/// 从子到父删旧表：旧表只被旧表引用，删的时候已经没有子行可级联。
+pub const MIGRATE_V26_TO_V27: &str = "
+DROP INDEX session_group_position_idx;
+ALTER TABLE acp_config_value RENAME TO acp_config_value_v26;
+ALTER TABLE acp_launch_env RENAME TO acp_launch_env_v26;
+ALTER TABLE acp_detail RENAME TO acp_detail_v26;
+ALTER TABLE session RENAME TO session_v26;
+ALTER TABLE session_group RENAME TO session_group_v26;
+CREATE TABLE session_group (
+  id TEXT PRIMARY KEY,
+  position INTEGER NOT NULL UNIQUE CHECK (position >= 0),
+  custom_title TEXT,
+  last_updated_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE session (
+  id TEXT PRIMARY KEY,
+  group_id TEXT NOT NULL REFERENCES session_group(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('terminal', 'acp')),
+  cwd TEXT,
+  custom_title TEXT,
+  launch_label TEXT,
+  launch_command TEXT,
+  position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0)
+);
+CREATE UNIQUE INDEX session_group_position_idx ON session(group_id, position);
+CREATE TABLE acp_detail (
+  session_id TEXT PRIMARY KEY REFERENCES session(id) ON DELETE CASCADE,
+  agent TEXT NOT NULL,
+  profile_id TEXT,
+  history_session_id TEXT,
+  launch_command TEXT NOT NULL,
+  refresh_launch_from_settings INTEGER NOT NULL DEFAULT 0
+    CHECK (refresh_launch_from_settings IN (0, 1)),
+  pending_prompt TEXT,
+  pending_delivery_id TEXT,
+  agent_definition_id TEXT,
+  automation_id TEXT,
+  binding_automation_run_id TEXT,
+  pending_agent_preset TEXT,
+  session_title TEXT
+);
+CREATE TABLE acp_launch_env (
+  session_id TEXT NOT NULL REFERENCES acp_detail(session_id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  value TEXT NOT NULL,
+  PRIMARY KEY (session_id, name)
+) WITHOUT ROWID;
+CREATE TABLE acp_config_value (
+  session_id TEXT NOT NULL REFERENCES acp_detail(session_id) ON DELETE CASCADE,
+  position INTEGER NOT NULL CHECK (position >= 0),
+  config_id TEXT NOT NULL,
+  value_id TEXT NOT NULL,
+  PRIMARY KEY (session_id, position)
+) WITHOUT ROWID;
+INSERT INTO session_group(id, position, custom_title, last_updated_at)
+  SELECT id, position, custom_title, last_updated_at FROM session_group_v26;
+INSERT INTO session(id, group_id, kind, cwd, custom_title, launch_label, launch_command, position)
+  SELECT id, group_id, kind, cwd, custom_title, launch_label, launch_command, position
+  FROM session_v26;
+INSERT INTO acp_detail(
+  session_id, agent, profile_id, history_session_id, launch_command,
+  refresh_launch_from_settings, pending_prompt, pending_delivery_id, agent_definition_id,
+  automation_id, binding_automation_run_id, pending_agent_preset, session_title
+)
+  SELECT session_id, agent, profile_id, history_session_id, launch_command,
+    refresh_launch_from_settings, pending_prompt, pending_delivery_id, agent_definition_id,
+    automation_id, binding_automation_run_id, pending_agent_preset, session_title
+  FROM acp_detail_v26;
+INSERT INTO acp_launch_env(session_id, name, value)
+  SELECT session_id, name, value FROM acp_launch_env_v26;
+INSERT INTO acp_config_value(session_id, position, config_id, value_id)
+  SELECT session_id, position, config_id, value_id FROM acp_config_value_v26;
+DROP TABLE acp_config_value_v26;
+DROP TABLE acp_launch_env_v26;
+DROP TABLE acp_detail_v26;
+DROP TABLE session_v26;
+DROP TABLE session_group_v26;
+DROP TABLE workspace_menu_session;
+DROP TABLE workspace_menu_project;
+DROP TABLE workspace_menu;
 ";

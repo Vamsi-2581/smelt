@@ -42,11 +42,10 @@ pub use snapshots::{
     AgentDefinitionRecord, AgentProfileRecord, AgentUiSnapshot, HistoryTitleRecord,
     HistoryTitleSnapshot, LaunchEntryRecord, LaunchSnapshot, MemoryMetaSnapshot,
     MemorySettingsRecord, MemoryTrust, MemoryUsageRecord, PairedDevice, PublishedSessionRecord,
-    PublishedSessionSnapshot, PublishedWorkspaceMenuSnapshot, QuotaCacheQuota, QuotaCacheSnapshot,
+    PublishedSessionSnapshot, QuotaCacheQuota, QuotaCacheSnapshot,
     QuotaCacheStatusRecord, QuotaCacheWindowRecord, RemoteAcpSessionRecord, RemoteConfigSnapshot,
     RemoteSessionCatalogSnapshot, RemoteTerminalSessionRecord, TerminalThemeSnapshot,
-    WorkspaceAcpRecord, WorkspaceDirectoryCommit, WorkspaceMenuProjectRecord,
-    WorkspaceMenuSessionRecord, WorkspaceSessionRecord, WorkspaceSnapshot,
+    WorkspaceAcpRecord, WorkspaceDirectoryCommit, WorkspaceSessionRecord, WorkspaceSnapshot,
     WorkspaceTerminalRecord,
 };
 
@@ -59,7 +58,7 @@ pub fn memory_scope_for_agent(agent_definition_id: &str) -> String {
 
 /// 智能体记忆元数据的 scope：跨智能体的用户全局层。
 pub const USER_MEMORY_SCOPE: &str = "user";
-pub const STORE_SCHEMA_VERSION: u32 = 26;
+pub const STORE_SCHEMA_VERSION: u32 = 27;
 
 /// 主库文件与 WAL sidecar 的存在情况。
 ///
@@ -625,19 +624,6 @@ impl Store {
 
     pub fn put_auto_model_providers(&self, providers: &[String]) -> Result<(), StoreError> {
         imp::put_auto_model_providers(&self.backend, providers)
-    }
-
-    pub fn get_workspace_menu_snapshot(
-        &self,
-    ) -> Result<Option<PublishedWorkspaceMenuSnapshot>, StoreError> {
-        imp::get_workspace_menu_snapshot(&self.backend)
-    }
-
-    pub fn put_workspace_menu_snapshot(
-        &self,
-        snapshot: &PublishedWorkspaceMenuSnapshot,
-    ) -> Result<(), StoreError> {
-        imp::put_workspace_menu_snapshot(&self.backend, snapshot)
     }
 }
 
@@ -1537,23 +1523,6 @@ mod imp {
         put_config(backend, snapshot, crate::config::write_quota_cache_snapshot)
     }
 
-    pub(super) fn get_workspace_menu_snapshot(
-        backend: &Backend,
-    ) -> Result<Option<super::PublishedWorkspaceMenuSnapshot>, StoreError> {
-        get_config(backend, crate::config::read_workspace_menu_snapshot)
-    }
-
-    pub(super) fn put_workspace_menu_snapshot(
-        backend: &Backend,
-        snapshot: &super::PublishedWorkspaceMenuSnapshot,
-    ) -> Result<(), StoreError> {
-        put_config(
-            backend,
-            snapshot,
-            crate::config::write_workspace_menu_snapshot,
-        )
-    }
-
     pub(super) fn retain_automation_run_transcripts(
         backend: &Backend,
         keep: &HashSet<String>,
@@ -1858,6 +1827,17 @@ mod imp {
                 }
             }
             transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            transaction.commit()?;
+            return Ok(());
+        }
+        if current == 26 {
+            apply_v27_drop_derived_project_and_menu(&transaction)?;
+            transaction.pragma_update(None, "user_version", STORE_SCHEMA_VERSION)?;
+            // 没有冻结的 v26 形状：重建完会话那串表、删完菜单表后与当前形状逐字一致，就说明
+            // 原来正是 v26。
+            if !schema_matches_current(&transaction)? {
+                return Err(unrecognized_schema_error(current));
+            }
             transaction.commit()?;
             return Ok(());
         }
@@ -2322,6 +2302,19 @@ mod imp {
         {
             transaction.execute_batch(crate::schema::MIGRATE_V25_TO_V26)?;
         }
+        apply_v27_drop_derived_project_and_menu(transaction)
+    }
+
+    /// v27 删掉会话组上存的所属项目和桌面发布的侧栏菜单表。已经没有 `project_root` 列的库跳过。
+    fn apply_v27_drop_derived_project_and_menu(
+        transaction: &rusqlite::Transaction<'_>,
+    ) -> Result<(), StoreError> {
+        if table_columns(transaction, "session_group")?
+            .iter()
+            .any(|column| column == "project_root")
+        {
+            transaction.execute_batch(crate::schema::MIGRATE_V26_TO_V27)?;
+        }
         Ok(())
     }
 
@@ -2771,7 +2764,7 @@ mod imp {
             (&[], &["root", "position"])
         };
         // v22 起布局树归客户端：没有 layout_node，会话多一列 `position`，会话组去掉
-        // `active_session_id`。v17 及更早的形状里都还在。
+        // `active_session_id`。v27 起会话组不再存 `project_root`。v17 及更早的形状里都还在。
         let (layout_node_columns, session_columns, session_group_columns): (
             &[&str],
             &[&str],
@@ -2819,13 +2812,7 @@ mod imp {
                     "launch_command",
                     "position",
                 ],
-                &[
-                    "id",
-                    "project_root",
-                    "position",
-                    "custom_title",
-                    "last_updated_at",
-                ],
+                &["id", "position", "custom_title", "last_updated_at"],
             )
         };
         Ok(table_columns(connection, "history_title")?
@@ -3651,17 +3638,6 @@ mod imp {
     pub(super) fn put_quota_cache_snapshot(
         _backend: &Backend,
         _snapshot: &super::QuotaCacheSnapshot,
-    ) -> Result<(), StoreError> {
-        unsupported()
-    }
-    pub(super) fn get_workspace_menu_snapshot(
-        _backend: &Backend,
-    ) -> Result<Option<super::PublishedWorkspaceMenuSnapshot>, StoreError> {
-        unsupported()
-    }
-    pub(super) fn put_workspace_menu_snapshot(
-        _backend: &Backend,
-        _snapshot: &super::PublishedWorkspaceMenuSnapshot,
     ) -> Result<(), StoreError> {
         unsupported()
     }
@@ -4499,11 +4475,6 @@ mod tests {
                     },
                 ]
             );
-            let menu = store.get_workspace_menu_snapshot().unwrap().unwrap();
-            assert_eq!((menu.version, menu.revision), (2, 12132));
-            assert_eq!(menu.projects[0].root, "/repo");
-            assert_eq!(menu.sessions[0].title, "你知道 Godot 吗");
-            assert_eq!(menu.sessions[0].kind, "terminal");
             assert_eq!(store.get_launch_snapshot().unwrap().unwrap().version, 14);
             let prefs = store.get_agent_ui_snapshot().unwrap().unwrap();
             assert!(prefs.agent_hooks_enabled);
@@ -4914,6 +4885,7 @@ CREATE TABLE published_session (
         connection
             .execute_batch(crate::schema::CREATE_SCHEMA)
             .unwrap();
+        connection.execute_batch(V26_PROJECT_ROOT_AND_MENU).unwrap();
         connection.execute_batch(V25_WORKSPACE_CATALOG_WRITER).unwrap();
         connection.execute_batch(V24_PUBLISHED_SESSION).unwrap();
         // 再把 auto_model_provider 换回带 harness 列的形状，就是一个 v23 库。
@@ -6683,6 +6655,39 @@ ALTER TABLE workspace_catalog ADD COLUMN writer TEXT;
 ALTER TABLE workspace_catalog ADD COLUMN writer_seq INTEGER;
 ";
 
+    /// v26 及更早还在、v27 删掉的：会话组上存的所属项目，和桌面发布的侧栏菜单三张表。
+    /// 用当前结构的库退回旧版本做夹具时补上（`project_root` 只能补在最后一列）。
+    const V26_PROJECT_ROOT_AND_MENU: &str = "
+ALTER TABLE session_group ADD COLUMN project_root TEXT REFERENCES project(root) ON DELETE SET NULL;
+CREATE TABLE workspace_menu (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  version INTEGER NOT NULL CHECK (version >= 0),
+  revision INTEGER NOT NULL CHECK (revision >= 0),
+  source_id TEXT NOT NULL,
+  source_revision INTEGER NOT NULL CHECK (source_revision >= 0)
+);
+CREATE TABLE workspace_menu_project (
+  position INTEGER PRIMARY KEY CHECK (position >= 0),
+  root TEXT NOT NULL,
+  title TEXT NOT NULL,
+  display_order INTEGER NOT NULL CHECK (display_order >= 0)
+);
+CREATE TABLE workspace_menu_session (
+  position INTEGER PRIMARY KEY CHECK (position >= 0),
+  id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('terminal', 'acp')),
+  title TEXT NOT NULL,
+  custom_title INTEGER NOT NULL CHECK (custom_title IN (0, 1)),
+  cwd TEXT,
+  project_root TEXT,
+  project_title TEXT,
+  project_order INTEGER NOT NULL CHECK (project_order >= 0),
+  session_order INTEGER NOT NULL CHECK (session_order >= 0),
+  leaf_order INTEGER NOT NULL CHECK (leaf_order >= 0),
+  agent TEXT
+);
+";
+
     /// v18、v19 都有、v20 删掉的 worktree 继承两张表，原样照 v18 的建表语句。
     /// 用当前结构的库退回旧版本做夹具时补上。
     const V19_WORKTREE_INHERIT_TABLES: &str = "
@@ -6757,6 +6762,78 @@ CREATE TABLE worktree_inherit_skip_pattern (
             normalized_schema(&path),
             normalized_schema(&fresh),
             "从 v18 升上来的库要和新建的库一个形状"
+        );
+    }
+
+    /// v26 的库：会话组上存的所属项目和侧栏菜单表删掉。会话那一串表要整串重建，
+    /// 对话、会话、ACP 明细、启动环境、配置值一行都不能少，外键也要接到新表上。
+    #[test]
+    fn migrates_v26_dropping_project_root_and_menu_without_losing_sessions() {
+        let dir = temp_dir("migrate-v26-project-root");
+        let path = dir.join(DATABASE_FILE_NAME);
+        drop(Store::open_or_create(&path).unwrap());
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "{V26_PROJECT_ROOT_AND_MENU}
+                 INSERT INTO project(root, position) VALUES ('/repo', 0);
+                 INSERT INTO session_group(id, position, custom_title, last_updated_at, project_root)
+                 VALUES ('g-term', 0, '终端', 7, '/repo'), ('g-acp', 1, NULL, 8, NULL);
+                 INSERT INTO session(id, group_id, kind, cwd, position) VALUES
+                   ('t1', 'g-term', 'terminal', '/repo', 0),
+                   ('t2', 'g-term', 'terminal', '/repo/sub', 1),
+                   ('a1', 'g-acp', 'acp', '/repo', 0);
+                 INSERT INTO acp_detail(session_id, agent, launch_command, session_title)
+                 VALUES ('a1', 'pi', 'smelt-pi', '标题');
+                 INSERT INTO acp_launch_env(session_id, name, value) VALUES ('a1', 'K', 'v');
+                 INSERT INTO acp_config_value(session_id, position, config_id, value_id)
+                 VALUES ('a1', 0, 'model', 'm');
+                 INSERT INTO workspace_menu(id, version, revision, source_id, source_revision)
+                 VALUES (1, 2, 3, 'desktop', 4);"
+            ))
+            .unwrap();
+        connection.pragma_update(None, "user_version", 26).unwrap();
+        drop(connection);
+
+        drop(Store::open_or_create(&path).unwrap());
+        assert_eq!(Store::schema_version(&path), Some(STORE_SCHEMA_VERSION));
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let rows = |sql: &str| -> Vec<String> {
+            connection
+                .prepare(sql)
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            rows("SELECT id || ':' || position || ':' || COALESCE(custom_title, '') FROM session_group ORDER BY position"),
+            ["g-term:0:终端", "g-acp:1:"]
+        );
+        assert_eq!(
+            rows("SELECT id || ':' || group_id || ':' || position FROM session ORDER BY id"),
+            ["a1:g-acp:0", "t1:g-term:0", "t2:g-term:1"]
+        );
+        assert_eq!(rows("SELECT session_title FROM acp_detail"), ["标题"]);
+        assert_eq!(rows("SELECT name || '=' || value FROM acp_launch_env"), ["K=v"]);
+        assert_eq!(rows("SELECT config_id || '=' || value_id FROM acp_config_value"), ["model=m"]);
+        assert!(rows("PRAGMA foreign_key_check").is_empty());
+        // 外键接在新表上：删一段对话，它的会话和 ACP 明细跟着走。
+        connection.pragma_update(None, "foreign_keys", "ON").unwrap();
+        connection
+            .execute("DELETE FROM session_group WHERE id = 'g-acp'", [])
+            .unwrap();
+        assert_eq!(rows("SELECT id FROM session ORDER BY id"), ["t1", "t2"]);
+        assert!(rows("SELECT session_id FROM acp_launch_env").is_empty());
+        drop(connection);
+
+        let fresh = dir.join("fresh.sqlite3");
+        drop(Store::open_or_create(&fresh).unwrap());
+        assert_eq!(
+            normalized_schema(&path),
+            normalized_schema(&fresh),
+            "从 v26 升上来的库要和新建的库一个形状"
         );
     }
 
@@ -7013,7 +7090,8 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
             let connection = rusqlite::Connection::open(&path).unwrap();
             connection
                 .execute_batch(&format!(
-                    "{V21_SESSION_TABLES}
+                    "{V26_PROJECT_ROOT_AND_MENU}
+                     {V21_SESSION_TABLES}
                      {layout_node_table}
                      {V25_WORKSPACE_CATALOG_WRITER}
                      BEGIN;
@@ -7136,33 +7214,6 @@ VALUES ('g0:0', 'group:0:term-1', NULL, 0, 'split', 'horizontal', NULL, NULL),
         };
         store.put_quota_cache_snapshot(&quota).unwrap();
         assert_eq!(store.get_quota_cache_snapshot().unwrap(), Some(quota));
-
-        let menu = PublishedWorkspaceMenuSnapshot {
-            version: 2,
-            revision: 12,
-            source_id: "desktop".into(),
-            source_revision: 3,
-            projects: vec![WorkspaceMenuProjectRecord {
-                root: "/repo".into(),
-                title: "repo".into(),
-                order: 0,
-            }],
-            sessions: vec![WorkspaceMenuSessionRecord {
-                id: "s1".into(),
-                kind: "acp".into(),
-                title: "对话".into(),
-                custom_title: true,
-                cwd: Some("/repo".into()),
-                project_root: Some("/repo".into()),
-                project_title: Some("repo".into()),
-                project_order: 0,
-                session_order: 1,
-                leaf_order: 0,
-                agent: Some("pi".into()),
-            }],
-        };
-        store.put_workspace_menu_snapshot(&menu).unwrap();
-        assert_eq!(store.get_workspace_menu_snapshot().unwrap(), Some(menu));
 
         assert_eq!(
             store.memory_settings().unwrap(),

@@ -210,6 +210,7 @@ fn connection_event(state: ConnectionState) -> ConnectionEvent {
         endpoint_id: Some(ENDPOINT.to_string()),
         link: None,
         error: None,
+        os: None,
     }
 }
 

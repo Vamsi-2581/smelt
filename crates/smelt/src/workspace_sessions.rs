@@ -714,7 +714,7 @@ impl Workspace {
         }
     }
 
-    /// 某个 cwd 归属这个运行时里哪个已打开项目（见 project_root_of）。
+    /// 某个 cwd 归属这个运行时里哪个已打开项目（见 `project_root_of`）。
     pub(crate) fn project_root_for_cwd(
         &self,
         runtime: &crate::runtimes::RuntimeKey,
@@ -726,6 +726,7 @@ impl Workspace {
             &self.space(runtime)?.projects,
             cwd,
         )
+        .map(str::to_string)
     }
 
     /// 确保一个会话 cwd 背后的项目是实体，而不是只靠 `project_groups` 临时推导出来的
@@ -756,7 +757,7 @@ impl Workspace {
     /// 的（旧会话、临时目录）仍按自己的 cwd 自建隐式组接在后面。
     ///
     /// 分组身份一律用 **root 路径**：末段同名的两个目录是两个项目，各占一行、会话不混。
-    /// 显示名重复时由 disambiguate_labels 补父目录段区分。
+    /// 显示名重复时由 `project_labels` 补父目录段区分。
     ///
     /// 侧栏渲染和拖拽排序共用同一份算法，避免两处各算一遍、行为跑偏。
     pub(crate) fn project_groups(
@@ -779,7 +780,7 @@ impl Workspace {
             groups.push(ProjectGroup {
                 runtime: runtime.clone(),
                 root: root.clone(),
-                label: crate::project_name_for_cwd(style, root),
+                label: String::new(),
                 sessions: Vec::new(),
             });
         }
@@ -796,14 +797,20 @@ impl Workspace {
                 Some(g) => g.sessions.push(ix),
                 None => groups.push(ProjectGroup {
                     runtime: runtime.clone(),
-                    label: crate::project_name_for_cwd(style, &root),
+                    label: String::new(),
                     root,
                     sessions: vec![ix],
                 }),
             }
         }
 
-        disambiguate_labels(style, &mut groups);
+        let labels = project_labels(
+            style,
+            &groups.iter().map(|g| g.root.as_str()).collect::<Vec<_>>(),
+        );
+        for (group, label) in groups.iter_mut().zip(labels) {
+            group.label = label;
+        }
         groups
     }
 
@@ -1681,111 +1688,6 @@ impl Workspace {
             });
         })
         .detach();
-    }
-
-    /// 把 PC 当前真实侧栏投影成无 UI 的共享菜单。项目标签使用 project_groups 的
-    /// 消歧结果，会话标题直接使用 Session::title，因此移动端无需复制任何显示规则。
-    /// 一个运行时那段侧栏的跨端菜单投影，发给那个运行时，连它的手机按它显示。
-    pub(crate) fn workspace_menu_snapshot(
-        &self,
-        runtime: &RuntimeKey,
-        cx: &App,
-    ) -> smelt_model::workspace_menu::WorkspaceMenuSnapshot {
-        use smelt_model::workspace_menu::{
-            WorkspaceMenuProject, WorkspaceMenuSession, WorkspaceMenuSessionKind,
-            WorkspaceMenuSnapshot,
-        };
-
-        let groups = self.project_groups(runtime, cx);
-        let projects = groups
-            .iter()
-            .enumerate()
-            .map(|(order, group)| WorkspaceMenuProject {
-                root: group.root.clone(),
-                title: group.label.clone(),
-                order: order.min(u32::MAX as usize) as u32,
-            })
-            .collect();
-        let mut membership = vec![None; self.sessions.len()];
-        for (project_order, group) in groups.iter().enumerate() {
-            for &session_index in &group.sessions {
-                if let Some(slot) = membership.get_mut(session_index) {
-                    *slot = Some((project_order, group));
-                }
-            }
-        }
-
-        let sessions = self
-            .sessions
-            .iter()
-            .enumerate()
-            .filter(|(_, session)| session.runtime(cx).key() == runtime)
-            .flat_map(|(session_order, session)| {
-                let project = membership.get(session_order).and_then(|value| *value);
-                let project_root = project.map(|(_, group)| group.root.clone());
-                let project_title = project.map(|(_, group)| group.label.clone());
-                let project_order = project
-                    .map(|(order, _)| order.min(u32::MAX as usize) as u32)
-                    .unwrap_or(u32::MAX);
-                let session_order = session_order.min(u32::MAX as usize) as u32;
-
-                match &session.kind {
-                    SessionKind::Term { .. } => {
-                        let leaves = session.term_leaves();
-                        let single_pane = leaves.len() == 1;
-                        leaves
-                            .into_iter()
-                            .enumerate()
-                            .map(|(leaf_order, pane)| WorkspaceMenuSession {
-                                id: pane.read(cx).session_id().to_string(),
-                                kind: WorkspaceMenuSessionKind::Terminal,
-                                title: if single_pane {
-                                    session.title(cx)
-                                } else {
-                                    pane_title(&pane, cx)
-                                },
-                                custom_title: if single_pane {
-                                    session.custom_title.is_some()
-                                        || pane.read(cx).custom_title().is_some()
-                                } else {
-                                    pane.read(cx).custom_title().is_some()
-                                },
-                                cwd: pane.read(cx).cwd(),
-                                project_root: project_root.clone(),
-                                project_title: project_title.clone(),
-                                project_order,
-                                session_order,
-                                leaf_order: leaf_order.min(u32::MAX as usize) as u32,
-                                agent: pane_provider_kind(&pane, cx)
-                                    .map(|provider| provider.id().to_string()),
-                            })
-                            .collect::<Vec<_>>()
-                    }
-                    SessionKind::Conversation(view) => {
-                        let view = view.read(cx);
-                        vec![WorkspaceMenuSession {
-                            id: view.session_id().to_string(),
-                            kind: WorkspaceMenuSessionKind::Acp,
-                            title: session.title(cx),
-                            custom_title: session.custom_title.is_some(),
-                            cwd: view.cwd(),
-                            project_root,
-                            project_title,
-                            project_order,
-                            session_order,
-                            leaf_order: 0,
-                            agent: Some(view.agent_kind().id().to_string()),
-                        }]
-                    }
-                }
-            })
-            .collect();
-
-        WorkspaceMenuSnapshot::current(projects, sessions).with_source(
-            self.workspace_menu_source_id.clone(),
-            self.next_workspace_menu_source_revision
-                .fetch_add(1, Ordering::Relaxed),
-        )
     }
 
     /// 「+」新建会话：继承当前会话的运行时和活动终端的目录。

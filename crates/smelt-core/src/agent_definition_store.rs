@@ -112,7 +112,7 @@ pub fn load_agent_definitions() -> Vec<AgentDefinition> {
 /// 存下来的绑定，不能从 cwd 反推——项目路径本身说明不了是哪个智能体。
 ///
 /// 键是 daemon 的会话 id（存档里的 `acp.sid`），跟 `RemoteSessionRecord.id`、
-/// `WorkspaceMenuSession.id` 同一口径，调用方可以直接查。
+/// 工作区目录里的 `acp.sid` 同一口径，调用方可以直接查。
 pub fn load_session_agent_definition_ids() -> BTreeMap<String, String> {
     let Ok(store) = crate::sqlite_state::default_sqlite_store() else {
         return BTreeMap::new();

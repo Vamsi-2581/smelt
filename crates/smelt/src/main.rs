@@ -97,7 +97,7 @@ use gpui_component::input::{
 use gpui_component::resizable::ResizableState;
 use gpui_component::slider::SliderState;
 use gpui_component::*;
-use smelt_client::runtime_path::PathStyle;
+use smelt_model::workspace_directory::{project_labels, project_root_of};
 use terminal_view::TerminalView;
 
 use file_tree::{DeleteFileTarget, OpenFile, SearchState};
@@ -1845,81 +1845,6 @@ pub(crate) fn sidebar_groups(
     }
 }
 
-/// 显示名撞车时往前补 `extra` 段父目录：`/a/b/smelt` + 1 → `b · smelt`。
-/// base 是这一组本来的显示名（目录末段）。root 按那台机器的系统切（`style`）。
-fn label_with_parents(style: PathStyle, root: &str, base: &str, extra: usize) -> String {
-    if extra == 0 {
-        return base.to_string();
-    }
-    let (separators, joiner): (&[char], &str) = match style {
-        PathStyle::Posix => (&['/'], "/"),
-        PathStyle::Windows => (&['\\', '/'], "\\"),
-    };
-    let segs: Vec<&str> = root
-        .split(separators)
-        .filter(|s| !s.is_empty())
-        .collect();
-    let end = segs.len().saturating_sub(1); // base 已经代表末段
-    let start = end.saturating_sub(extra);
-    if start >= end {
-        return base.to_string();
-    }
-    format!("{} · {}", segs[start..end].join(joiner), base)
-}
-
-/// 给重名的分组逐步补父目录段，直到互不相同（或路径已经补到顶）。分组都在同一个运行时
-/// 上，路径按它的系统切（`style`）。
-fn disambiguate_labels(style: PathStyle, groups: &mut [ProjectGroup]) {
-    let bases: Vec<String> = groups.iter().map(|group| group.label.clone()).collect();
-    let mut extra = vec![0usize; groups.len()];
-    // 每轮给所有重名组多补一段；路径最深也就那么几段，8 轮足够收敛。
-    for _ in 0..8 {
-        let mut dup: Vec<usize> = Vec::new();
-        for i in 0..groups.len() {
-            if groups
-                .iter()
-                .enumerate()
-                .any(|(j, g)| j != i && g.label == groups[i].label)
-            {
-                dup.push(i);
-            }
-        }
-        if dup.is_empty() {
-            return;
-        }
-        let mut changed = false;
-        for i in dup {
-            let next = extra[i] + 1;
-            let candidate = label_with_parents(style, &groups[i].root, &bases[i], next);
-            if candidate != groups[i].label {
-                extra[i] = next;
-                groups[i].label = candidate;
-                changed = true;
-            }
-        }
-        // 全都补到路径顶了还重名（真同路径 / 只剩根）→ 认命，别空转。
-        if !changed {
-            return;
-        }
-    }
-}
-
-/// cwd 归属哪个项目根：cwd 就是根、或落在根之下（必须是完整路径段，`/a/bc` 不算
-/// 落在 `/a/b` 下）。多个根都匹配时取最深的那个——`~/dev/a` 和 `~/dev/a/sub` 都打开
-/// 过时，子目录的会话归后者。空 cwd 或谁都不沾 → None（调用方按 cwd 自建隐式组）。
-/// 路径是运行时那台机器上的，按它的系统比（`style`）。
-fn project_root_of(style: PathStyle, projects: &[String], cwd: &str) -> Option<String> {
-    if cwd.is_empty() {
-        return None;
-    }
-    projects
-        .iter()
-        .map(|p| p.trim_end_matches('/'))
-        .filter(|root| !root.is_empty() && style.starts_with(cwd, root))
-        .max_by_key(|root| root.len())
-        .map(str::to_string)
-}
-
 type IndexedSessionState = (usize, SessionState);
 
 fn split_indexed_restore_queue(
@@ -2769,10 +2694,6 @@ struct Workspace {
     /// 会被淘汰，不能在最终快照之后反向覆盖。
     ws_snapshot_epoch: u64,
     ws_snapshot_finalizing: bool,
-    /// 每个桌面 Workspace 是菜单快照的唯一发布者；source revision 用来拒绝同一发布者
-    /// 因重连、超时重试而迟到的旧菜单。
-    workspace_menu_source_id: String,
-    next_workspace_menu_source_revision: AtomicU64,
 }
 
 #[cfg(any(target_os = "macos", windows))]
@@ -2955,8 +2876,6 @@ impl Workspace {
             startup_active_session,
             ws_snapshot_epoch: 0,
             ws_snapshot_finalizing: false,
-            workspace_menu_source_id: uuid::Uuid::new_v4().to_string(),
-            next_workspace_menu_source_revision: AtomicU64::new(1),
             close_confirm: None,
             desktop: None,
             spaces: {
@@ -4207,7 +4126,7 @@ fn command_program(command: &str) -> Option<&str> {
         {
             continue;
         }
-        return smelt_client::runtime_path::PathStyle::LOCAL.file_name(token);
+        return smelt_model::runtime_path::PathStyle::LOCAL.file_name(token);
     }
     None
 }
@@ -4275,13 +4194,6 @@ fn current_dir() -> Option<String> {
     std::env::current_dir()
         .ok()
         .and_then(|p| p.to_str().map(String::from))
-}
-
-/// cwd → 侧栏项目分组显示名，统一取目录末段，不为特定 cwd 做额外分支。cwd 是运行时那台
-/// 机器上的路径，按它的系统切（`style`）。
-/// Workspace::project_groups（侧栏渲染）和拖拽排序（找会话/插入点归属的项目）共用。
-fn project_name_for_cwd(style: PathStyle, cwd: &str) -> String {
-    style.file_name(cwd).unwrap_or("项目").to_string()
 }
 
 /// file:// URL → 本地路径（percent 解码，支持中文 / 空格目录名）。
@@ -4837,14 +4749,14 @@ fn main() {
         // 每个运行时一条常驻 subscribe。手机建的会话目录、自动化、外观请求、项目文件
         // 变化这些投影目前只认本机；各运行时都有的是会话状态。
         let daemon_state_rx = runtime_events::start(cx);
-        let current_ws_for_menu_republish = current_ws.clone();
+        let current_ws_for_events = current_ws.clone();
         cx.spawn(async move |cx| {
             while let Ok((runtime, event)) = daemon_state_rx.recv().await {
                 let is_local = runtime == RuntimeKey::Local;
                 // 唤醒要拿窗口去重启对话视图，走 update_in；它不是状态投影，后面不用再看。
                 // 主窗口已经关掉就放弃这次唤醒，不另开一扇。
                 if let terminal::DaemonStateEvent::ConversationWakeRequested { session_id } = &event {
-                    let workspace = current_workspace(&current_ws_for_menu_republish);
+                    let workspace = current_workspace(&current_ws_for_events);
                     if let Some(ws) = workspace {
                         let _ = ws.update_in(cx, |ws, window, cx| {
                             ws.wake_conversation_for_remote(session_id.clone(), window, cx);
@@ -4855,12 +4767,12 @@ fn main() {
                 // 运行时换了进程，它替我们建的项目监听也没了：清空，下次刷新重新登记。
                 if is_local
                     && matches!(event, terminal::DaemonStateEvent::Disconnected)
-                    && let Some(ws) = current_workspace(&current_ws_for_menu_republish)
+                    && let Some(ws) = current_workspace(&current_ws_for_events)
                 {
                     let _ = ws.update(cx, |ws, _| ws.watched_projects.clear());
                 }
                 if let terminal::DaemonStateEvent::ProjectChanged { root } = &event {
-                    if is_local && let Some(ws) = current_workspace(&current_ws_for_menu_republish) {
+                    if is_local && let Some(ws) = current_workspace(&current_ws_for_events) {
                         let root = root.clone();
                         let _ = ws.update(cx, |ws, cx| ws.on_project_changed(root, cx));
                     }
@@ -4868,7 +4780,7 @@ fn main() {
                 }
                 // 记忆在智能体那台机器上，哪台运行时报的就是哪台的。
                 if let terminal::DaemonStateEvent::AgentMemoryChanged { agent_id } = &event {
-                    if let Some(ws) = current_workspace(&current_ws_for_menu_republish) {
+                    if let Some(ws) = current_workspace(&current_ws_for_events) {
                         let _ = ws.update(cx, |ws, cx| {
                             ws.on_agent_memory_changed(&runtime, agent_id.as_deref(), cx)
                         });
@@ -4876,7 +4788,7 @@ fn main() {
                     continue;
                 }
                 // 运行时换了进程，它替我们建的记忆监听也没了；重新订阅上时重取并重新登记。
-                if let Some(ws) = current_workspace(&current_ws_for_menu_republish) {
+                if let Some(ws) = current_workspace(&current_ws_for_events) {
                     match &event {
                         terminal::DaemonStateEvent::Disconnected => {
                             let _ = ws.update(cx, |ws, _| ws.forget_agent_memory_watches(&runtime));
@@ -4940,7 +4852,7 @@ fn main() {
                     match &event {
                         // 刚连上一个运行时：把桌面的菜单和还没发出去的目录命令重新交给它（见下）。
                         terminal::DaemonStateEvent::Snapshot { .. } if !is_local => {
-                            if let Some(ws) = current_workspace(&current_ws_for_menu_republish) {
+                            if let Some(ws) = current_workspace(&current_ws_for_events) {
                                 let _ = ws.update(cx, |ws, cx| ws.save_state(cx));
                             }
                         }
@@ -4961,14 +4873,14 @@ fn main() {
                             // subscribe 的首帧意味着刚连上一个 daemon epoch。把桌面端
                             // 自己持有的最新菜单重新放进同一保存队列，覆盖 daemon 重启时
                             // 从旧 dedicated 文件恢复的副本；source revision 会过滤迟到重发。
-                            if let Some(ws) = current_workspace(&current_ws_for_menu_republish) {
+                            if let Some(ws) = current_workspace(&current_ws_for_events) {
                                 let _ = ws.update(cx, |ws, cx| ws.save_state(cx));
                             }
                             if let Some(automations) = automations {
                                 apply_automation_projection(
                                     automations.clone(),
                                     automation_notifications::AutomationProjectionOrigin::InitialSnapshot,
-                                    &current_ws_for_menu_republish,
+                                    &current_ws_for_events,
                                     cx,
                                 );
                             }
@@ -4980,13 +4892,12 @@ fn main() {
                             apply_automation_projection(
                                 automations.clone(),
                                 automation_notifications::AutomationProjectionOrigin::Incremental,
-                                &current_ws_for_menu_republish,
+                                &current_ws_for_events,
                                 cx,
                             );
                         }
                         terminal::DaemonStateEvent::Update(_) => {}
                         terminal::DaemonStateEvent::Removed { .. } => {}
-                        terminal::DaemonStateEvent::WorkspaceMenu(_) => {}
                         terminal::DaemonStateEvent::Workspace(_) => {}
                         terminal::DaemonStateEvent::ConversationWakeRequested { .. } => {}
                         terminal::DaemonStateEvent::AppearanceChangeRequested { .. } => {}
@@ -5034,7 +4945,6 @@ fn main() {
                             AttentionGlobal::remove_session(&id, cx);
                         }
                         terminal::DaemonStateEvent::RemoteSessions(_) => {}
-                        terminal::DaemonStateEvent::WorkspaceMenu(_) => {}
                         terminal::DaemonStateEvent::Workspace(_) => {}
                         terminal::DaemonStateEvent::Automations(_) => {}
                         terminal::DaemonStateEvent::ConversationWakeRequested { .. } => {}

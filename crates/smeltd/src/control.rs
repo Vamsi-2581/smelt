@@ -24,7 +24,7 @@ use smelt_runtime_client::protocol::control::{
 };
 
 use super::session_catalog::published_session_states;
-use super::{AcpSessions, EventHubHandle, RemoteSessions, Sessions, WorkspaceMenuStore};
+use super::{AcpSessions, EventHubHandle, RemoteSessions, Sessions, WorkspaceDirectoryReader};
 
 fn error_value(
     control_version: u16,
@@ -84,7 +84,7 @@ fn dispatch_control(
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
     remote_sessions: &RemoteSessions,
-    workspace_menu: &WorkspaceMenuStore,
+    workspace_directory: &WorkspaceDirectoryReader,
     automations: &AutomationStore,
     event_hub: &EventHubHandle,
     exe_mtime: u64,
@@ -499,7 +499,7 @@ fn dispatch_control(
                 sessions,
                 acp_sessions,
                 remote_sessions,
-                workspace_menu,
+                workspace_directory,
                 event_hub,
             ) {
                 Ok(result) => success_value(control_version, &request_id, result),
@@ -517,7 +517,7 @@ fn dispatch_control(
                 sessions,
                 acp_sessions,
                 remote_sessions,
-                workspace_menu,
+                workspace_directory,
                 automations,
                 event_hub,
             ) {
@@ -1329,7 +1329,7 @@ pub(crate) fn handle_control<C: ClientSocket>(
     sessions: &Sessions,
     acp_sessions: &AcpSessions,
     remote_sessions: &RemoteSessions,
-    workspace_menu: &WorkspaceMenuStore,
+    workspace_directory: &WorkspaceDirectoryReader,
     automations: &AutomationStore,
     event_hub: &EventHubHandle,
     exe_mtime: u64,
@@ -1341,7 +1341,7 @@ pub(crate) fn handle_control<C: ClientSocket>(
             sessions,
             acp_sessions,
             remote_sessions,
-            workspace_menu,
+            workspace_directory,
             automations,
             event_hub,
             exe_mtime,
@@ -1387,7 +1387,7 @@ mod tests {
             &sessions,
             &acp_sessions,
             &super::super::new_test_remote_sessions(),
-            &super::super::new_test_workspace_menu(),
+            &super::super::new_test_workspace_directory(),
             &automations,
             &event_hub,
             123,
@@ -1436,7 +1436,7 @@ mod tests {
             &sessions,
             &acp_sessions,
             &super::super::new_test_remote_sessions(),
-            &super::super::new_test_workspace_menu(),
+            &super::super::new_test_workspace_directory(),
             &automations,
             &event_hub,
             0,
@@ -1461,7 +1461,7 @@ mod tests {
             &super::super::new_sessions(),
             &super::super::new_test_acp_sessions(),
             &super::super::new_test_remote_sessions(),
-            &super::super::new_test_workspace_menu(),
+            &super::super::new_test_workspace_directory(),
             &smelt_core::automation_store::new_automation_store(),
             &super::super::new_event_hub(),
             0,
@@ -1528,7 +1528,7 @@ mod tests {
             &sessions,
             &acp_sessions,
             &super::super::new_test_remote_sessions(),
-            &super::super::new_test_workspace_menu(),
+            &super::super::new_test_workspace_directory(),
             &automations,
             &event_hub,
             0,
@@ -1564,7 +1564,7 @@ mod tests {
             &sessions,
             &acp_sessions,
             &super::super::new_test_remote_sessions(),
-            &super::super::new_test_workspace_menu(),
+            &super::super::new_test_workspace_directory(),
             &automations,
             &event_hub,
             0,
